@@ -381,50 +381,78 @@ struct Hud::Impl {
     }
   }
 
-  void radar_space(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
-                   double aspect) {
+  // NMS-style system radar: bodies projected onto the ship's horizontal
+  // plane (up on the radar = ship forward), radial distance
+  // log-compressed so the outermost body sits near the rim, constant
+  // icon sizes, and a vertical elevation bar from each icon's plane
+  // point (above the ship plane = bar upward, below = downward).
+  void radar_system(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
+                    const std::vector<RadarBody>& bodies, double aspect) {
     const double cx = kRadarCenterX * aspect;
     radar_chrome(items, cx, aspect);
+    if (bodies.empty()) {
+      return;
+    }
 
-    const Vec3 position = player.position();
     const Vec3 forward = player.forward();
     const Vec3 up = player.up();
     const Vec3 right = sim::cross(forward, up);
-
-    const Vec3 to_body = position * -1.0;  // planet center is the origin
-    const double distance = sim::length(to_body);
-    const Vec3 dir = sim::normalize(to_body);
-    const double fwd_component = sim::dot(dir, forward);
-    double sx = sim::dot(dir, right);
-    double sy = sim::dot(dir, up);
-    if (fwd_component < 0.0) {
-      // Behind: pin to the panel edge in the correct direction.
-      const double len = std::max(1e-6, std::hypot(sx, sy));
-      sx = sx / len;
-      sy = sy / len;
+    // Radar plane basis: the ship's horizontal plane. "Forward" on the
+    // plane is the ship's forward projected into it.
+    Vec3 plane_fwd = forward - up * sim::dot(forward, up);
+    if (sim::length(plane_fwd) < 1e-9) {
+      plane_fwd = sim::cross(up, right);
     }
-    const double planet_r = planet.radius_m.to_double();
-    const double angular = std::asin(std::clamp(planet_r / std::max(distance, planet_r + 1.0),
-                                                0.0, 1.0));
-    const double disc_size =
-        std::clamp(angular / 1.2, 0.06, 1.0) * kRadarHalf * 1.5;
-    const double px = cx + std::clamp(sx, -0.85, 0.85) * kRadarHalf;
-    const double py = kRadarCenterY + std::clamp(sy, -0.85, 0.85) * kRadarHalf;
-    const float dim = fwd_component < 0.0 ? 0.45f : 1.0f;
-    items->push_back(hud_item(disc_mesh, px, py, disc_size, disc_size,
-                              Color{0.35f * dim, 0.65f * dim, 0.45f * dim}, aspect, 0.00015));
-    // Axis marker through the disc (planet axis = +Z north).
-    const Vec3 axis{0.0, 0.0, 1.0};
-    const double ax = sim::dot(axis, right);
-    const double ay = sim::dot(axis, up);
-    const double axis_len = std::max(1e-6, std::hypot(ax, ay));
-    const double nx = ax / axis_len;
-    const double ny = ay / axis_len;
-    // N and S letters at the disc's poles.
-    text_item(items, letter_n, px + nx * disc_size * 0.62, py + ny * disc_size * 0.62 - 0.012,
-              0.0035, Color{1.0f, 0.85f, 0.3f}, aspect, true);
-    text_item(items, letter_s, px - nx * disc_size * 0.62, py - ny * disc_size * 0.62 - 0.012,
-              0.0035, Color{1.0f, 0.85f, 0.3f}, aspect, true);
+    plane_fwd = sim::normalize(plane_fwd);
+    const Vec3 plane_right = sim::normalize(sim::cross(plane_fwd, up));
+
+    // Log compression: the farthest body defines the rim.
+    double max_dist = 1.0;
+    for (const RadarBody& body : bodies) {
+      max_dist = std::max(max_dist, sim::length(body.rel));
+    }
+    constexpr double kNear = 5.0e7;  // meters mapped roughly linearly near the ship
+    const double denom = std::log1p(max_dist / kNear);
+    const double rim = kRadarHalf * 0.82;
+
+    for (const RadarBody& body : bodies) {
+      const double dist = sim::length(body.rel);
+      const double fx = sim::dot(body.rel, plane_right);
+      const double fy = sim::dot(body.rel, plane_fwd);
+      const double fz = sim::dot(body.rel, up);  // above/below the ship plane
+      const double planar = std::max(1.0, std::hypot(fx, fy));
+      const double rho = rim * std::log1p(dist / kNear) / denom;
+      const double base_x = cx + (fx / planar) * rho;
+      const double base_y = kRadarCenterY + (fy / planar) * rho;
+
+      // Elevation bar: signed, log-compressed like the radius.
+      const double bar_span = kRadarHalf * 0.30;
+      double bar = std::log1p(std::abs(fz) / kNear) / denom * bar_span *
+                   (fz < 0.0 ? -1.0 : 1.0);
+      bar = std::clamp(bar, -bar_span, bar_span);
+
+      const double icon = kRadarHalf * 0.085 * body.scale;
+      const Color color{body.color[0], body.color[1], body.color[2]};
+      // Base tick on the plane.
+      items->push_back(hud_item(quad_mesh, base_x, base_y, icon * 0.9, kRadarHalf * 0.014,
+                                Color{color.r * 0.55f, color.g * 0.55f, color.b * 0.55f},
+                                aspect, 0.00014));
+      // Stem from the plane to the icon.
+      if (std::abs(bar) > kRadarHalf * 0.02) {
+        items->push_back(hud_item(quad_mesh, base_x, base_y + bar * 0.5, kRadarHalf * 0.012,
+                                  std::abs(bar),
+                                  Color{color.r * 0.7f, color.g * 0.7f, color.b * 0.7f},
+                                  aspect, 0.00014));
+      }
+      // The body icon, constant size.
+      items->push_back(
+          hud_item(disc_mesh, base_x, base_y + bar, icon, icon, color, aspect, 0.00013));
+      if (body.anchor) {
+        // Ring around the current anchor body.
+        items->push_back(hud_item(ring_mesh, base_x, base_y + bar, icon * 2.0, icon * 2.0,
+                                  Color{1.0f, 0.85f, 0.3f}, aspect, 0.00013));
+      }
+    }
   }
 };
 
@@ -434,7 +462,8 @@ Hud::Hud(Rhi* rhi, const gen::TerrainField* field, const gen::PlanetParams& plan
 Hud::~Hud() = default;
 
 void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
-                double measured_speed_mps, double aspect, int height_px, double dt) {
+                const std::vector<RadarBody>& bodies, double measured_speed_mps,
+                double aspect, int height_px, double dt) {
   Impl& impl = *impl_;
   (void)height_px;
 
@@ -491,7 +520,7 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
     impl.text_item(items, impl.biome_line, kRadarCenterX * aspect, kRadarCenterY - kRadarHalf - 0.06,
                    0.0042, Color{0.9f, 0.9f, 0.7f}, aspect, true);
   } else {
-    impl.radar_space(items, player, aspect);
+    impl.radar_system(items, player, bodies, aspect);
     impl.biome_line.set(impl.rhi, "");
   }
 }

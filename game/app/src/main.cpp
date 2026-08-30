@@ -189,6 +189,78 @@ std::vector<float> orbit_ribbon_vertices(const inf::core::OrbitalElements& eleme
   return vertices;
 }
 
+// The anchor body: the planet whose planet-local frame the world lives in
+// — terrain field, diff overlay, chunk streaming, player physics. Flying
+// between planets re-anchors to the nearest landable body (T0014); each
+// body keeps its own diff file (persistence stays a per-body diff).
+struct Anchor {
+  int slot = 0;
+  inf::gen::BodyHandle keys;
+  inf::gen::PlanetParams planet;
+  double radius = 0.0;
+  std::string diff_path;
+  std::unique_ptr<inf::world::CsgEditStore> edits;
+  std::unique_ptr<inf::gen::TerrainField> field;
+  std::unique_ptr<inf::gen::TerrainSampler> sampler;
+  std::unique_ptr<inf::world::ChunkManager> manager;
+  std::unique_ptr<inf::gen::EffectiveField> effective;
+};
+
+std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* seed_text,
+                                    const inf::gen::StarSystemParams& system, int slot,
+                                    std::optional<inf::gen::PlanetType> forced,
+                                    const char* diff_override) {
+  auto anchor = std::make_unique<Anchor>();
+  anchor->slot = slot;
+  anchor->keys = inf::gen::body_for_slot(seed, slot);
+  anchor->planet =
+      forced.has_value()
+          ? inf::gen::derive_planet_params(anchor->keys.params, forced)
+          : inf::gen::planet_params_for_slot(system, slot, anchor->keys.params);
+  anchor->radius = anchor->planet.radius_m.to_double();
+
+  anchor->diff_path = diff_override != nullptr
+                          ? std::string(diff_override)
+                          : std::string("infinity-") + seed_text + "-s" +
+                                std::to_string(slot) + ".edits";
+  anchor->edits = std::make_unique<inf::world::CsgEditStore>();
+  if (anchor->edits->load(anchor->diff_path)) {
+    std::printf("diff: loaded %zu edits from %s\n", anchor->edits->size(),
+                anchor->diff_path.c_str());
+  }
+
+  anchor->field = std::make_unique<inf::gen::TerrainField>(anchor->keys.entity, anchor->planet);
+  anchor->sampler =
+      std::make_unique<inf::gen::TerrainSampler>(*anchor->field, anchor->edits.get());
+
+  inf::world::ChunkManagerConfig config;
+  const unsigned hardware = std::thread::hardware_concurrency();
+  config.worker_count = hardware > 4 ? (hardware - 2 > 8 ? 8 : hardware - 2) : 2;
+  config.split_factor = 1.5;
+  std::uint8_t max_lod = 8;
+  while ((2.0 * anchor->radius) / static_cast<double>(std::uint64_t{1} << max_lod) > 32.0 &&
+         max_lod < 16) {
+    ++max_lod;
+  }
+  config.max_lod = max_lod;
+  anchor->manager = std::make_unique<inf::world::ChunkManager>(*anchor->sampler, config);
+  anchor->effective =
+      std::make_unique<inf::gen::EffectiveField>(*anchor->field, anchor->edits.get());
+  return anchor;
+}
+
+void save_anchor_edits(const Anchor& anchor) {
+  if (anchor.edits->size() == 0) {
+    return;
+  }
+  if (anchor.edits->save(anchor.diff_path)) {
+    std::printf("diff: saved %zu edits to %s\n", anchor.edits->size(),
+                anchor.diff_path.c_str());
+  } else {
+    std::fprintf(stderr, "diff: FAILED to save %s\n", anchor.diff_path.c_str());
+  }
+}
+
 // Column-major Mat4 * (x, y, z, 1) -> clip space (picking projections).
 std::array<double, 4> project_point(const Mat4& m, const RVec3& v) {
   std::array<double, 4> clip{};
@@ -259,7 +331,6 @@ int main(int argc, char** argv) {
   const inf::gen::StarSystemParams system =
       inf::gen::generate_system(inf::gen::default_system_key(*seed));
   const int home_slot = inf::gen::default_landable_slot(system);
-  const inf::gen::BodyHandle body = inf::gen::body_for_slot(*seed, home_slot);
 
   std::optional<inf::gen::PlanetType> forced;
   if (type_text != nullptr) {
@@ -270,41 +341,18 @@ int main(int argc, char** argv) {
       }
     }
   }
-  const inf::gen::PlanetParams planet =
-      forced.has_value() ? inf::gen::derive_planet_params(body.params, forced)
-                         : inf::gen::planet_params_for_slot(system, home_slot, body.params);
-  const double radius = planet.radius_m.to_double();
-
-  inf::world::ChunkManagerConfig config;
-  const unsigned hardware = std::thread::hardware_concurrency();
-  config.worker_count = hardware > 4 ? (hardware - 2 > 8 ? 8 : hardware - 2) : 2;
-  config.split_factor = 1.5;
-  std::uint8_t max_lod = 8;
-  while ((2.0 * radius) / static_cast<double>(std::uint64_t{1} << max_lod) > 32.0 &&
-         max_lod < 16) {
-    ++max_lod;
-  }
-  config.max_lod = max_lod;
-  const inf::gen::TerrainField field(body.entity, planet);
-  // Player-diff overlay (M7): the world file is ONLY this diff — the
-  // procedural planet is never stored.
-  const std::string diff_path =
-      diff_text != nullptr ? std::string(diff_text)
-                           : std::string("infinity-") + seed_text + ".edits";
-  inf::world::CsgEditStore edits;
-  if (edits.load(diff_path)) {
-    std::printf("diff: loaded %zu edits from %s\n", edits.size(), diff_path.c_str());
-  }
-  const inf::gen::TerrainSampler sampler(field, &edits);
-  inf::world::ChunkManager manager(sampler, config);
-  const inf::gen::EffectiveField effective(field, &edits);
-  const double spawn_r = spawn_altitude >= 0.0 ? radius + spawn_altitude : radius * 2.2;
-  inf::sim::Player player(effective,
+  // Player-diff overlay (M7): the world files are ONLY per-body diffs —
+  // the procedural planets are never stored.
+  std::unique_ptr<Anchor> anchor =
+      make_anchor(*seed, seed_text, system, home_slot, forced, diff_text);
+  const double spawn_r =
+      spawn_altitude >= 0.0 ? anchor->radius + spawn_altitude : anchor->radius * 2.2;
+  inf::sim::Player player(*anchor->effective,
                           inf::sim::normalize(SVec3{1.0, 0.15, 0.3}) * spawn_r);
 
-  std::printf("infinity %s (%s) — %s planet (slot %d), radius %.0f m, %u workers\n",
-              inf::gen::kVersion, inf::gen::kGitHash, inf::gen::to_string(planet.type),
-              home_slot, radius, config.worker_count);
+  std::printf("infinity %s (%s) — %s planet (slot %d), radius %.0f m\n",
+              inf::gen::kVersion, inf::gen::kGitHash,
+              inf::gen::to_string(anchor->planet.type), home_slot, anchor->radius);
 
   if (glfwInit() != GLFW_TRUE) {
     std::fprintf(stderr, "glfwInit failed\n");
@@ -332,16 +380,24 @@ int main(int argc, char** argv) {
   const std::vector<float> ball = unit_sphere_vertices(32, 16);
   const std::uint32_t body_mesh = rhi->create_mesh(ball.data(), ball.size());
   // Sea shell (spec section 5): one translucent sphere at sea level,
-  // EarthLike only. Zero shading effort by design.
+  // EarthLike only. Zero shading effort by design. Rebuilt per anchor.
   std::uint32_t sea_mesh = 0;
   double sea_radius = 0.0;
-  if (planet.type == inf::gen::PlanetType::EarthLike) {
-    const std::vector<float> sphere = unit_sphere_vertices(64, 32);
-    sea_mesh = rhi->create_mesh(sphere.data(), sphere.size());
-    sea_radius = radius + planet.sea_level_m.to_double();
-  }
+  const auto rebuild_sea = [&] {
+    if (sea_mesh != 0) {
+      rhi->destroy_mesh(sea_mesh);
+      sea_mesh = 0;
+    }
+    sea_radius = 0.0;
+    if (anchor->planet.type == inf::gen::PlanetType::EarthLike) {
+      const std::vector<float> sphere = unit_sphere_vertices(64, 32);
+      sea_mesh = rhi->create_mesh(sphere.data(), sphere.size());
+      sea_radius = anchor->radius + anchor->planet.sea_level_m.to_double();
+    }
+  };
+  rebuild_sea();
   {  // HUD scope: must destruct before the RHI is torn down.
-  inf::app::Hud hud(rhi.get(), &field, planet);
+  auto hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
   SVec3 last_player_pos = player.position();
   double measured_speed = 0.0;
 
@@ -439,16 +495,16 @@ int main(int argc, char** argv) {
     const SVec3 dir = inf::sim::normalize(player.forward());
     constexpr double kStep = 0.5;
     constexpr double kMaxReach = 120.0;
+    const auto density_at = [&](const SVec3& p) {
+      return anchor->effective
+          ->density(inf::gen::Dir3{inf::det::Real(p.x), inf::det::Real(p.y),
+                                   inf::det::Real(p.z)})
+          .to_double();
+    };
     double t_air = 0.0;
     double t_hit = -1.0;
     for (double t = kStep; t <= kMaxReach; t += kStep) {
-      const SVec3 p = origin + dir * t;
-      const double density = effective
-                                 .density(inf::gen::Dir3{inf::det::Real(p.x),
-                                                         inf::det::Real(p.y),
-                                                         inf::det::Real(p.z)})
-                                 .to_double();
-      if (density > 0.0) {
+      if (density_at(origin + dir * t) > 0.0) {
         t_hit = t;
         break;
       }
@@ -459,13 +515,7 @@ int main(int argc, char** argv) {
     }
     for (int i = 0; i < 16; ++i) {
       const double mid = 0.5 * (t_air + t_hit);
-      const SVec3 p = origin + dir * mid;
-      const double density = effective
-                                 .density(inf::gen::Dir3{inf::det::Real(p.x),
-                                                         inf::det::Real(p.y),
-                                                         inf::det::Real(p.z)})
-                                 .to_double();
-      if (density > 0.0) {
+      if (density_at(origin + dir * mid) > 0.0) {
         t_hit = mid;
       } else {
         t_air = mid;
@@ -475,7 +525,7 @@ int main(int argc, char** argv) {
     // Add material just shy of the surface so it bulges toward the player.
     const SVec3 center = origin + dir * (subtract ? t_hit : t_hit - 1.0);
     // Core rejection (spec section 9): the planet core is not editable.
-    if (inf::sim::length(center) - kRadius <= planet.core_radius_m.to_double()) {
+    if (inf::sim::length(center) - kRadius <= anchor->planet.core_radius_m.to_double()) {
       return;
     }
     inf::world::SphereEdit edit;
@@ -484,8 +534,8 @@ int main(int argc, char** argv) {
     edit.center_raw[2] = inf::det::Fixed64::from_double(center.z).raw();
     edit.radius_raw = inf::det::Fixed64::from_double(kRadius).raw();
     edit.subtract = subtract;
-    edits.append(edit);
-    manager.invalidate_sphere(center.x, center.y, center.z, kRadius + 6.0);
+    anchor->edits->append(edit);
+    anchor->manager->invalidate_sphere(center.x, center.y, center.z, kRadius + 6.0);
   };
 
   std::unordered_map<inf::core::ChunkAddr, LoadedChunk, AddrHash> loaded;
@@ -546,12 +596,100 @@ int main(int argc, char** argv) {
 
     player.update(input);
 
-    // The home planet's system-frame position (live ephemeris — the map
-    // is just another camera on the running universe).
-    const auto home_pv = inf::core::Ephemeris::evaluate(
-        system.planets[static_cast<std::size_t>(home_slot)].orbit, now);
-    const SVec3 planet_sys{home_pv.x.to_double(), home_pv.y.to_double(),
-                           home_pv.z.to_double()};
+    // --- live system state (ephemerides; the universe never pauses) -----
+    const auto eval_pos = [&](const inf::core::OrbitalElements& orbit) {
+      const auto pv = inf::core::Ephemeris::evaluate(orbit, now);
+      return SVec3{pv.x.to_double(), pv.y.to_double(), pv.z.to_double()};
+    };
+    SVec3 planet_sys;                                       // anchor body, system frame
+    std::array<SVec3, inf::gen::kMaxPlanetSlots> planet_local{};  // anchor-local centers
+    const auto recompute_bodies = [&] {
+      planet_sys =
+          eval_pos(system.planets[static_cast<std::size_t>(anchor->slot)].orbit);
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (entry.occupied) {
+          planet_local[static_cast<std::size_t>(slot)] = eval_pos(entry.orbit) - planet_sys;
+        }
+      }
+    };
+    recompute_bodies();
+
+    // --- anchor switching (T0014): re-anchor to the nearest landable ----
+    // body once it is decisively closer than the current one. The altitude
+    // governor then handles approach braking on its own.
+    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
+      const SVec3 at = player.position();
+      const double anchor_gap = inf::sim::length(at) - anchor->radius;
+      int candidate = -1;
+      double candidate_gap = 1e300;
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied || !entry.landable || slot == anchor->slot) {
+          continue;
+        }
+        const double gap =
+            inf::sim::length(planet_local[static_cast<std::size_t>(slot)] - at) -
+            entry.phys.radius_m.to_double();
+        if (gap < candidate_gap) {
+          candidate = slot;
+          candidate_gap = gap;
+        }
+      }
+      if (candidate >= 0 && candidate_gap < anchor_gap * 0.5) {
+        save_anchor_edits(*anchor);
+        for (auto& [addr, chunk] : loaded) {
+          rhi->destroy_mesh(chunk.mesh_id);
+        }
+        loaded.clear();
+        const SVec3 new_pos = at - planet_local[static_cast<std::size_t>(candidate)];
+        anchor = make_anchor(*seed, seed_text, system, candidate, std::nullopt, nullptr);
+        player.rebase(*anchor->effective, new_pos);
+        rebuild_sea();
+        hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
+        recompute_bodies();
+        std::printf("anchor: %s (slot %d, %s planet, radius %.0f km)\n",
+                    slot_names[static_cast<std::size_t>(candidate)].c_str(), candidate,
+                    inf::gen::to_string(anchor->planet.type), anchor->radius / 1000.0);
+      }
+    }
+
+    // Star + moons in the anchor frame (for rendering, radar, keep-out).
+    const SVec3 star_local = SVec3{0.0, 0.0, 0.0} - planet_sys;
+    const double star_radius = system.star.radius_solar.to_double() * 6.957e7;
+    struct MoonInstance {
+      SVec3 pos;
+      double radius;
+    };
+    std::vector<MoonInstance> moons_local;
+    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+      const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+      if (!entry.occupied) {
+        continue;
+      }
+      for (const auto& moon : entry.moons) {
+        moons_local.push_back(
+            MoonInstance{planet_local[static_cast<std::size_t>(slot)] + eval_pos(moon.orbit),
+                         moon.phys.radius_m.to_double()});
+      }
+    }
+
+    // Keep-out spheres for everything that has no terrain field: the
+    // star, non-anchor planets, and all moons (fly-through is not a
+    // thing; the anchor's real ground is handled by the flight clamp).
+    if (map_phase == MapPhase::Off) {
+      player.push_out(star_local, star_radius * 1.6);
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (entry.occupied && slot != anchor->slot) {
+          player.push_out(planet_local[static_cast<std::size_t>(slot)],
+                          entry.phys.radius_m.to_double() * 1.02 + 5.0);
+        }
+      }
+      for (const MoonInstance& moon : moons_local) {
+        player.push_out(moon.pos, moon.radius * 1.02 + 5.0);
+      }
+    }
 
     // --- map mode: enter / exit triggers ---------------------------------
     const bool m_down = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
@@ -600,7 +738,8 @@ int main(int argc, char** argv) {
 
     // --- streaming ------------------------------------------------------
     const SVec3 player_pos = player.position();
-    const auto events = manager.update(player_pos.x, player_pos.y, player_pos.z);
+    const auto events =
+        anchor->manager->update(player_pos.x, player_pos.y, player_pos.z);
     for (const auto& event : events) {
       if (event.kind == inf::world::ChunkEvent::Kind::Ready) {
         // Replace any previous mesh for this address (re-mesh on neighbor
@@ -671,16 +810,16 @@ int main(int argc, char** argv) {
     // pull-up).
     float sky[3] = {0.05f, 0.06f, 0.12f};
     {
-      double atmosphere = planet.atmosphere_height_m.to_double();
+      double atmosphere = anchor->planet.atmosphere_height_m.to_double();
       float palette[3] = {0.05f, 0.06f, 0.12f};
-      switch (planet.type) {
+      switch (anchor->planet.type) {
         case inf::gen::PlanetType::EarthLike: palette[0] = 0.45f; palette[1] = 0.65f; palette[2] = 0.95f; break;
         case inf::gen::PlanetType::Desert: palette[0] = 0.78f; palette[1] = 0.58f; palette[2] = 0.42f; break;
         case inf::gen::PlanetType::Ice: palette[0] = 0.62f; palette[1] = 0.74f; palette[2] = 0.92f; break;
         case inf::gen::PlanetType::Barren: atmosphere = 0.0; break;
       }
       if (atmosphere > 0.0) {
-        const double raw_alt = inf::sim::length(cam_pos_local) - radius;
+        const double raw_alt = inf::sim::length(cam_pos_local) - anchor->radius;
         double t = 1.0 - raw_alt / atmosphere;
         t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
         t = std::pow(t, 0.7);
@@ -692,8 +831,10 @@ int main(int argc, char** argv) {
     const RVec3 camera_pos = to_render(cam_pos_local);
     const RVec3 cam_forward = to_render(cam_fwd_v);
     const RVec3 cam_up = to_render(cam_up_sv);
-    const double altitude = inf::render::length(camera_pos) - radius;
-    const double far_z = std::max(10'000.0, std::abs(altitude) * 4.0 + 2.5 * radius);
+    const double altitude = inf::render::length(camera_pos) - anchor->radius;
+    const double far_z =
+        std::max({10'000.0, std::abs(altitude) * 4.0 + 2.5 * anchor->radius,
+                  inf::sim::length(star_local - cam_pos_local) * 2.5});
     // At map framing distance the near plane scales up with altitude so
     // the sparse far-field scene keeps usable depth precision.
     const double near_z = std::clamp(std::abs(altitude) * 1e-4, 0.3, 1e8);
@@ -710,6 +851,93 @@ int main(int argc, char** argv) {
       const Mat4 mvp = inf::render::mul(view_projection, model);
       std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
       items.push_back(item);
+    }
+
+    // --- system bodies in normal flight (T0014) --------------------------
+    // The sun, sibling planets and moons are always in the sky — real
+    // scale, with a small minimum apparent size so distant planets stay
+    // visible as specks. Map mode draws its own (larger) versions.
+    if (map_phase == MapPhase::Off) {
+      const double px_world = 2.0 * std::tan(kFovY * 0.5) / state.height;
+      const auto draw_ball = [&](const SVec3& pos, double true_radius, double min_px,
+                                 float r, float g, float b) {
+        const double dist = inf::sim::length(pos - cam_pos_local);
+        if (dist < true_radius * 1.05) {
+          return;  // camera inside/at the body (the anchor renders as terrain)
+        }
+        const double size = std::max(true_radius, dist * px_world * min_px * 0.5);
+        const Mat4 model = inf::render::from_basis(
+            RVec3{size, 0.0, 0.0}, RVec3{0.0, size, 0.0}, RVec3{0.0, 0.0, size},
+            to_render(pos) - camera_pos);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = body_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.color[0] = r;
+        item.color[1] = g;
+        item.color[2] = b;
+        item.color[3] = 1.0f;
+        items.push_back(item);
+      };
+      draw_ball(star_local, star_radius, 5.0, 1.0f, 0.92f, 0.72f);
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied || slot == anchor->slot) {
+          continue;
+        }
+        float color[3];
+        slot_color(slot, color);
+        draw_ball(planet_local[static_cast<std::size_t>(slot)],
+                  entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2]);
+      }
+      // The anchor itself gets an under-the-terrain impostor while the
+      // camera is far out: freshly-anchored planets are visible before
+      // their coarse chunks finish streaming.
+      if (inf::sim::length(player_pos) > 5.0 * anchor->radius) {
+        float color[3];
+        slot_color(anchor->slot, color);
+        draw_ball(SVec3{0.0, 0.0, 0.0}, anchor->radius * 0.995, 3.0, color[0], color[1],
+                  color[2]);
+      }
+      for (const MoonInstance& moon : moons_local) {
+        draw_ball(moon.pos, moon.radius, 2.0, 0.62f, 0.62f, 0.66f);
+      }
+    }
+
+    // Radar feed: every body in the system, relative to the player
+    // (constant-size icons + elevation bars; drawn by the HUD when the
+    // space radar is showing).
+    std::vector<inf::app::RadarBody> radar_bodies;
+    radar_bodies.reserve(2 + moons_local.size() + inf::gen::kMaxPlanetSlots);
+    {
+      inf::app::RadarBody star_icon;
+      star_icon.rel = star_local - player_pos;
+      star_icon.color[0] = 1.0f;
+      star_icon.color[1] = 0.88f;
+      star_icon.color[2] = 0.55f;
+      star_icon.scale = 1.6f;
+      radar_bodies.push_back(star_icon);
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied) {
+          continue;
+        }
+        inf::app::RadarBody icon;
+        icon.rel = planet_local[static_cast<std::size_t>(slot)] - player_pos;
+        slot_color(slot, icon.color);
+        icon.scale = 1.0f;
+        icon.anchor = slot == anchor->slot;
+        radar_bodies.push_back(icon);
+      }
+      for (const MoonInstance& moon : moons_local) {
+        inf::app::RadarBody icon;
+        icon.rel = moon.pos - player_pos;
+        icon.color[0] = 0.62f;
+        icon.color[1] = 0.62f;
+        icon.color[2] = 0.66f;
+        icon.scale = 0.55f;
+        radar_bodies.push_back(icon);
+      }
     }
 
     // Beams: thin elongated boxes along their velocity, unlit.
@@ -956,7 +1184,8 @@ int main(int argc, char** argv) {
     }
 
     if (map_phase == MapPhase::Off) {
-      hud.build(&items, player, measured_speed, input.aspect, state.height, dt);
+      hud->build(&items, player, radar_bodies, measured_speed, input.aspect, state.height,
+                 dt);
     } else if (map_phase == MapPhase::On && hovered_slot >= 0) {
       // Info card from the forever-state payloads (map-mode spec §3).
       const auto& entry = system.planets[static_cast<std::size_t>(hovered_slot)];
@@ -1006,8 +1235,8 @@ int main(int argc, char** argv) {
       std::snprintf(buf, sizeof(buf), "Moons %zu   Atmosphere %s", entry.moons.size(),
                     entry.phys.atmosphere.height_m.to_double() > 0.0 ? "yes" : "no");
       lines.emplace_back(buf);
-      hud.build_map_card(&items, lines, pointer_ndc_x, pointer_ndc_y, input.aspect,
-                         state.height);
+      hud->build_map_card(&items, lines, pointer_ndc_x, pointer_ndc_y, input.aspect,
+                          state.height);
     }
 
     rhi->render_frame(sky[0], sky[1], sky[2], items.data(), items.size());
@@ -1050,13 +1279,7 @@ int main(int argc, char** argv) {
   }
   }  // end HUD scope
 
-  if (edits.size() > 0) {
-    if (edits.save(diff_path)) {
-      std::printf("diff: saved %zu edits to %s\n", edits.size(), diff_path.c_str());
-    } else {
-      std::fprintf(stderr, "diff: FAILED to save %s\n", diff_path.c_str());
-    }
-  }
+  save_anchor_edits(*anchor);
 
   rhi.reset();
   glfwDestroyWindow(window);

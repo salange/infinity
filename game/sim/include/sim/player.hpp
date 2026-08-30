@@ -103,6 +103,18 @@ class Player {
   void enter_map();
   void exit_map();
 
+  // Interplanetary flight: swap the effective field (and coordinate
+  // frame) to another anchor body. position is the player's pose in the
+  // TARGET body's planet-local frame; attitude and speed carry over,
+  // beams are dropped (they were in the old frame).
+  void rebase(const gen::EffectiveField& field, const Vec3& position);
+
+  // Sphere keep-out for bodies WITHOUT a terrain field (gas giants,
+  // moons, the star): if the player is inside (center, min_dist), push
+  // radially back to the boundary. The anchor body's real ground uses the
+  // effective-field clamp instead.
+  void push_out(const Vec3& center, double min_dist);
+
  private:
   void update_flight(const InputFrame& input);
   void update_on_foot(const InputFrame& input);
@@ -112,7 +124,7 @@ class Player {
   double ground_radius(const Vec3& dir) const;
   void clamp_to_ground_flight();
 
-  const gen::EffectiveField& field_;
+  const gen::EffectiveField* field_;  // current anchor body (never null)
   PlayerMode mode_ = PlayerMode::Flight;
 
   Vec3 position_;

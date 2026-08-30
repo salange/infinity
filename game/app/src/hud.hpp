@@ -11,15 +11,28 @@
 
 namespace inf::app {
 
+// One body on the system radar (NMS-style space view): position relative
+// to the player in planet-local axes; icon color/scale are view
+// properties (constant size, never distance-scaled).
+struct RadarBody {
+  sim::Vec3 rel;      // body center - player position
+  float color[3]{1.0f, 1.0f, 1.0f};
+  float scale{1.0f};  // 1 = planet; star bigger, moons smaller
+  bool anchor{false}; // the body currently anchoring the world frame
+};
+
 // In-game HUD (Sascha 2026-08-30):
 // - lower left: velocity, plus altitude when near the planet (inside the
 //   atmosphere band) or distance-to-body with switched label/units when
 //   out in space;
-// - lower right: radar. In space an NMS-style body view (planet disc
-//   positioned in the ship frame, N/S pole markers). In atmosphere a
-//   top-down terrain view around the player, rotated so up = heading,
-//   with N/S/E/W cardinal letters derived from the planet axis
-//   (+Z = north pole). Below the radar: the current biome name.
+// - lower right: radar. In space an NMS-style SYSTEM view: every body in
+//   the planetary system as a constant-size icon projected onto the
+//   ship's horizontal plane (up on the radar = ship forward), radial
+//   distance log-compressed so the whole system fits, and a vertical bar
+//   from each icon's plane point showing above/below the ship plane. In
+//   atmosphere a top-down terrain view around the player, rotated so
+//   up = heading, with N/S/E/W cardinal letters derived from the planet
+//   axis (+Z = north pole). Below the radar: the current biome name.
 // Identical in ship and walking mode (rocket backpack later).
 class Hud {
  public:
@@ -30,9 +43,11 @@ class Hud {
   Hud& operator=(const Hud&) = delete;
 
   // Appends the HUD draw items for this frame (called after the 3D scene
-  // items so the overlay draws on top).
+  // items so the overlay draws on top). bodies feeds the space radar's
+  // system view; ignored while the atmosphere radar is showing.
   void build(std::vector<render::Rhi::DrawItem>* items, const sim::Player& player,
-             double measured_speed_mps, double aspect, int height_px, double dt);
+             const std::vector<RadarBody>& bodies, double measured_speed_mps, double aspect,
+             int height_px, double dt);
 
   // Map-mode overlay (design/map-mode.md section 3): the hover info card,
   // anchored at the pointer (NDC), lines top to bottom. The flight/walk

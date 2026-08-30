@@ -24,7 +24,7 @@ Vec3 lerp(const Vec3& a, const Vec3& b, double t) { return a + (b - a) * t; }
 }  // namespace
 
 Player::Player(const gen::EffectiveField& field, Vec3 spawn_position)
-    : field_(field), position_(spawn_position) {
+    : field_(&field), position_(spawn_position) {
   // Start pointing "east-ish" with radial up-ish; orthonormalized below.
   up_ = normalize(position_);
   Vec3 reference{0.0, 0.0, 1.0};
@@ -36,15 +36,15 @@ Player::Player(const gen::EffectiveField& field, Vec3 spawn_position)
 
 double Player::ground_radius(const Vec3& dir) const {
   const gen::Dir3 unit{det::Real(dir.x), det::Real(dir.y), det::Real(dir.z)};
-  return field_.ground_radius_m(unit).to_double();
+  return field_->ground_radius_m(unit).to_double();
 }
 
 FlightZone Player::zone() const {
-  const double atmosphere = field_.planet().atmosphere_height_m.to_double();
+  const double atmosphere = field_->planet().atmosphere_height_m.to_double();
   if (atmosphere <= 0.0) {
     return FlightZone::Space;
   }
-  const double alt = length(position_) - field_.planet().radius_m.to_double();
+  const double alt = length(position_) - field_->planet().radius_m.to_double();
   return alt < atmosphere ? FlightZone::Atmosphere : FlightZone::Space;
 }
 
@@ -91,6 +91,20 @@ void Player::exit_map() {
   speed_ = 0.0;  // velocity = zero per spec; flight resumes as a hover
 }
 
+void Player::rebase(const gen::EffectiveField& field, const Vec3& position) {
+  field_ = &field;
+  position_ = position;
+  beams_.clear();  // beam positions were in the old body's frame
+}
+
+void Player::push_out(const Vec3& center, double min_dist) {
+  const Vec3 rel = position_ - center;
+  const double dist = length(rel);
+  if (dist < min_dist) {
+    position_ = center + normalize(rel) * min_dist;
+  }
+}
+
 void Player::update_flight(const InputFrame& input) {
   const double dt = input.dt;
 
@@ -121,7 +135,7 @@ void Player::update_flight(const InputFrame& input) {
   // --- throttle -----------------------------------------------------------
   // Altitude governor between the hard caps: Mach 6 inside the atmosphere
   // band, 0.1c outside (spec section 9; airless planets have no band).
-  const double alt = std::max(0.0, length(position_) - field_.planet().radius_m.to_double());
+  const double alt = std::max(0.0, length(position_) - field_->planet().radius_m.to_double());
   const double zone_cap = zone() == FlightZone::Atmosphere ? kMachSix : kTenthC;
   const double cap = std::min(std::clamp(alt * 0.8, 40.0, kTenthC), zone_cap);
   const double accel = std::max(25.0, cap / 2.5);

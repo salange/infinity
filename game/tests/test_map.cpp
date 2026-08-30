@@ -109,6 +109,41 @@ TEST_CASE("player: map mode pushes and restores, planet-local, velocity zero") {
   CHECK(player.speed() == 0.0);                        // velocity = zero per spec
 }
 
+TEST_CASE("player: rebase swaps the anchor frame; push_out keeps bodies solid") {
+  const gen::BodyHandle body_a = gen::default_body(core::Seed128{0, 0xA});
+  const gen::PlanetParams planet_a =
+      gen::derive_planet_params(body_a.params, gen::PlanetType::Barren);
+  const gen::TerrainField field_a(body_a.entity, planet_a);
+  const gen::EffectiveField effective_a(field_a);
+  sim::Player player(effective_a, Vec3{planet_a.radius_m.to_double() * 3.0, 0.0, 0.0});
+
+  // push_out: inside the keep-out sphere -> on its boundary, outside -> untouched.
+  const Vec3 center = player.position() + Vec3{50.0, 0.0, 0.0};
+  player.push_out(center, 200.0);
+  CHECK(sim::length(player.position() - center) == doctest::Approx(200.0));
+  const Vec3 kept = player.position();
+  player.push_out(center, 100.0);
+  CHECK(sim::length(player.position() - kept) == 0.0);
+
+  // rebase: new field + frame, attitude kept, speed kept, mode kept.
+  const gen::BodyHandle body_b = gen::default_body(core::Seed128{0, 0xB});
+  const gen::PlanetParams planet_b =
+      gen::derive_planet_params(body_b.params, gen::PlanetType::Ice);
+  const gen::TerrainField field_b(body_b.entity, planet_b);
+  const gen::EffectiveField effective_b(field_b);
+  const Vec3 fwd_before = player.forward();
+  const Vec3 new_pos{planet_b.radius_m.to_double() * 2.0, 1.0e5, 0.0};
+  player.rebase(effective_b, new_pos);
+  CHECK(player.mode() == sim::PlayerMode::Flight);
+  CHECK(sim::length(player.position() - new_pos) == 0.0);
+  CHECK(sim::dot(player.forward(), fwd_before) > 0.999999);
+  // The new field governs physics now: zone comes from planet B.
+  sim::InputFrame input;
+  input.dt = 0.1;
+  player.update(input);
+  CHECK(std::isfinite(player.position().x));
+}
+
 TEST_CASE("body display names: deterministic, distinct-ish, printable") {
   const core::Key key_a{0x1234, 0x5678};
   const core::Key key_b{0x1234, 0x5679};

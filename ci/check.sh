@@ -17,32 +17,41 @@ echo "=== build ==="
 cmake --build "$BUILD_DIR"
 
 echo "=== grep gates ==="
+SRC_DIRS="engine/core engine/world engine/render game/gen game/sim game/app game/cli"
 # No platform RNG in generation paths (tests are exempt).
 if grep -rn --include='*.hpp' --include='*.cpp' -E '\bstd::(mt19937|minstd_rand|random_device|uniform_[a-z_]+_distribution)\b|\brand\(\)' \
-    core gen world sim render app cli; then
+    $SRC_DIRS; then
   echo "FORBIDDEN: platform RNG in source tree" >&2
   exit 1
 fi
-# No naked new/delete (clang-tidy owns this too; grep is the cheap backstop).
+# No naked new/delete in headless modules.
 if grep -rn --include='*.cpp' --include='*.hpp' -E '(^|[^_[:alnum:]])(new|delete)[[:space:]]+[A-Za-z_]' \
-    core gen world sim cli | grep -v 'delete$\|= delete'; then
+    engine/core engine/world game/gen game/sim game/cli | grep -v 'delete$\|= delete'; then
   echo "FORBIDDEN: naked new/delete in headless modules" >&2
   exit 1
 fi
-
-# No libm transcendentals in deterministic modules (DECISIONS 2026-08-30):
-# platform libms differ bit-for-bit. sqrt/floor/fabs/ceil are IEEE-exact and
-# allowed; anything else needs our own deterministic implementation.
+# No libm transcendentals in deterministic modules (use core/det/trig.hpp).
 if grep -rn --include='*.hpp' --include='*.cpp' -E 'std::(sin|cos|tan|asin|acos|atan|atan2|exp|exp2|log|log2|log10|pow|fmod|hypot|cbrt)\b' \
-    core gen world; then
+    engine/core engine/world game/gen | grep -v 'core/det/trig\|src/trig.cpp'; then
   echo "FORBIDDEN: libm transcendental in deterministic module" >&2
+  exit 1
+fi
+# No OS-clock reads outside the clock module (planetary-systems spec §5).
+if grep -rn --include='*.hpp' --include='*.cpp' -E 'system_clock|steady_clock|glfwGetTime|clock_gettime|\btime\(nullptr\)' \
+    $SRC_DIRS | grep -v 'core/time/' | grep -v 'world_clock.cpp'; then
+  echo "FORBIDDEN: OS clock read outside core/time" >&2
+  exit 1
+fi
+# Engine self-containment: nothing in engine/ includes game headers.
+if grep -rn --include='*.hpp' --include='*.cpp' -E '#include "(gen|sim)/' engine/; then
+  echo "FORBIDDEN: engine includes game headers" >&2
   exit 1
 fi
 
 echo "=== clang-tidy ==="
 if command -v run-clang-tidy >/dev/null 2>&1; then
   run-clang-tidy -p "$BUILD_DIR" -quiet \
-    "$(pwd)/(core|gen|world|sim|render|app|cli)/.*" >/dev/null
+    "$(pwd)/(engine|game)/(core|world|render|gen|sim|app|cli)/.*" >/dev/null
 else
   echo "run-clang-tidy not found — skipping (install clang-tools)" >&2
 fi
@@ -51,7 +60,7 @@ echo "=== tests ==="
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
 echo "=== cli smoke ==="
-CLI="$BUILD_DIR/cli/infinity-cli"
+CLI="$BUILD_DIR/game/cli/infinity-cli"
 "$CLI" --version
 test "$("$CLI" --seed 0xDEADBEEF)" = "000000000000000000000000deadbeef"
 if "$CLI" --seed nothex 2>/dev/null; then
@@ -60,12 +69,14 @@ if "$CLI" --seed nothex 2>/dev/null; then
 fi
 
 echo "=== golden hashes ==="
-"$CLI" hash-core | diff - tests/goldens/hash-core.txt \
+"$CLI" hash-core | diff - game/tests/goldens/hash-core.txt \
   || { echo "FAIL: hash-core diverges from goldens" >&2; exit 1; }
-"$CLI" hash-planet | diff - tests/goldens/hash-planet.txt \
+"$CLI" hash-planet | diff - game/tests/goldens/hash-planet.txt \
   || { echo "FAIL: hash-planet diverges from goldens" >&2; exit 1; }
-"$CLI" hash-density | diff - tests/goldens/hash-density.txt \
+"$CLI" hash-density | diff - game/tests/goldens/hash-density.txt \
   || { echo "FAIL: hash-density diverges from goldens" >&2; exit 1; }
+"$CLI" hash-system | diff - game/tests/goldens/hash-system.txt \
+  || { echo "FAIL: hash-system diverges from goldens" >&2; exit 1; }
 
 echo "=== payload determinism ==="
 "$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-a.json
@@ -75,7 +86,6 @@ diff /tmp/infinity-dump-a.json /tmp/infinity-dump-b.json \
 rm -f /tmp/infinity-dump-a.json /tmp/infinity-dump-b.json
 
 echo "=== headless invariant ==="
-# cli must not link window/GPU libraries.
 if command -v ldd >/dev/null 2>&1; then
   if ldd "$CLI" | grep -Ei 'glfw|wgpu|vulkan|wayland|X11'; then
     echo "FAIL: headless cli links a window/GPU library" >&2
@@ -90,7 +100,7 @@ fi
 
 echo "=== app smoke (60 frames, needs display) ==="
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && [ -z "${INFINITY_SKIP_APP_SMOKE:-}" ]; then
-  "$BUILD_DIR/app/infinity" --frames 60
+  "$BUILD_DIR/game/app/infinity" --frames 60
 else
   echo "no display (or skipped) — app smoke not run"
 fi

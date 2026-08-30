@@ -1,8 +1,0 @@
-#pragma once
-
-namespace inf::core {
-
-inline constexpr const char* kVersion = "@PROJECT_VERSION@";
-inline constexpr const char* kGitHash = "@INFINITY_GIT_HASH@";
-
-}  // namespace inf::core

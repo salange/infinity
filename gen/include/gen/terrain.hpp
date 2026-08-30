@@ -65,13 +65,32 @@ struct ChunkGrid {
   static ChunkGrid from_addr(const core::ChunkAddr& addr, const PlanetParams& planet);
 
   // World position (planet-local meters) of grid corner (gx, gy, gz):
-  // gx, gy in [0, kCorners) along u/v, gz along the radial axis.
-  Dir3 corner_position(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz) const;
+  // gx, gy along u/v, gz along the radial axis. Accepts coordinates
+  // outside [0, kVoxels] (padded ring, linear extrapolation in uv/r).
+  Dir3 corner_position(int gx, int gy, int gz) const;
 };
 
 // Densities at all corner samples of a chunk grid, x-major:
 // index = (gz * kCorners + gy) * kCorners + gx.
 std::vector<det::Real> sample_chunk_density(const TerrainField& field, const ChunkGrid& grid);
+
+// Padded variant: one extra sample ring on every side (kPadded^3 values,
+// grid coordinates -1..kVoxels+1), used for gradient normals in meshing.
+// Inner samples are computed with the identical op sequence as
+// sample_chunk_density (golden hashes stay valid on the inner slice).
+struct PaddedDensity {
+  static constexpr std::uint32_t kPadded = ChunkGrid::kCorners + 2;
+  std::vector<det::Real> values;  // x-major over kPadded^3
+
+  det::Real at(int gx, int gy, int gz) const {  // grid coords, -1-based
+    return values[(static_cast<std::size_t>(gz + 1) * kPadded +
+                   static_cast<std::size_t>(gy + 1)) *
+                      kPadded +
+                  static_cast<std::size_t>(gx + 1)];
+  }
+};
+
+PaddedDensity sample_chunk_density_padded(const TerrainField& field, const ChunkGrid& grid);
 
 // Golden fingerprint of a chunk's density grid (mesh input — the hashed
 // artifact per T0005; the mesh itself is render-side and never hashed).

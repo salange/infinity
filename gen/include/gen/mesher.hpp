@@ -20,8 +20,9 @@ struct ChunkMesh {
   std::size_t triangle_count() const { return vertices.size() / 18; }
 };
 
-// Marching cubes (classic tables) over a chunk's density grid.
-// densities: kCorners^3 samples, x-major (see sample_chunk_density).
-ChunkMesh mesh_chunk(const ChunkGrid& grid, const std::vector<det::Real>& densities);
+// Marching cubes (classic tables) over a chunk's padded density grid.
+// Normals are density-gradient normals (smooth, chunk-seam-consistent);
+// the padded ring supplies boundary gradients.
+ChunkMesh mesh_chunk(const ChunkGrid& grid, const PaddedDensity& padded);
 
 }  // namespace inf::gen

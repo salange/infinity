@@ -81,7 +81,7 @@ ChunkGrid ChunkGrid::from_addr(const core::ChunkAddr& addr, const PlanetParams& 
   return grid;
 }
 
-Dir3 ChunkGrid::corner_position(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz) const {
+Dir3 ChunkGrid::corner_position(int gx, int gy, int gz) const {
   const Real fx(static_cast<double>(gx) / kVoxels);
   const Real fy(static_cast<double>(gy) / kVoxels);
   const Real fz(static_cast<double>(gz) / kVoxels);
@@ -92,8 +92,14 @@ Dir3 ChunkGrid::corner_position(std::uint32_t gx, std::uint32_t gy, std::uint32_
   return Dir3{dir.x * r, dir.y * r, dir.z * r};
 }
 
-std::vector<Real> sample_chunk_density(const TerrainField& field, const ChunkGrid& grid) {
-  constexpr std::uint32_t kCorners = ChunkGrid::kCorners;
+namespace {
+
+// Shared implementation: samples grid coords [lo, hi] inclusive per axis
+// (lo = -1 for the padded variant). The inner samples' op sequence is
+// independent of the range, so padded and unpadded agree bit-exactly.
+std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid, int lo,
+                               int hi) {
+  const auto count = static_cast<std::size_t>(hi - lo + 1);
 
   // Province parameters at the chunk's four uv-corners. Corners are shared
   // between neighboring chunks (same directions => same values), and
@@ -115,12 +121,11 @@ std::vector<Real> sample_chunk_density(const TerrainField& field, const ChunkGri
     return det::lerp(a, b, fy);
   };
 
-  std::vector<Real> densities(static_cast<std::size_t>(kCorners) * kCorners * kCorners,
-                              Real(0.0));
+  std::vector<Real> densities(count * count * count, Real(0.0));
   // Elevation depends only on direction: one evaluation per (gx, gy)
   // column, reused by all radial layers.
-  for (std::uint32_t gy = 0; gy < kCorners; ++gy) {
-    for (std::uint32_t gx = 0; gx < kCorners; ++gx) {
+  for (int gy = lo; gy <= hi; ++gy) {
+    for (int gx = lo; gx <= hi; ++gx) {
       const Real fx(static_cast<double>(gx) / ChunkGrid::kVoxels);
       const Real fy(static_cast<double>(gy) / ChunkGrid::kVoxels);
       const Real u = det::lerp(grid.u0, grid.u1, fx);
@@ -134,18 +139,33 @@ std::vector<Real> sample_chunk_density(const TerrainField& field, const ChunkGri
       params.carving = bilerp(&BlendedParams::carving, fx, fy);
       const Real surface_r = field.planet().radius_m + field.elevation_from_params(dir, params);
 
-      for (std::uint32_t gz = 0; gz < kCorners; ++gz) {
+      for (int gz = lo; gz <= hi; ++gz) {
         const Real fz(static_cast<double>(gz) / ChunkGrid::kVoxels);
         const Real r = det::lerp(grid.r0, grid.r1, fz);
         const Dir3 position{dir.x * r, dir.y * r, dir.z * r};
         Real density = r <= field.planet().core_radius_m
                            ? Real(1.0e9)
                            : (surface_r - r) + field.detail_m(position);
-        densities[(static_cast<std::size_t>(gz) * kCorners + gy) * kCorners + gx] = density;
+        densities[(static_cast<std::size_t>(gz - lo) * count +
+                   static_cast<std::size_t>(gy - lo)) *
+                      count +
+                  static_cast<std::size_t>(gx - lo)] = density;
       }
     }
   }
   return densities;
+}
+
+}  // namespace
+
+std::vector<Real> sample_chunk_density(const TerrainField& field, const ChunkGrid& grid) {
+  return sample_range(field, grid, 0, static_cast<int>(ChunkGrid::kVoxels));
+}
+
+PaddedDensity sample_chunk_density_padded(const TerrainField& field, const ChunkGrid& grid) {
+  PaddedDensity padded;
+  padded.values = sample_range(field, grid, -1, static_cast<int>(ChunkGrid::kVoxels) + 1);
+  return padded;
 }
 
 std::uint64_t hash_chunk_density(const TerrainField& field, const ChunkGrid& grid) {

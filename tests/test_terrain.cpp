@@ -93,7 +93,22 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
     addr.shell = static_cast<std::int16_t>(std::floor(elevation / thickness + 0.5));
   }
   const gen::ChunkGrid grid = gen::ChunkGrid::from_addr(addr, planet);
+  const gen::PaddedDensity padded = gen::sample_chunk_density_padded(field, grid);
+
+  // Padded inner slice must agree bit-exactly with the unpadded sampler
+  // (the golden-hash artifact).
   const auto densities = gen::sample_chunk_density(field, grid);
+  for (int gz = 0; gz <= 32; gz += 8) {
+    for (int gy = 0; gy <= 32; gy += 8) {
+      for (int gx = 0; gx <= 32; gx += 8) {
+        const std::size_t index =
+            (static_cast<std::size_t>(gz) * gen::ChunkGrid::kCorners + gy) *
+                gen::ChunkGrid::kCorners +
+            gx;
+        REQUIRE(padded.at(gx, gy, gz) == densities[index]);
+      }
+    }
+  }
 
   // Sanity: both signs present (the chunk actually straddles the surface).
   bool has_air = false;
@@ -105,7 +120,7 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
   REQUIRE(has_air);
   REQUIRE(has_solid);
 
-  const gen::ChunkMesh mesh = gen::mesh_chunk(grid, densities);
+  const gen::ChunkMesh mesh = gen::mesh_chunk(grid, padded);
   REQUIRE(mesh.triangle_count() > 100);
 
   // No NaNs; unit normals; majority of normals point away from the planet
@@ -132,7 +147,7 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
   CHECK(outward > total * 7 / 10);
 
   // Determinism: same input, same mesh bytes.
-  const gen::ChunkMesh mesh2 = gen::mesh_chunk(grid, densities);
+  const gen::ChunkMesh mesh2 = gen::mesh_chunk(grid, padded);
   REQUIRE(mesh.vertices.size() == mesh2.vertices.size());
   CHECK(std::memcmp(mesh.vertices.data(), mesh2.vertices.data(),
                     mesh.vertices.size() * sizeof(float)) == 0);

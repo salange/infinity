@@ -1,7 +1,11 @@
 configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/core/version.hpp @ONLY)
 
 add_library(infinity_core STATIC
-  src/seed.cpp)
+  src/seed.cpp
+  src/philox.cpp
+  src/key.cpp
+  src/fixed64.cpp
+  src/golden.cpp)
 add_library(infinity::core ALIAS infinity_core)
 target_include_directories(infinity_core PUBLIC
   include

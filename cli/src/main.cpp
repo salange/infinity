@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 
+#include "core/golden.hpp"
 #include "core/seed.hpp"
 #include "core/version.hpp"
 
@@ -12,7 +13,8 @@ int print_usage() {
   std::printf(
       "usage: infinity-cli <command> [args]\n"
       "  --version            print version\n"
-      "  --seed <hex128>      parse a universe seed, print canonical form\n");
+      "  --seed <hex128>      parse a universe seed, print canonical form\n"
+      "  hash-core            print the deterministic-core golden report\n");
   return 2;
 }
 
@@ -39,6 +41,11 @@ int main(int argc, char** argv) {
       return 1;
     }
     std::printf("%s\n", inf::core::to_hex(*seed).c_str());
+    return 0;
+  }
+
+  if (std::strcmp(argv[1], "hash-core") == 0) {
+    std::fputs(inf::core::hash_core_report().c_str(), stdout);
     return 0;
   }
 

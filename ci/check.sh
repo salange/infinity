@@ -30,6 +30,15 @@ if grep -rn --include='*.cpp' --include='*.hpp' -E '(^|[^_[:alnum:]])(new|delete
   exit 1
 fi
 
+# No libm transcendentals in deterministic modules (DECISIONS 2026-08-30):
+# platform libms differ bit-for-bit. sqrt/floor/fabs/ceil are IEEE-exact and
+# allowed; anything else needs our own deterministic implementation.
+if grep -rn --include='*.hpp' --include='*.cpp' -E 'std::(sin|cos|tan|asin|acos|atan|atan2|exp|exp2|log|log2|log10|pow|fmod|hypot|cbrt)\b' \
+    core gen world; then
+  echo "FORBIDDEN: libm transcendental in deterministic module" >&2
+  exit 1
+fi
+
 echo "=== clang-tidy ==="
 if command -v run-clang-tidy >/dev/null 2>&1; then
   run-clang-tidy -p "$BUILD_DIR" -quiet \
@@ -49,6 +58,10 @@ if "$CLI" --seed nothex 2>/dev/null; then
   echo "FAIL: invalid seed accepted" >&2
   exit 1
 fi
+
+echo "=== golden hashes ==="
+"$CLI" hash-core | diff - tests/goldens/hash-core.txt \
+  || { echo "FAIL: hash-core diverges from goldens" >&2; exit 1; }
 
 echo "=== headless invariant ==="
 # cli must not link window/GPU libraries.

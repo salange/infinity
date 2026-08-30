@@ -5,6 +5,7 @@
 
 #include "commands_planet.hpp"
 #include "core/golden.hpp"
+#include "gen/golden.hpp"
 #include "core/seed.hpp"
 #include "core/version.hpp"
 
@@ -17,6 +18,7 @@ int print_usage() {
       "  --seed <hex128>      parse a universe seed, print canonical form\n"
       "  hash-core            print the deterministic-core golden report\n"
       "  hash-planet          print the planet/province golden report\n"
+      "  hash-density         print the density-grid golden report\n"
       "  dump-planet --seed <hex128> [--type <T>]\n"
       "                       print planet params + province table as JSON\n"
       "  province-map --seed <hex128> [--type <T>] [--out <prefix>]\n"
@@ -58,6 +60,11 @@ int main(int argc, char** argv) {
 
   if (std::strcmp(argv[1], "hash-planet") == 0) {
     return inf::cli::cmd_hash_planet();
+  }
+
+  if (std::strcmp(argv[1], "hash-density") == 0) {
+    std::fputs(inf::gen::hash_density_report().c_str(), stdout);
+    return 0;
   }
 
   if (std::strcmp(argv[1], "dump-planet") == 0 || std::strcmp(argv[1], "province-map") == 0) {

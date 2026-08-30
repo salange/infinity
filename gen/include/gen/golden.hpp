@@ -15,4 +15,9 @@ std::uint64_t hash_planet_script(const core::Seed128& seed, std::uint32_t forced
 // (tests/goldens/hash-planet.txt).
 std::string hash_planet_report();
 
+// M3: density-grid fingerprints for a fixed chunk set (surface, elevated
+// shell, other faces, coarse lod, deep-interior chunk crossing the core).
+// The hashed artifact is the mesh INPUT, never the mesh (T0005).
+std::string hash_density_report();
+
 }  // namespace inf::gen

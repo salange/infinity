@@ -28,6 +28,21 @@ class Rhi {
   // outdated mid-resize); rendering can continue next frame.
   bool render_clear(float r, float g, float b);
 
+  // --- meshes (M3+) ----------------------------------------------------
+  // Uploads an interleaved [px py pz nx ny nz] f32 triangle soup; returns
+  // a handle. Meshes are static in v0 (re-upload = new mesh).
+  std::uint32_t create_mesh(const float* vertices, std::size_t float_count);
+  void destroy_mesh(std::uint32_t mesh);
+
+  struct DrawItem {
+    std::uint32_t mesh{0};
+    // Column-major model-view-projection (camera-relative; f32-safe).
+    float mvp[16]{};
+  };
+
+  // Clears, draws the items with basic directional lighting, presents.
+  bool render_frame(float r, float g, float b, const DrawItem* items, std::size_t item_count);
+
   // Human-readable adapter description ("<name> (<backend>)").
   const std::string& adapter_info() const;
 

@@ -7,6 +7,7 @@
 #include "core/key.hpp"
 #include "gen/planet.hpp"
 #include "gen/provinces.hpp"
+#include "gen/terrain.hpp"
 
 namespace inf::gen {
 
@@ -75,6 +76,37 @@ std::uint64_t hash_planet_script(const core::Seed128& seed, std::uint32_t forced
     hash.feed(static_cast<std::uint64_t>(blended.dominant_archetype));
   }
   return hash.value();
+}
+
+std::string hash_density_report() {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  const core::Seed128 seed{0x243F6A8885A308D3ULL, 0x13198A2E03707344ULL};
+  std::string report = "hash-density v1\n";
+  const core::Key body = test_body_key(seed);
+  for (std::uint32_t type = 0; type < 4; ++type) {
+    const PlanetParams planet = derive_planet_params(body, static_cast<PlanetType>(type));
+    const TerrainField field(body, planet);
+    static constexpr std::array<core::ChunkAddr, 5> kAddrs = {{
+        {0, 11, 1024, 1024, 0},    // surface shell, face 0 center
+        {0, 11, 1024, 1024, 5},    // elevated shell (likely air)
+        {4, 11, 300, 700, 0},      // another face
+        {2, 8, 128, 128, 0},       // coarser lod
+        {0, 11, 1024, 1024, -310}, // deep interior, near/below the core
+    }};
+    for (const core::ChunkAddr& addr : kAddrs) {
+      const ChunkGrid grid = ChunkGrid::from_addr(addr, planet);
+      const std::uint64_t hash = hash_chunk_density(field, grid);
+      char line[96];
+      std::snprintf(line, sizeof(line), "type=%u face=%u lod=%u i=%u j=%u shell=%d fnv=",
+                    type, addr.face, addr.lod, addr.i, addr.j, static_cast<int>(addr.shell));
+      report += line;
+      for (int i = 15; i >= 0; --i) {
+        report += kDigits[(hash >> (i * 4)) & 0xFU];
+      }
+      report += "\n";
+    }
+  }
+  return report;
 }
 
 std::string hash_planet_report() {

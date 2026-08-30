@@ -64,6 +64,8 @@ echo "=== golden hashes ==="
   || { echo "FAIL: hash-core diverges from goldens" >&2; exit 1; }
 "$CLI" hash-planet | diff - tests/goldens/hash-planet.txt \
   || { echo "FAIL: hash-planet diverges from goldens" >&2; exit 1; }
+"$CLI" hash-density | diff - tests/goldens/hash-density.txt \
+  || { echo "FAIL: hash-density diverges from goldens" >&2; exit 1; }
 
 echo "=== payload determinism ==="
 "$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-a.json

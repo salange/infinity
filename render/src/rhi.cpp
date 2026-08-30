@@ -32,7 +32,7 @@ constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignmen
 constexpr std::uint32_t kMaxDrawItems = 4096;
 
 constexpr const char* kMeshShader = R"(
-struct Uniforms { mvp: mat4x4<f32> };
+struct Uniforms { mvp: mat4x4<f32>, color: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
 struct VSOut {
@@ -50,6 +50,9 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> 
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+  if (u.color.a >= 0.5) {
+    return vec4<f32>(u.color.rgb, 1.0);
+  }
   let light = normalize(vec3<f32>(0.45, 0.75, 0.5));
   let n = normalize(in.normal);
   let ndl = max(dot(n, light), 0.0);
@@ -199,10 +202,10 @@ struct Rhi::Impl {
 
     WGPUBindGroupLayoutEntry layout_entry{};
     layout_entry.binding = 0;
-    layout_entry.visibility = WGPUShaderStage_Vertex;
+    layout_entry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
     layout_entry.buffer.type = WGPUBufferBindingType_Uniform;
     layout_entry.buffer.hasDynamicOffset = 1U;
-    layout_entry.buffer.minBindingSize = 64;
+    layout_entry.buffer.minBindingSize = 80;
     WGPUBindGroupLayoutDescriptor layout_desc{};
     layout_desc.entryCount = 1;
     layout_desc.entries = &layout_entry;
@@ -276,7 +279,7 @@ struct Rhi::Impl {
     bind_entry.binding = 0;
     bind_entry.buffer = uniform_buffer;
     bind_entry.offset = 0;
-    bind_entry.size = 64;
+    bind_entry.size = 80;
     WGPUBindGroupDescriptor bind_desc{};
     bind_desc.layout = bind_layout;
     bind_desc.entryCount = 1;
@@ -452,8 +455,11 @@ bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
   // Upload all uniforms before the command buffer executes.
   const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
   for (std::size_t i = 0; i < count; ++i) {
-    wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, i * kUniformStride,
-                         items[i].mvp, sizeof(items[i].mvp));
+    float block[20];
+    std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
+    std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
+    wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, i * kUniformStride, block,
+                         sizeof(block));
   }
 
   WGPUSurfaceTexture surface_texture{};

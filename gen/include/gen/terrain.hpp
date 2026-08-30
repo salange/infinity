@@ -33,6 +33,12 @@ class TerrainField {
   // 3D detail term at a planet-local position (meters).
   det::Real detail_m(const Dir3& position_m) const;
 
+  // Radius of the terrain surface (the density zero crossing) along the
+  // radial through unit_dir — the ground under a ship/player. One
+  // elevation evaluation plus a cheap bisection over the detail term, so
+  // it matches the meshed isosurface to sub-voxel precision.
+  det::Real ground_radius_m(const Dir3& unit_dir) const;
+
   // Signed density (meters-ish) at a planet-local position given in
   // meters. Positive = solid.
   det::Real density(const Dir3& position_m) const;

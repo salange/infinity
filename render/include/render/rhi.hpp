@@ -38,6 +38,9 @@ class Rhi {
     std::uint32_t mesh{0};
     // Column-major model-view-projection (camera-relative; f32-safe).
     float mvp[16]{};
+    // rgb + mode: a < 0.5 => lit terrain material (rgb ignored),
+    // a >= 0.5 => unlit solid color (beams, HUD overlay).
+    float color[4]{0.0f, 0.0f, 0.0f, 0.0f};
   };
 
   // Clears, draws the items with basic directional lighting, presents.

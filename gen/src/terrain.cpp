@@ -60,6 +60,37 @@ Real TerrainField::density(const Dir3& position_m) const {
   return (surface_r - radius) + detail_m(position_m);
 }
 
+Real TerrainField::ground_radius_m(const Dir3& unit_dir) const {
+  const Real surface = planet_.radius_m + elevation_m(unit_dir);
+  // density(r) = (surface - r) + detail(dir * r); detail is bounded by
+  // +-2 m, so the zero crossing lies within surface +- 4 m. Bisect on the
+  // cheap detail-only expression (elevation already folded into surface).
+  const auto density_at = [&](Real r) {
+    const Dir3 position{unit_dir.x * r, unit_dir.y * r, unit_dir.z * r};
+    return (surface - r) + detail_m(position);
+  };
+  Real lo = surface - Real(4.0);   // below: expect solid (density > 0)
+  Real hi = surface + Real(4.0);   // above: expect air (density < 0)
+  if (density_at(lo) <= Real(0.0) || density_at(hi) >= Real(0.0)) {
+    // Bracket failed (extreme detail constellation): widen once, then
+    // fall back to the elevation surface.
+    lo = surface - Real(8.0);
+    hi = surface + Real(8.0);
+    if (density_at(lo) <= Real(0.0) || density_at(hi) >= Real(0.0)) {
+      return surface;
+    }
+  }
+  for (int i = 0; i < 24; ++i) {
+    const Real mid = (lo + hi) * Real(0.5);
+    if (density_at(mid) > Real(0.0)) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return (lo + hi) * Real(0.5);
+}
+
 ChunkGrid ChunkGrid::from_addr(const core::ChunkAddr& addr, const PlanetParams& planet) {
   ChunkGrid grid;
   grid.addr = addr;

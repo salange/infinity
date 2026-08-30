@@ -89,4 +89,24 @@ inline Mat4 translate(const Vec3& t) {
   return r;
 }
 
+// Model matrix from a (scaled) basis and translation: columns are the
+// images of the x/y/z unit axes.
+inline Mat4 from_basis(const Vec3& x_axis, const Vec3& y_axis, const Vec3& z_axis,
+                       const Vec3& t) {
+  Mat4 r = Mat4::identity();
+  r.m[0] = static_cast<float>(x_axis.x);
+  r.m[1] = static_cast<float>(x_axis.y);
+  r.m[2] = static_cast<float>(x_axis.z);
+  r.m[4] = static_cast<float>(y_axis.x);
+  r.m[5] = static_cast<float>(y_axis.y);
+  r.m[6] = static_cast<float>(y_axis.z);
+  r.m[8] = static_cast<float>(z_axis.x);
+  r.m[9] = static_cast<float>(z_axis.y);
+  r.m[10] = static_cast<float>(z_axis.z);
+  r.m[12] = static_cast<float>(t.x);
+  r.m[13] = static_cast<float>(t.y);
+  r.m[14] = static_cast<float>(t.z);
+  return r;
+}
+
 }  // namespace inf::render

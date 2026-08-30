@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -15,12 +16,16 @@
 #include "gen/planet.hpp"
 #include "render/math.hpp"
 #include "render/rhi.hpp"
+#include "sim/player.hpp"
 #include "world/chunk_manager.hpp"
 
 namespace {
 
 using inf::render::Mat4;
-using inf::render::Vec3;
+using RVec3 = inf::render::Vec3;
+using SVec3 = inf::sim::Vec3;
+
+constexpr double kFovY = 1.1;
 
 struct AppState {
   inf::render::Rhi* rhi = nullptr;
@@ -53,21 +58,83 @@ struct AddrHash {
 
 struct LoadedChunk {
   std::uint32_t mesh_id = 0;
-  Vec3 origin;
+  RVec3 origin;
 };
+
+RVec3 to_render(const SVec3& v) { return RVec3{v.x, v.y, v.z}; }
+
+// Unit cube (side 1, centered) as a lit-format triangle soup; used scaled
+// for beams and HUD quads (unlit color path ignores the normals).
+std::vector<float> unit_cube_vertices() {
+  static constexpr float kFaces[6][7] = {
+      // normal xyz, then axis selectors handled below per face
+      {1, 0, 0, 0, 0, 0, 0},  {-1, 0, 0, 0, 0, 0, 0}, {0, 1, 0, 0, 0, 0, 0},
+      {0, -1, 0, 0, 0, 0, 0}, {0, 0, 1, 0, 0, 0, 0},  {0, 0, -1, 0, 0, 0, 0},
+  };
+  std::vector<float> vertices;
+  vertices.reserve(36 * 6);
+  for (const auto& face : kFaces) {
+    const float nx = face[0];
+    const float ny = face[1];
+    const float nz = face[2];
+    // Build tangent axes for the face.
+    const float ux = ny != 0 ? 1.0f : 0.0f;
+    const float uy = ny != 0 ? 0.0f : (nz != 0 ? 1.0f : 0.0f);
+    const float uz = (nx != 0) ? 1.0f : 0.0f;
+    const float vx = ny * uz - nz * uy;
+    const float vy = nz * ux - nx * uz;
+    const float vz = nx * uy - ny * ux;
+    const float corners[4][3] = {
+        {(nx - ux - vx) * 0.5f, (ny - uy - vy) * 0.5f, (nz - uz - vz) * 0.5f},
+        {(nx + ux - vx) * 0.5f, (ny + uy - vy) * 0.5f, (nz + uz - vz) * 0.5f},
+        {(nx + ux + vx) * 0.5f, (ny + uy + vy) * 0.5f, (nz + uz + vz) * 0.5f},
+        {(nx - ux + vx) * 0.5f, (ny - uy + vy) * 0.5f, (nz - uz + vz) * 0.5f},
+    };
+    const int tri[6] = {0, 1, 2, 0, 2, 3};
+    for (const int index : tri) {
+      vertices.push_back(corners[index][0]);
+      vertices.push_back(corners[index][1]);
+      vertices.push_back(corners[index][2]);
+      vertices.push_back(nx);
+      vertices.push_back(ny);
+      vertices.push_back(nz);
+    }
+  }
+  return vertices;
+}
+
+// Screen-space quad draw item: position/size in NDC, drawn at near depth
+// over the scene (unlit color path).
+inf::render::Rhi::DrawItem hud_quad(std::uint32_t mesh, double ndc_x, double ndc_y,
+                                    double width_ndc, double height_ndc, float r, float g,
+                                    float b) {
+  inf::render::Rhi::DrawItem item;
+  item.mesh = mesh;
+  Mat4 m{};
+  m.m[0] = static_cast<float>(width_ndc);
+  m.m[5] = static_cast<float>(height_ndc);
+  m.m[10] = 0.00001f;
+  m.m[12] = static_cast<float>(ndc_x);
+  m.m[13] = static_cast<float>(ndc_y);
+  m.m[14] = 0.0001f;  // near depth: passes the Less test over everything
+  m.m[15] = 1.0f;
+  std::memcpy(item.mvp, m.m, sizeof(m.m));
+  item.color[0] = r;
+  item.color[1] = g;
+  item.color[2] = b;
+  item.color[3] = 1.0f;
+  return item;
+}
 
 }  // namespace
 
 int main(int argc, char** argv) {
   long max_frames = 0;
-  bool autofly = false;
   const char* seed_text = "7";
   const char* type_text = nullptr;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       max_frames = std::strtol(argv[++i], nullptr, 10);
-    } else if (std::strcmp(argv[i], "--autofly") == 0) {
-      autofly = true;  // scripted orbit->surface descent (smoke/capture)
     } else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
       seed_text = argv[++i];
     } else if (std::strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
@@ -102,7 +169,6 @@ int main(int argc, char** argv) {
   const unsigned hardware = std::thread::hardware_concurrency();
   config.worker_count = hardware > 4 ? (hardware - 2 > 8 ? 8 : hardware - 2) : 2;
   config.split_factor = 1.5;
-  // Finest lod: ~32 m chunks => ~1 m voxels (spec section 6).
   std::uint8_t max_lod = 8;
   while ((2.0 * radius) / static_cast<double>(std::uint64_t{1} << max_lod) > 32.0 &&
          max_lod < 16) {
@@ -110,6 +176,7 @@ int main(int argc, char** argv) {
   }
   config.max_lod = max_lod;
   inf::world::ChunkManager manager(body, planet, config);
+  inf::sim::Player player(manager.field(), SVec3{radius * 2.2, 0.0, 0.0});
 
   std::printf("infinity %s (%s) — %s planet, radius %.0f m, %u workers\n", inf::core::kVersion,
               inf::core::kGitHash, inf::gen::to_string(planet.type), radius,
@@ -136,21 +203,23 @@ int main(int argc, char** argv) {
   }
   std::printf("adapter: %s\n", rhi->adapter_info().c_str());
 
-  // Spawn in low orbit above the +X face center; free camera flies down.
-  Vec3 camera_pos{radius * 2.2, 0.0, 0.0};
-  double yaw = 0.0;
-  double pitch = 0.0;
+  const std::vector<float> cube = unit_cube_vertices();
+  const std::uint32_t cube_mesh = rhi->create_mesh(cube.data(), cube.size());
 
   AppState state{rhi.get(), 1280, 720};
   glfwSetWindowUserPointer(window, &state);
   glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
   glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+  if (glfwRawMouseMotionSupported() == GLFW_TRUE) {
+    glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+  }
   double last_mx = 0.0;
   double last_my = 0.0;
   glfwGetCursorPos(window, &last_mx, &last_my);
   double last_time = glfwGetTime();
   double fps_accum = 0.0;
   int fps_frames = 0;
+  bool e_was_down = false;
 
   std::unordered_map<inf::core::ChunkAddr, LoadedChunk, AddrHash> loaded;
   std::vector<inf::render::Rhi::DrawItem> items;
@@ -162,60 +231,37 @@ int main(int argc, char** argv) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);
     }
     const double now = glfwGetTime();
-    const double dt = now > last_time ? now - last_time : 0.0;
+    const double dt = now > last_time ? std::min(now - last_time, 0.1) : 0.0;
     last_time = now;
 
-    // --- camera --------------------------------------------------------
+    // --- input ----------------------------------------------------------
     double mx = 0.0;
     double my = 0.0;
     glfwGetCursorPos(window, &mx, &my);
-    yaw += (mx - last_mx) * 0.002;
-    pitch -= (my - last_my) * 0.002;
-    pitch = pitch > 1.55 ? 1.55 : (pitch < -1.55 ? -1.55 : pitch);
+    const bool e_down = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
+
+    inf::sim::InputFrame input;
+    input.dt = dt;
+    input.mouse_dx = mx - last_mx;
+    input.mouse_dy = my - last_my;
+    input.forward = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+    input.back = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+    input.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+    input.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+    input.run = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+    input.fire = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    input.interact_pressed = e_down && !e_was_down;
+    input.aspect = static_cast<double>(state.width) / state.height;
+    input.fov_y = kFovY;
     last_mx = mx;
     last_my = my;
+    e_was_down = e_down;
 
-    if (autofly && max_frames > 0) {
-      // Scripted descent above the +X face: cubic ease from 1.2R altitude
-      // down to ~120 m, with a slow lateral drift; camera pitches from
-      // level to slightly downward.
-      const double t = static_cast<double>(frame) / static_cast<double>(max_frames);
-      const double ease = (1.0 - t) * (1.0 - t) * (1.0 - t);
-      const double drift = 0.08 * t;
-      const Vec3 dir = inf::render::normalize(Vec3{1.0, drift, 0.35 * drift});
-      camera_pos = dir * (radius + 120.0 + 1.2 * radius * ease);
-      yaw = 0.6;
-      pitch = -0.15 - 0.35 * t;
-    }
+    player.update(input);
 
-    // Radial-up tangent frame at the camera (free flight, M5 refines).
-    const Vec3 up = inf::render::normalize(camera_pos);
-    Vec3 reference{0.0, 0.0, 1.0};
-    if (std::abs(inf::render::dot(reference, up)) > 0.98) {
-      reference = Vec3{0.0, 1.0, 0.0};
-    }
-    const Vec3 east = inf::render::normalize(inf::render::cross(reference, up));
-    const Vec3 north = inf::render::cross(up, east);
-    const Vec3 forward = inf::render::normalize(
-        east * (std::cos(pitch) * std::sin(yaw)) + north * (std::cos(pitch) * std::cos(yaw)) +
-        up * std::sin(pitch));
-    const Vec3 right = inf::render::normalize(inf::render::cross(forward, up));
-
-    // Altitude-scaled speed (M5's governor in miniature).
-    const double altitude = inf::render::length(camera_pos) - radius;
-    double speed = std::max(15.0, std::abs(altitude) * 0.6);
-    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
-      speed *= 4.0;
-    }
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera_pos = camera_pos + forward * (speed * dt);
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera_pos = camera_pos - forward * (speed * dt);
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera_pos = camera_pos + right * (speed * dt);
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera_pos = camera_pos - right * (speed * dt);
-    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) camera_pos = camera_pos + up * (speed * dt);
-    if (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS) camera_pos = camera_pos - up * (speed * dt);
-
-    // --- streaming -----------------------------------------------------
-    const auto events = manager.update(camera_pos.x, camera_pos.y, camera_pos.z);
+    // --- streaming ------------------------------------------------------
+    const SVec3 player_pos = player.position();
+    const auto events = manager.update(player_pos.x, player_pos.y, player_pos.z);
     for (const auto& event : events) {
       if (event.kind == inf::world::ChunkEvent::Kind::Ready) {
         if (event.data->mesh.vertices.empty()) {
@@ -224,8 +270,8 @@ int main(int argc, char** argv) {
         LoadedChunk chunk;
         chunk.mesh_id = rhi->create_mesh(event.data->mesh.vertices.data(),
                                          event.data->mesh.vertices.size());
-        chunk.origin = Vec3{event.data->mesh.origin[0], event.data->mesh.origin[1],
-                            event.data->mesh.origin[2]};
+        chunk.origin = RVec3{event.data->mesh.origin[0], event.data->mesh.origin[1],
+                             event.data->mesh.origin[2]};
         loaded[event.addr] = chunk;
       } else {
         const auto it = loaded.find(event.addr);
@@ -236,30 +282,87 @@ int main(int argc, char** argv) {
       }
     }
 
-    // --- draw ----------------------------------------------------------
-    const double aspect = static_cast<double>(state.width) / state.height;
+    // --- draw -----------------------------------------------------------
+    const RVec3 camera_pos = to_render(player_pos);
+    const RVec3 cam_forward = to_render(player.forward());
+    const RVec3 cam_up = to_render(player.up());
+    const double altitude = inf::render::length(camera_pos) - radius;
     const double far_z = std::max(10'000.0, std::abs(altitude) * 4.0 + 2.5 * radius);
-    const Mat4 projection = inf::render::perspective(1.1, aspect, 0.5, far_z);
-    const Mat4 view = inf::render::look_dir(forward, up);
+    const Mat4 projection = inf::render::perspective(kFovY, input.aspect, 0.3, far_z);
+    const Mat4 view = inf::render::look_dir(cam_forward, cam_up);
+    const Mat4 view_projection = inf::render::mul(projection, view);
+
     items.clear();
-    items.reserve(loaded.size());
+    items.reserve(loaded.size() + player.beams().size() + 8);
     for (const auto& [addr, chunk] : loaded) {
       inf::render::Rhi::DrawItem item;
       item.mesh = chunk.mesh_id;
       const Mat4 model = inf::render::translate(chunk.origin - camera_pos);
-      const Mat4 mvp = inf::render::mul(projection, inf::render::mul(view, model));
+      const Mat4 mvp = inf::render::mul(view_projection, model);
       std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
       items.push_back(item);
     }
+
+    // Beams: thin elongated boxes along their velocity, unlit.
+    for (const auto& beam : player.beams()) {
+      const RVec3 dir = to_render(inf::sim::normalize(beam.velocity));
+      RVec3 side = inf::render::cross(dir, cam_up);
+      if (inf::render::length(side) < 1e-6) {
+        side = inf::render::cross(dir, RVec3{0.0, 0.0, 1.0});
+      }
+      side = inf::render::normalize(side);
+      const RVec3 lift = inf::render::cross(side, dir);
+      const Mat4 model = inf::render::from_basis(side * 0.08, lift * 0.08, dir * 6.0,
+                                                 to_render(beam.position) - camera_pos);
+      inf::render::Rhi::DrawItem item;
+      item.mesh = cube_mesh;
+      const Mat4 mvp = inf::render::mul(view_projection, model);
+      std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+      item.color[0] = 1.0f;
+      item.color[1] = 0.35f;
+      item.color[2] = 0.15f;
+      item.color[3] = 1.0f;
+      items.push_back(item);
+    }
+
+    // HUD: fixed center crosshair; in flight additionally the steering
+    // reticle at its deflection.
+    const double px = 2.0 / state.height;  // one pixel in NDC-y units
+    const double cross_len = 14.0 * px;
+    const double cross_thick = 2.5 * px;
+    const double ar = input.aspect;
+    items.push_back(hud_quad(cube_mesh, 0.0, 0.0, cross_len / ar, cross_thick, 0.9f, 0.95f, 1.0f));
+    items.push_back(hud_quad(cube_mesh, 0.0, 0.0, cross_thick / ar, cross_len, 0.9f, 0.95f, 1.0f));
+    if (player.mode() == inf::sim::PlayerMode::Flight ||
+        player.mode() == inf::sim::PlayerMode::Takeoff) {
+      const double rx = player.reticle_x();
+      const double ry = player.reticle_y();
+      const double box = 10.0 * px;
+      const double thick = 2.5 * px;
+      // Small hollow square: four bars.
+      items.push_back(hud_quad(cube_mesh, rx, ry + box, box * 2.2 / ar, thick, 1.0f, 0.75f, 0.2f));
+      items.push_back(hud_quad(cube_mesh, rx, ry - box, box * 2.2 / ar, thick, 1.0f, 0.75f, 0.2f));
+      items.push_back(hud_quad(cube_mesh, rx + box / ar, ry, thick / ar, box * 2.2, 1.0f, 0.75f, 0.2f));
+      items.push_back(hud_quad(cube_mesh, rx - box / ar, ry, thick / ar, box * 2.2, 1.0f, 0.75f, 0.2f));
+    }
+
     rhi->render_frame(0.05f, 0.06f, 0.12f, items.data(), items.size());
 
     fps_accum += dt;
     ++fps_frames;
     if (fps_accum >= 1.0) {
-      char title[160];
+      const char* mode_name = "flight";
+      switch (player.mode()) {
+        case inf::sim::PlayerMode::Landing: mode_name = "landing"; break;
+        case inf::sim::PlayerMode::OnFoot: mode_name = "on foot"; break;
+        case inf::sim::PlayerMode::Takeoff: mode_name = "takeoff"; break;
+        default: break;
+      }
+      char title[192];
       std::snprintf(title, sizeof(title),
-                    "infinity — %.0f fps | %zu chunks | alt %.0f m | speed %.0f m/s",
-                    fps_frames / fps_accum, loaded.size(), altitude, speed);
+                    "infinity — %s | %.0f fps | %zu chunks | alt %.0f m | %.0f m/s",
+                    mode_name, fps_frames / fps_accum, loaded.size(), player.altitude(),
+                    player.speed());
       glfwSetWindowTitle(window, title);
       fps_accum = 0.0;
       fps_frames = 0;

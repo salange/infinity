@@ -71,5 +71,14 @@ if(INFINITY_BUILD_APP)
   add_library(wgpu::wgpu ALIAS wgpu_native)
 endif()
 
-# Dear ImGui (debug HUD) and stb (image dump) are first used in M2/M3; they
-# get pinned here (tag + hash) when the first target links them.
+# --- stb (single headers; image dump in cli/gen tooling) --------------------
+FetchContent_Declare(stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
+FetchContent_MakeAvailable(stb)
+add_library(stb_headers INTERFACE)
+target_include_directories(stb_headers INTERFACE "${stb_SOURCE_DIR}")
+add_library(stb::headers ALIAS stb_headers)
+
+# Dear ImGui (debug HUD) is first used in M3+; it gets pinned here when the
+# first target links it.

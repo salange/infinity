@@ -62,6 +62,15 @@ fi
 echo "=== golden hashes ==="
 "$CLI" hash-core | diff - tests/goldens/hash-core.txt \
   || { echo "FAIL: hash-core diverges from goldens" >&2; exit 1; }
+"$CLI" hash-planet | diff - tests/goldens/hash-planet.txt \
+  || { echo "FAIL: hash-planet diverges from goldens" >&2; exit 1; }
+
+echo "=== payload determinism ==="
+"$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-a.json
+"$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-b.json
+diff /tmp/infinity-dump-a.json /tmp/infinity-dump-b.json \
+  || { echo "FAIL: dump-planet not reproducible" >&2; exit 1; }
+rm -f /tmp/infinity-dump-a.json /tmp/infinity-dump-b.json
 
 echo "=== headless invariant ==="
 # cli must not link window/GPU libraries.

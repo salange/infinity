@@ -5,9 +5,11 @@ add_executable(infinity_tests
   test_key.cpp
   test_fixed64.cpp
   test_mix.cpp
-  test_names.cpp)
+  test_names.cpp
+  test_planet.cpp
+  test_provinces.cpp)
 target_include_directories(infinity_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(infinity_tests
-  PRIVATE infinity::core doctest::doctest infinity_warnings)
+  PRIVATE infinity::core infinity::gen doctest::doctest infinity_warnings)
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(infinity_tests)

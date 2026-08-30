@@ -6,6 +6,7 @@
 #include "gen/planet.hpp"
 #include "gen/terrain.hpp"
 #include "sim/player.hpp"
+#include "world/effective_field.hpp"
 
 using namespace inf;
 using sim::InputFrame;
@@ -46,7 +47,8 @@ TEST_CASE("player: ship cannot penetrate the ground") {
   const Vec3 dir{1.0, 0.2, 0.1};
   const Vec3 unit = sim::normalize(dir);
   const double ground = ground_r(field, unit);
-  Player player(field, unit * (ground - 25.0));
+  const world::EffectiveField eff(field);
+  Player player(eff, unit * (ground - 25.0));
   player.update(tick(0.016));
   CHECK(sim::length(player.position()) >= ground + Player::kShipClearance - 0.01);
 
@@ -67,7 +69,8 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
   const gen::TerrainField field(body, planet);
 
   const Vec3 unit = sim::normalize(Vec3{1.0, -0.3, 0.25});
-  Player player(field, unit * (ground_r(field, unit) + 120.0));
+  const world::EffectiveField eff(field);
+  Player player(eff, unit * (ground_r(field, unit) + 120.0));
 
   InputFrame land = tick(0.016);
   land.interact_pressed = true;
@@ -111,7 +114,8 @@ TEST_CASE("player: beams fire toward the crosshair and expire by distance") {
   const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::Barren);
   const gen::TerrainField field(body, planet);
   const Vec3 unit = sim::normalize(Vec3{0.3, 1.0, 0.2});
-  Player player(field, unit * (ground_r(field, unit) + 500.0));
+  const world::EffectiveField eff(field);
+  Player player(eff, unit * (ground_r(field, unit) + 500.0));
 
   InputFrame fire = tick(0.016);
   fire.fire = true;
@@ -139,7 +143,8 @@ TEST_CASE("player: throttle never reverses") {
   const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::Ice);
   const gen::TerrainField field(body, planet);
   const Vec3 unit = sim::normalize(Vec3{1.0, 0.0, 0.0});
-  Player player(field, unit * (ground_r(field, unit) + 2000.0));
+  const world::EffectiveField eff(field);
+  Player player(eff, unit * (ground_r(field, unit) + 2000.0));
 
   InputFrame accel = tick(0.016);
   accel.forward = true;

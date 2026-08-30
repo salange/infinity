@@ -148,6 +148,28 @@ std::vector<float> disc_vertices(int segments) {
   return vertices;
 }
 
+std::vector<float> ring_vertices(int segments, float inner, float outer) {
+  std::vector<float> vertices;
+  const double tau = 2.0 * 3.14159265358979323846;
+  for (int s = 0; s < segments; ++s) {
+    const double a0 = tau * s / segments;
+    const double a1 = tau * (s + 1) / segments;
+    const float c0 = static_cast<float>(std::cos(a0));
+    const float s0 = static_cast<float>(std::sin(a0));
+    const float c1 = static_cast<float>(std::cos(a1));
+    const float s1 = static_cast<float>(std::sin(a1));
+    const float quad[4][2] = {{c0 * inner, s0 * inner},
+                              {c0 * outer, s0 * outer},
+                              {c1 * outer, s1 * outer},
+                              {c1 * inner, s1 * inner}};
+    const int tri[6] = {0, 1, 2, 0, 2, 3};
+    for (const int v : tri) {
+      vertices.insert(vertices.end(), {quad[v][0], quad[v][1], 0.0f, 0.0f, 0.0f, 1.0f});
+    }
+  }
+  return vertices;
+}
+
 }  // namespace
 
 struct Hud::Impl {
@@ -157,8 +179,10 @@ struct Hud::Impl {
 
   std::uint32_t quad_mesh = 0;
   std::uint32_t disc_mesh = 0;
+  std::uint32_t ring_mesh = 0;
   TextLine speed_line;
   TextLine range_line;
+  TextLine asl_line;
   TextLine biome_line;
   TextLine letter_n, letter_s, letter_e, letter_w;
 
@@ -178,8 +202,10 @@ struct Hud::Impl {
       : rhi(rhi_in), field(field_in), planet(planet_in) {
     const auto quad = unit_quad_vertices();
     quad_mesh = rhi->create_mesh(quad.data(), quad.size());
-    const auto disc = disc_vertices(24);
+    const auto disc = disc_vertices(48);
     disc_mesh = rhi->create_mesh(disc.data(), disc.size());
+    const auto ring = ring_vertices(48, 0.47f, 0.5f);
+    ring_mesh = rhi->create_mesh(ring.data(), ring.size());
     grid_elev.assign(static_cast<std::size_t>(kGridN) * kGridN, 0.0);
     letter_n.set(rhi, "N");
     letter_s.set(rhi, "S");
@@ -190,8 +216,9 @@ struct Hud::Impl {
   ~Impl() {
     rhi->destroy_mesh(quad_mesh);
     rhi->destroy_mesh(disc_mesh);
-    for (TextLine* line : {&speed_line, &range_line, &biome_line, &letter_n, &letter_s,
-                           &letter_e, &letter_w}) {
+    rhi->destroy_mesh(ring_mesh);
+    for (TextLine* line : {&speed_line, &range_line, &asl_line, &biome_line, &letter_n,
+                           &letter_s, &letter_e, &letter_w}) {
       line->destroy(rhi);
     }
   }
@@ -251,6 +278,30 @@ struct Hud::Impl {
     }
   }
 
+  // Circular radar chrome: dark disc, outer ring, inner range ring,
+  // center cross lines and edge ticks ("common games" look).
+  void radar_chrome(std::vector<Rhi::DrawItem>* items, double cx, double aspect) {
+    const Color line{0.35f, 0.75f, 0.65f};
+    items->push_back(hud_item(disc_mesh, cx, kRadarCenterY, kRadarHalf * 2.2, kRadarHalf * 2.2,
+                              Color{0.03f, 0.07f, 0.08f}, aspect, 0.0002));
+    items->push_back(hud_item(ring_mesh, cx, kRadarCenterY, kRadarHalf * 2.2, kRadarHalf * 2.2,
+                              line, aspect, 0.00012));
+    items->push_back(hud_item(ring_mesh, cx, kRadarCenterY, kRadarHalf * 1.1, kRadarHalf * 1.1,
+                              Color{0.2f, 0.45f, 0.4f}, aspect, 0.00012));
+    const double px = 0.0028;
+    items->push_back(hud_item(quad_mesh, cx, kRadarCenterY, kRadarHalf * 2.05, px,
+                              Color{0.16f, 0.36f, 0.32f}, aspect, 0.00013));
+    items->push_back(hud_item(quad_mesh, cx, kRadarCenterY, px, kRadarHalf * 2.05,
+                              Color{0.16f, 0.36f, 0.32f}, aspect, 0.00013));
+    for (int t = 0; t < 4; ++t) {
+      const double angle = t * 3.14159265358979323846 * 0.5;
+      const double tx = std::cos(angle) * kRadarHalf * 1.04;
+      const double ty = std::sin(angle) * kRadarHalf * 1.04;
+      items->push_back(hud_item(quad_mesh, cx + tx, kRadarCenterY + ty, px * 3.0, px * 3.0,
+                                line, aspect, 0.00012));
+    }
+  }
+
   void radar_atmosphere(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
                         double aspect) {
     const double cx = kRadarCenterX * aspect;
@@ -267,9 +318,7 @@ struct Hud::Impl {
     heading = sim::normalize(heading);
     const Vec3 screen_right = sim::cross(heading, up);
 
-    // Background panel.
-    items->push_back(hud_item(quad_mesh, cx, kRadarCenterY, kRadarHalf * 2.15,
-                              kRadarHalf * 2.15, Color{0.05f, 0.08f, 0.10f}, aspect, 0.0002));
+    radar_chrome(items, cx, aspect);
 
     // Elevation range for coloring.
     double lo = 1e30;
@@ -291,8 +340,8 @@ struct Hud::Impl {
       const Vec3 world_offset = grid_east * ox + grid_north * oy;
       const double sx = sim::dot(world_offset, screen_right) / grid_span * (kRadarHalf * 2.0);
       const double sy = sim::dot(world_offset, heading) / grid_span * (kRadarHalf * 2.0);
-      if (std::abs(sx) > kRadarHalf - cell * 0.5 || std::abs(sy) > kRadarHalf - cell * 0.5) {
-        continue;  // keep the rotated grid inside the square panel
+      if (sx * sx + sy * sy > (kRadarHalf - cell) * (kRadarHalf - cell)) {
+        continue;  // circular radar: clip to the ring
       }
       const double elev = grid_elev[static_cast<std::size_t>(index)];
       Color color{};
@@ -331,9 +380,7 @@ struct Hud::Impl {
   void radar_space(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
                    double aspect) {
     const double cx = kRadarCenterX * aspect;
-    // Background panel.
-    items->push_back(hud_item(quad_mesh, cx, kRadarCenterY, kRadarHalf * 2.15,
-                              kRadarHalf * 2.15, Color{0.05f, 0.08f, 0.10f}, aspect, 0.0002));
+    radar_chrome(items, cx, aspect);
 
     const Vec3 position = player.position();
     const Vec3 forward = player.forward();
@@ -403,16 +450,28 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
   }
   impl.speed_line.set(impl.rhi, buffer);
   if (near_planet) {
-    std::snprintf(buffer, sizeof(buffer), "ALT %7.0f m", altitude);
+    std::snprintf(buffer, sizeof(buffer), "AGL %7.0f m", altitude);
   } else if (altitude >= 100'000.0) {
     std::snprintf(buffer, sizeof(buffer), "DST %7.0f km", altitude / 1000.0);
   } else {
     std::snprintf(buffer, sizeof(buffer), "DST %7.1f km", altitude / 1000.0);
   }
   impl.range_line.set(impl.rhi, buffer);
+  if (near_planet) {
+    // Height above sea level (sea = radius + sea offset; 0 for airless
+    // types, still a useful datum above the nominal radius).
+    const double sea_r =
+        impl.planet.radius_m.to_double() + impl.planet.sea_level_m.to_double();
+    const double asl = sim::length(player.position()) - sea_r;
+    std::snprintf(buffer, sizeof(buffer), "ASL %7.0f m", asl);
+    impl.asl_line.set(impl.rhi, buffer);
+  } else {
+    impl.asl_line.set(impl.rhi, "");
+  }
   const Color text_color{0.85f, 0.95f, 1.0f};
-  impl.text_item(items, impl.speed_line, -0.96 * aspect, -0.84, 0.0042, text_color, aspect);
-  impl.text_item(items, impl.range_line, -0.96 * aspect, -0.91, 0.0042, text_color, aspect);
+  impl.text_item(items, impl.speed_line, -0.96 * aspect, -0.78, 0.0042, text_color, aspect);
+  impl.text_item(items, impl.range_line, -0.96 * aspect, -0.85, 0.0042, text_color, aspect);
+  impl.text_item(items, impl.asl_line, -0.96 * aspect, -0.92, 0.0042, text_color, aspect);
 
   // --- lower right: radar + biome --------------------------------------
   if (near_planet) {

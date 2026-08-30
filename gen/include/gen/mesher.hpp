@@ -20,9 +20,25 @@ struct ChunkMesh {
   std::size_t triangle_count() const { return vertices.size() / 18; }
 };
 
-// Marching cubes (classic tables) over a chunk's padded density grid.
-// Normals are density-gradient normals (smooth, chunk-seam-consistent);
-// the padded ring supplies boundary gradients.
-ChunkMesh mesh_chunk(const ChunkGrid& grid, const PaddedDensity& padded);
+// Which lateral faces border a COARSER neighbor column (Transvoxel
+// transition faces). Radial neighbors are always same-lod, so only the
+// four lateral faces can transition.
+enum TransitionFace : std::uint8_t {
+  kTransitionUMinus = 1U << 0,  // gx = 0
+  kTransitionUPlus = 1U << 1,   // gx = kVoxels
+  kTransitionVMinus = 1U << 2,  // gy = 0
+  kTransitionVPlus = 1U << 3,   // gy = kVoxels
+};
+using TransitionMask = std::uint8_t;
+
+// Transvoxel meshing (Lengyel 2010; vendored MIT tables) over a chunk's
+// padded density grid: modified marching cubes for regular cells, with
+// the boundary sample layer retreated by half a cell on transition faces
+// and transition cells stitching to the coarser neighbor's face — the
+// low-res side of a transition cell reproduces exactly the crossing
+// pattern the coarse chunk generates on the shared face. Normals are
+// density-gradient normals (smooth, chunk-seam-consistent).
+ChunkMesh mesh_chunk(const ChunkGrid& grid, const PaddedDensity& padded,
+                     TransitionMask transitions = 0);
 
 }  // namespace inf::gen

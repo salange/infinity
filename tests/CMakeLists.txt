@@ -10,6 +10,7 @@ add_executable(infinity_tests
   test_provinces.cpp
   test_terrain.cpp
   test_world.cpp
+  test_seam.cpp
   test_player.cpp)
 target_include_directories(infinity_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(infinity_tests

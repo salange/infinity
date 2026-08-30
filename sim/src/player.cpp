@@ -23,7 +23,7 @@ Vec3 lerp(const Vec3& a, const Vec3& b, double t) { return a + (b - a) * t; }
 
 }  // namespace
 
-Player::Player(const gen::TerrainField& field, Vec3 spawn_position)
+Player::Player(const world::EffectiveField& field, Vec3 spawn_position)
     : field_(field), position_(spawn_position) {
   // Start pointing "east-ish" with radial up-ish; orthonormalized below.
   up_ = normalize(position_);
@@ -37,6 +37,15 @@ Player::Player(const gen::TerrainField& field, Vec3 spawn_position)
 double Player::ground_radius(const Vec3& dir) const {
   const gen::Dir3 unit{det::Real(dir.x), det::Real(dir.y), det::Real(dir.z)};
   return field_.ground_radius_m(unit).to_double();
+}
+
+FlightZone Player::zone() const {
+  const double atmosphere = field_.planet().atmosphere_height_m.to_double();
+  if (atmosphere <= 0.0) {
+    return FlightZone::Space;
+  }
+  const double alt = length(position_) - field_.planet().radius_m.to_double();
+  return alt < atmosphere ? FlightZone::Atmosphere : FlightZone::Space;
 }
 
 double Player::altitude() const {
@@ -83,8 +92,11 @@ void Player::update_flight(const InputFrame& input) {
   up_ = normalize(up_ - forward_ * dot(up_, forward_));
 
   // --- throttle -----------------------------------------------------------
+  // Altitude governor between the hard caps: Mach 2 inside the atmosphere
+  // band, 0.1c outside (spec section 9; airless planets have no band).
   const double alt = std::max(0.0, length(position_) - field_.planet().radius_m.to_double());
-  const double cap = std::clamp(alt * 0.8, 40.0, 29'979'245.8);  // governor, 0.1c hard cap
+  const double zone_cap = zone() == FlightZone::Atmosphere ? kMachTwo : kTenthC;
+  const double cap = std::min(std::clamp(alt * 0.8, 40.0, kTenthC), zone_cap);
   const double accel = std::max(25.0, cap / 2.5);
   if (input.forward) {
     speed_ += accel * dt;

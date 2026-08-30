@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include "render/rhi.hpp"
 #include "sim/player.hpp"
 #include "world/chunk_manager.hpp"
+#include "world/effective_field.hpp"
 
 namespace {
 
@@ -127,6 +129,30 @@ inf::render::Rhi::DrawItem hud_quad(std::uint32_t mesh, double ndc_x, double ndc
   return item;
 }
 
+std::vector<float> unit_sphere_vertices(int slices, int stacks) {
+  std::vector<float> vertices;
+  const double pi = 3.14159265358979323846;
+  auto point = [&](int slice, int stack) {
+    const double phi = pi * stack / stacks - pi * 0.5;
+    const double theta = 2.0 * pi * slice / slices;
+    return std::array<float, 3>{static_cast<float>(std::cos(phi) * std::cos(theta)),
+                                static_cast<float>(std::cos(phi) * std::sin(theta)),
+                                static_cast<float>(std::sin(phi))};
+  };
+  for (int stack = 0; stack < stacks; ++stack) {
+    for (int slice = 0; slice < slices; ++slice) {
+      const auto p00 = point(slice, stack);
+      const auto p10 = point(slice + 1, stack);
+      const auto p01 = point(slice, stack + 1);
+      const auto p11 = point(slice + 1, stack + 1);
+      for (const auto& p : {p00, p10, p11, p00, p11, p01}) {
+        vertices.insert(vertices.end(), {p[0], p[1], p[2], p[0], p[1], p[2]});
+      }
+    }
+  }
+  return vertices;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -180,8 +206,9 @@ int main(int argc, char** argv) {
   }
   config.max_lod = max_lod;
   inf::world::ChunkManager manager(body, planet, config);
+  const inf::world::EffectiveField effective(manager.field());
   const double spawn_r = spawn_altitude >= 0.0 ? radius + spawn_altitude : radius * 2.2;
-  inf::sim::Player player(manager.field(),
+  inf::sim::Player player(effective,
                           inf::sim::normalize(SVec3{1.0, 0.15, 0.3}) * spawn_r);
 
   std::printf("infinity %s (%s) — %s planet, radius %.0f m, %u workers\n", inf::core::kVersion,
@@ -211,6 +238,15 @@ int main(int argc, char** argv) {
 
   const std::vector<float> cube = unit_cube_vertices();
   const std::uint32_t cube_mesh = rhi->create_mesh(cube.data(), cube.size());
+  // Sea shell (spec section 5): one translucent sphere at sea level,
+  // EarthLike only. Zero shading effort by design.
+  std::uint32_t sea_mesh = 0;
+  double sea_radius = 0.0;
+  if (planet.type == inf::gen::PlanetType::EarthLike) {
+    const std::vector<float> sphere = unit_sphere_vertices(64, 32);
+    sea_mesh = rhi->create_mesh(sphere.data(), sphere.size());
+    sea_radius = radius + planet.sea_level_m.to_double();
+  }
   {  // HUD scope: must destruct before the RHI is torn down.
   inf::app::Hud hud(rhi.get(), &manager.field(), planet);
   SVec3 last_player_pos = player.position();
@@ -283,6 +319,13 @@ int main(int argc, char** argv) {
     const auto events = manager.update(player_pos.x, player_pos.y, player_pos.z);
     for (const auto& event : events) {
       if (event.kind == inf::world::ChunkEvent::Kind::Ready) {
+        // Replace any previous mesh for this address (re-mesh on neighbor
+        // lod change delivers updated geometry under the same address).
+        const auto old = loaded.find(event.addr);
+        if (old != loaded.end()) {
+          rhi->destroy_mesh(old->second.mesh_id);
+          loaded.erase(old);
+        }
         if (event.data->mesh.vertices.empty()) {
           continue;
         }
@@ -302,6 +345,28 @@ int main(int argc, char** argv) {
     }
 
     // --- draw -----------------------------------------------------------
+    // Simple sky (M5): blend the type's sky palette toward space black by
+    // altitude within the atmosphere band.
+    float sky[3] = {0.05f, 0.06f, 0.12f};
+    {
+      double atmosphere = planet.atmosphere_height_m.to_double();
+      float palette[3] = {0.05f, 0.06f, 0.12f};
+      switch (planet.type) {
+        case inf::gen::PlanetType::EarthLike: palette[0] = 0.45f; palette[1] = 0.65f; palette[2] = 0.95f; break;
+        case inf::gen::PlanetType::Desert: palette[0] = 0.78f; palette[1] = 0.58f; palette[2] = 0.42f; break;
+        case inf::gen::PlanetType::Ice: palette[0] = 0.62f; palette[1] = 0.74f; palette[2] = 0.92f; break;
+        case inf::gen::PlanetType::Barren: atmosphere = 0.0; break;
+      }
+      if (atmosphere > 0.0) {
+        const double raw_alt = inf::render::length(to_render(player_pos)) - radius;
+        double t = 1.0 - raw_alt / atmosphere;
+        t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+        t = std::pow(t, 0.7);
+        for (int c = 0; c < 3; ++c) {
+          sky[c] = sky[c] + static_cast<float>(t) * (palette[c] - sky[c]);
+        }
+      }
+    }
     const RVec3 camera_pos = to_render(player_pos);
     const RVec3 cam_forward = to_render(player.forward());
     const RVec3 cam_up = to_render(player.up());
@@ -365,14 +430,32 @@ int main(int argc, char** argv) {
       items.push_back(hud_quad(cube_mesh, rx - box / ar, ry, thick / ar, box * 2.2, 1.0f, 0.75f, 0.2f));
     }
 
+    if (sea_mesh != 0) {
+      inf::render::Rhi::DrawItem item;
+      item.mesh = sea_mesh;
+      const Mat4 model = inf::render::from_basis(
+          RVec3{sea_radius, 0.0, 0.0}, RVec3{0.0, sea_radius, 0.0}, RVec3{0.0, 0.0, sea_radius},
+          RVec3{0.0, 0.0, 0.0} - camera_pos);
+      const Mat4 mvp = inf::render::mul(view_projection, model);
+      std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+      item.color[0] = 0.16f;
+      item.color[1] = 0.36f;
+      item.color[2] = 0.62f;
+      item.color[3] = 0.42f;
+      item.translucent = true;
+      items.push_back(item);
+    }
+
     hud.build(&items, player, measured_speed, input.aspect, state.height, dt);
 
-    rhi->render_frame(0.05f, 0.06f, 0.12f, items.data(), items.size());
+    rhi->render_frame(sky[0], sky[1], sky[2], items.data(), items.size());
 
     fps_accum += dt;
     ++fps_frames;
     if (fps_accum >= 1.0) {
-      const char* mode_name = "flight";
+      const char* mode_name = player.zone() == inf::sim::FlightZone::Atmosphere
+                                  ? "flight (atmo)"
+                                  : "flight (space)";
       switch (player.mode()) {
         case inf::sim::PlayerMode::Landing: mode_name = "landing"; break;
         case inf::sim::PlayerMode::OnFoot: mode_name = "on foot"; break;

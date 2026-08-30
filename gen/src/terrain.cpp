@@ -1,6 +1,7 @@
 #include "gen/terrain.hpp"
 
 #include <bit>
+#include <cmath>
 
 #include "core/det/mix.hpp"
 #include "core/golden.hpp"
@@ -18,7 +19,71 @@ TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet
 }
 
 Real TerrainField::elevation_m(const Dir3& unit_dir) const {
-  return elevation_from_params(unit_dir, provinces_.sample(unit_dir));
+  const CanonicalParams canonical = canonical_params(dir_to_face_uv(unit_dir));
+  BlendedParams params{};
+  params.relief_amplitude_m = canonical.relief_amplitude_m;
+  params.base_elevation_m = canonical.base_elevation_m;
+  params.ruggedness = canonical.ruggedness;
+  params.carving = canonical.carving;
+  return elevation_from_params(unit_dir, params);
+}
+
+TerrainField::CanonicalParams TerrainField::param_lattice_value(std::uint8_t face,
+                                                               std::uint32_t ci,
+                                                               std::uint32_t cj) const {
+  const auto cells = static_cast<double>(kParamLatticeCells);
+  const Real u(-1.0 + 2.0 * static_cast<double>(ci) / cells);
+  const Real v(-1.0 + 2.0 * static_cast<double>(cj) / cells);
+  const Dir3 dir = face_uv_to_dir(FaceUV{face, u, v});
+  const BlendedParams blended = provinces_.sample(dir);
+  return CanonicalParams{blended.relief_amplitude_m, blended.base_elevation_m,
+                         blended.ruggedness, blended.carving};
+}
+
+TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_uv,
+                                                             ParamCache* cache) const {
+  const auto lattice = [&](std::uint32_t ci, std::uint32_t cj) {
+    if (cache == nullptr) {
+      return param_lattice_value(face_uv.face, ci, cj);
+    }
+    const std::uint64_t key = (static_cast<std::uint64_t>(face_uv.face) << 40U) |
+                              (static_cast<std::uint64_t>(ci) << 20U) | cj;
+    const auto it = cache->find(key);
+    if (it != cache->end()) {
+      return it->second;
+    }
+    const CanonicalParams value = param_lattice_value(face_uv.face, ci, cj);
+    cache->emplace(key, value);
+    return value;
+  };
+  const auto cells = static_cast<double>(kParamLatticeCells);
+  auto locate = [&](Real coord, std::uint32_t* cell, Real* frac) {
+    const double scaled = (coord.to_double() + 1.0) * 0.5 * cells;
+    double base = std::floor(scaled);
+    if (base < 0.0) base = 0.0;
+    if (base > cells - 1.0) base = cells - 1.0;
+    *cell = static_cast<std::uint32_t>(base);
+    *frac = Real(scaled - base);
+  };
+  std::uint32_t ci = 0;
+  std::uint32_t cj = 0;
+  Real fu(0.0);
+  Real fv(0.0);
+  locate(face_uv.u, &ci, &fu);
+  locate(face_uv.v, &cj, &fv);
+  const CanonicalParams p00 = lattice(ci, cj);
+  const CanonicalParams p10 = lattice(ci + 1, cj);
+  const CanonicalParams p01 = lattice(ci, cj + 1);
+  const CanonicalParams p11 = lattice(ci + 1, cj + 1);
+  auto bilerp = [&](Real CanonicalParams::* member) {
+    const Real a = det::lerp(p00.*member, p10.*member, fu);
+    const Real b = det::lerp(p01.*member, p11.*member, fu);
+    return det::lerp(a, b, fv);
+  };
+  return CanonicalParams{bilerp(&CanonicalParams::relief_amplitude_m),
+                         bilerp(&CanonicalParams::base_elevation_m),
+                         bilerp(&CanonicalParams::ruggedness),
+                         bilerp(&CanonicalParams::carving)};
 }
 
 Real TerrainField::elevation_from_params(const Dir3& unit_dir,
@@ -105,17 +170,25 @@ ChunkGrid ChunkGrid::from_addr(const core::ChunkAddr& addr, const PlanetParams& 
 
   // Lateral arc length of the chunk at surface radius ~ radius * span
   // (uv is roughly angle-linear per face). Radial thickness matches it.
+  // Shell boundaries sit at integer multiples of the thickness so that
+  // lod L-1 boundaries coincide with every second lod L boundary (2:1
+  // face alignment — required for crack-free LOD stitching).
   const Real thickness = planet.radius_m * Real(span);
   const Real shell(static_cast<double>(addr.shell));
-  grid.r0 = planet.radius_m + shell * thickness - thickness * Real(0.5);
+  grid.r0 = planet.radius_m + shell * thickness;
   grid.r1 = grid.r0 + thickness;
   return grid;
 }
 
 Dir3 ChunkGrid::corner_position(int gx, int gy, int gz) const {
-  const Real fx(static_cast<double>(gx) / kVoxels);
-  const Real fy(static_cast<double>(gy) / kVoxels);
-  const Real fz(static_cast<double>(gz) / kVoxels);
+  return corner_position_f(static_cast<double>(gx), static_cast<double>(gy),
+                           static_cast<double>(gz));
+}
+
+Dir3 ChunkGrid::corner_position_f(double gx, double gy, double gz) const {
+  const Real fx(gx / kVoxels);
+  const Real fy(gy / kVoxels);
+  const Real fz(gz / kVoxels);
   const Real u = det::lerp(u0, u1, fx);
   const Real v = det::lerp(v0, v1, fy);
   const Real r = det::lerp(r0, r1, fz);
@@ -131,26 +204,10 @@ namespace {
 std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid, int lo,
                                int hi) {
   const auto count = static_cast<std::size_t>(hi - lo + 1);
-
-  // Province parameters at the chunk's four uv-corners. Corners are shared
-  // between neighboring chunks (same directions => same values), and
-  // bilinear interpolation along a shared edge depends only on that edge's
-  // endpoints — so the interpolated field is continuous across chunk
-  // borders by construction. Provinces vary at kilometer scale; a chunk is
-  // tens of meters wide, so the interpolation error is negligible.
-  BlendedParams corner_params[2][2];
-  for (int cu = 0; cu < 2; ++cu) {
-    for (int cv = 0; cv < 2; ++cv) {
-      const Dir3 dir = face_uv_to_dir(FaceUV{grid.addr.face, cu == 0 ? grid.u0 : grid.u1,
-                                             cv == 0 ? grid.v0 : grid.v1});
-      corner_params[cu][cv] = field.provinces().sample(dir);
-    }
-  }
-  const auto bilerp = [&](Real BlendedParams::* member, Real fx, Real fy) {
-    const Real a = det::lerp(corner_params[0][0].*member, corner_params[1][0].*member, fx);
-    const Real b = det::lerp(corner_params[0][1].*member, corner_params[1][1].*member, fx);
-    return det::lerp(a, b, fy);
-  };
+  // Canonical global param lattice (see TerrainField::canonical_params):
+  // every chunk computes bit-identical parameter values at a given world
+  // direction, so densities agree exactly across all chunk/lod seams.
+  TerrainField::ParamCache param_cache;
 
   std::vector<Real> densities(count * count * count, Real(0.0));
   // Elevation depends only on direction: one evaluation per (gx, gy)
@@ -161,13 +218,16 @@ std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid,
       const Real fy(static_cast<double>(gy) / ChunkGrid::kVoxels);
       const Real u = det::lerp(grid.u0, grid.u1, fx);
       const Real v = det::lerp(grid.v0, grid.v1, fy);
-      const Dir3 dir = face_uv_to_dir(FaceUV{grid.addr.face, u, v});
+      const FaceUV face_uv{grid.addr.face, u, v};
+      const Dir3 dir = face_uv_to_dir(face_uv);
 
+      const TerrainField::CanonicalParams canonical =
+          field.canonical_params(face_uv, &param_cache);
       BlendedParams params{};
-      params.relief_amplitude_m = bilerp(&BlendedParams::relief_amplitude_m, fx, fy);
-      params.base_elevation_m = bilerp(&BlendedParams::base_elevation_m, fx, fy);
-      params.ruggedness = bilerp(&BlendedParams::ruggedness, fx, fy);
-      params.carving = bilerp(&BlendedParams::carving, fx, fy);
+      params.relief_amplitude_m = canonical.relief_amplitude_m;
+      params.base_elevation_m = canonical.base_elevation_m;
+      params.ruggedness = canonical.ruggedness;
+      params.carving = canonical.carving;
       const Real surface_r = field.planet().radius_m + field.elevation_from_params(dir, params);
 
       for (int gz = lo; gz <= hi; ++gz) {

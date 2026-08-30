@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "core/chunk_addr.hpp"
@@ -24,11 +25,32 @@ class TerrainField {
   // Blends province parameters and shapes fBm by them.
   det::Real elevation_m(const Dir3& unit_dir) const;
 
-  // Elevation with explicit (pre-blended) province parameters — the fast
-  // path used by the chunk sampler, which interpolates province params
-  // bilinearly from the chunk's shared corners instead of running the full
-  // province blend per column.
+  // Elevation with explicit (pre-blended) province parameters.
   det::Real elevation_from_params(const Dir3& unit_dir, const BlendedParams& params) const;
+
+  // Canonical terrain parameters: the full province blend sampled on a
+  // FIXED global lattice (kParamLatticeLod uv grid per cube face) and
+  // bilinearly interpolated. A pure function of direction — every chunk,
+  // at every lod, and every ground query computes bit-identical values at
+  // the same point, which is what makes lod seams exactly crack-free.
+  static constexpr std::uint32_t kParamLatticeLod = 6;
+  static constexpr std::uint32_t kParamLatticeCells = 1U << kParamLatticeLod;  // per face edge
+
+  struct CanonicalParams {
+    det::Real relief_amplitude_m;
+    det::Real base_elevation_m;
+    det::Real ruggedness;
+    det::Real carving;
+  };
+
+  // True blended sample at one lattice corner (ci, cj in [0, cells]).
+  CanonicalParams param_lattice_value(std::uint8_t face, std::uint32_t ci,
+                                      std::uint32_t cj) const;
+  // Bilinear canonical parameters at a face-uv position. The optional
+  // cache memoizes lattice-corner samples (per-chunk sampling); the
+  // arithmetic is identical with or without it.
+  using ParamCache = std::unordered_map<std::uint64_t, CanonicalParams>;
+  CanonicalParams canonical_params(const FaceUV& face_uv, ParamCache* cache = nullptr) const;
 
   // 3D detail term at a planet-local position (meters).
   det::Real detail_m(const Dir3& position_m) const;
@@ -74,6 +96,8 @@ struct ChunkGrid {
   // gx, gy along u/v, gz along the radial axis. Accepts coordinates
   // outside [0, kVoxels] (padded ring, linear extrapolation in uv/r).
   Dir3 corner_position(int gx, int gy, int gz) const;
+  // Fractional-coordinate variant (transition-cell geometry).
+  Dir3 corner_position_f(double gx, double gy, double gz) const;
 };
 
 // Densities at all corner samples of a chunk grid, x-major:

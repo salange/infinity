@@ -90,7 +90,8 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
                     det::lerp(probe.v0, probe.v1, Real(0.5))});
     const double elevation = field.elevation_m(dir).to_double();
     const double thickness = probe.r1.to_double() - probe.r0.to_double();
-    addr.shell = static_cast<std::int16_t>(std::floor(elevation / thickness + 0.5));
+    // Aligned shells: shell s spans [radius + s*T, radius + (s+1)*T).
+    addr.shell = static_cast<std::int16_t>(std::floor(elevation / thickness));
   }
   const gen::ChunkGrid grid = gen::ChunkGrid::from_addr(addr, planet);
   const gen::PaddedDensity padded = gen::sample_chunk_density_padded(field, grid);

@@ -8,6 +8,10 @@
 #include "gen/mesher.hpp"
 #include "gen/terrain.hpp"
 
+// Streaming (M4 complete): per-face quadtrees balanced to max one lod
+// level between lateral neighbors; per-column Transvoxel transition masks;
+// chunks re-mesh automatically when a neighbor's lod changes.
+
 namespace inf::world {
 
 // Planet-wide chunk streaming (M4): per-face quadtrees selected by
@@ -22,6 +26,7 @@ namespace inf::world {
 struct ChunkData {
   core::ChunkAddr addr;
   gen::ChunkMesh mesh;          // may be empty (all-air / all-solid chunk)
+  gen::TransitionMask transitions = 0;  // mask this mesh was built with
   std::uint64_t density_hash = 0;
 };
 

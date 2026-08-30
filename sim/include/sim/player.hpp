@@ -3,8 +3,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "gen/terrain.hpp"
 #include "sim/vec3.hpp"
+#include "world/effective_field.hpp"
 
 namespace inf::sim {
 
@@ -27,6 +27,11 @@ namespace inf::sim {
 //
 // Fire spawns a beam projectile toward the crosshair in both modes;
 // beams die after a fixed travel distance.
+
+enum class FlightZone : std::uint8_t {
+  Space = 0,
+  Atmosphere = 1,
+};
 
 enum class PlayerMode : std::uint8_t {
   Flight = 0,
@@ -62,10 +67,12 @@ class Player {
   static constexpr double kEyeHeight = 1.80;
   static constexpr double kShipClearance = 2.5;
   static constexpr double kBeamSpeed = 500.0;
+  static constexpr double kMachTwo = 686.0;      // atmosphere hard cap
+  static constexpr double kTenthC = 29'979'245.8;  // space hard cap
   static constexpr double kBeamMaxDistance = 1500.0;
   static constexpr double kReticleMax = 0.42;  // NDC-vertical units
 
-  Player(const gen::TerrainField& field, Vec3 spawn_position);
+  Player(const world::EffectiveField& field, Vec3 spawn_position);
 
   void update(const InputFrame& input);
 
@@ -79,6 +86,10 @@ class Player {
   double reticle_y() const { return reticle_y_; }
   const std::vector<Beam>& beams() const { return beams_; }
   double altitude() const;
+  // Space vs Atmosphere (M5): inside the planet's atmosphere band the
+  // speed is hard-capped at Mach 2; outside at 0.1c. Airless planets are
+  // Space everywhere.
+  FlightZone zone() const;
 
  private:
   void update_flight(const InputFrame& input);
@@ -89,7 +100,7 @@ class Player {
   double ground_radius(const Vec3& dir) const;
   void clamp_to_ground_flight();
 
-  const gen::TerrainField& field_;
+  const world::EffectiveField& field_;
   PlayerMode mode_ = PlayerMode::Flight;
 
   Vec3 position_;

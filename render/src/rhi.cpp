@@ -50,8 +50,9 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> 
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-  if (u.color.a >= 0.5) {
-    return vec4<f32>(u.color.rgb, 1.0);
+  if (u.color.a > 0.001) {
+    // Unlit solid color; alpha passes through (blended pipeline only).
+    return vec4<f32>(u.color.rgb, u.color.a);
   }
   let light = normalize(vec3<f32>(0.45, 0.75, 0.5));
   let n = normalize(in.normal);
@@ -147,6 +148,7 @@ struct Rhi::Impl {
 
   // Mesh pipeline state (created on demand).
   WGPURenderPipeline mesh_pipeline = nullptr;
+  WGPURenderPipeline mesh_pipeline_blend = nullptr;
   WGPUBindGroupLayout bind_layout = nullptr;
   WGPUBindGroup bind_group = nullptr;
   WGPUBuffer uniform_buffer = nullptr;
@@ -266,6 +268,20 @@ struct Rhi::Impl {
     pipeline_desc.multisample.mask = 0xFFFFFFFF;
     pipeline_desc.fragment = &fragment;
     mesh_pipeline = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+
+    // Translucent variant: alpha blending, no depth writes.
+    WGPUBlendState blend{};
+    blend.color.operation = WGPUBlendOperation_Add;
+    blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+    blend.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+    blend.alpha.operation = WGPUBlendOperation_Add;
+    blend.alpha.srcFactor = WGPUBlendFactor_One;
+    blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+    color_target.blend = &blend;
+    depth_state.depthWriteEnabled = WGPUOptionalBool_False;
+    pipeline_desc.label = sv("mesh-blend");
+    mesh_pipeline_blend = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+
     wgpuPipelineLayoutRelease(pipeline_layout);
     wgpuShaderModuleRelease(module);
 
@@ -292,6 +308,7 @@ struct Rhi::Impl {
       wgpuBufferRelease(mesh.buffer);
     }
     if (bind_group != nullptr) wgpuBindGroupRelease(bind_group);
+    if (mesh_pipeline_blend != nullptr) wgpuRenderPipelineRelease(mesh_pipeline_blend);
     if (uniform_buffer != nullptr) wgpuBufferRelease(uniform_buffer);
     if (bind_layout != nullptr) wgpuBindGroupLayoutRelease(bind_layout);
     if (mesh_pipeline != nullptr) wgpuRenderPipelineRelease(mesh_pipeline);
@@ -495,17 +512,25 @@ bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
   pass_desc.depthStencilAttachment = &depth_attachment;
 
   WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
-  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
-  for (std::size_t i = 0; i < count; ++i) {
-    const auto it = impl_->meshes.find(items[i].mesh);
-    if (it == impl_->meshes.end() || it->second.vertex_count == 0) {
-      continue;
+  const auto draw_items = [&](bool translucent) {
+    for (std::size_t i = 0; i < count; ++i) {
+      if (items[i].translucent != translucent) {
+        continue;
+      }
+      const auto it = impl_->meshes.find(items[i].mesh);
+      if (it == impl_->meshes.end() || it->second.vertex_count == 0) {
+        continue;
+      }
+      const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+      wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+      wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
     }
-    const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
-    wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
-    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
-    wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
-  }
+  };
+  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
+  draw_items(false);
+  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_blend);
+  draw_items(true);
   wgpuRenderPassEncoderEnd(pass);
   wgpuRenderPassEncoderRelease(pass);
 

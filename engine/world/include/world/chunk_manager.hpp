@@ -66,6 +66,15 @@ class ChunkManager {
   // Currently desired + ready chunk set (stable order: sorted by address).
   std::vector<std::shared_ptr<const ChunkData>> resident_chunks() const;
 
+  // Drops every resident/in-flight chunk that intersects the ball
+  // (planet-local meters) so the next update() re-samples and re-meshes it
+  // through the sampler's CURRENT state. Call after mutating what the
+  // sampler reads (M7: appending a player edit). Old meshes stay valid to
+  // draw until their Ready replacement arrives (no hole flash). Main
+  // thread only, like update().
+  void invalidate_sphere(double center_x, double center_y, double center_z,
+                         double radius_m);
+
   // Deterministic fingerprint of a set of chunk addresses' density grids —
   // used by tests and the M8 harness (independent of workers/scheduling).
   std::uint64_t scene_hash(const std::vector<core::ChunkAddr>& addrs) const;

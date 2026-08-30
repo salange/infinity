@@ -73,6 +73,10 @@ int default_landable_slot(const StarSystemParams& system);
 PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
                                     const core::Key& planet_params_key);
 
+// Procedural display name for a body, pure function of its entity key
+// (map-mode info card; design/map-mode.md section 3).
+std::string body_display_name(const core::Key& entity_key);
+
 // Serializable payloads (spec section 8) + the headless dump.
 std::string system_to_json(const StarSystemParams& system);
 std::string ephemeris_table_json(const StarSystemParams& system, core::WorldTime start,

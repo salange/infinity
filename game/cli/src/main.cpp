@@ -21,6 +21,9 @@ int print_usage() {
       "  hash-planet          print the planet/province golden report\n"
       "  hash-density         print the density-grid golden report\n"
       "  hash-system          print the planetary-system golden report\n"
+      "  hash-edits           print the effective-density (player diff) golden report\n"
+      "  goldens              print the FULL golden suite (all reports, one\n"
+      "                       machine-readable document — diff across platforms)\n"
       "  dump-system --seed <hex128> [--start-ns N] [--span-ns N] [--steps N]\n"
       "                       print system params + ephemeris table as JSON\n"
       "  dump-planet --seed <hex128> [--type <T>]\n"
@@ -68,6 +71,28 @@ int main(int argc, char** argv) {
 
   if (std::strcmp(argv[1], "hash-density") == 0) {
     std::fputs(inf::gen::hash_density_report().c_str(), stdout);
+    return 0;
+  }
+
+  if (std::strcmp(argv[1], "hash-edits") == 0) {
+    std::fputs(inf::gen::hash_edits_report().c_str(), stdout);
+    return 0;
+  }
+
+  // M8: the whole contract in one document — byte-identical across
+  // platforms or the determinism promise is broken.
+  if (std::strcmp(argv[1], "goldens") == 0) {
+    std::printf("=== suite: core ===\n%s", inf::gen::hash_core_report().c_str());
+    std::printf("=== suite: planet ===\n");
+    if (const int rc = inf::cli::cmd_hash_planet(); rc != 0) {
+      return rc;
+    }
+    std::printf("=== suite: density ===\n%s", inf::gen::hash_density_report().c_str());
+    std::printf("=== suite: system ===\n");
+    if (const int rc = inf::cli::cmd_hash_system(); rc != 0) {
+      return rc;
+    }
+    std::printf("=== suite: edits ===\n%s", inf::gen::hash_edits_report().c_str());
     return 0;
   }
 

@@ -38,6 +38,7 @@ enum class PlayerMode : std::uint8_t {
   Landing = 1,
   OnFoot = 2,
   Takeoff = 3,
+  Map = 4,  // system map (design/map-mode.md): controls suspended
 };
 
 struct InputFrame {
@@ -91,6 +92,17 @@ class Player {
   // Space everywhere.
   FlightZone zone() const;
 
+  // Map mode (design/map-mode.md section 1/4): pushes the current mode
+  // and freezes the player (position/orientation stay PLANET-LOCAL, so
+  // the return spot rides along with the planet's orbital motion).
+  // exit_map restores the pushed mode at the exact planet-local pose with
+  // velocity zero; walking re-grounds via the normal radial snap on the
+  // next update. Landing/takeoff transitions complete as their pushed
+  // target mode. The app owns the map CAMERA — the player is simply
+  // suspended while mode() == Map.
+  void enter_map();
+  void exit_map();
+
  private:
   void update_flight(const InputFrame& input);
   void update_on_foot(const InputFrame& input);
@@ -119,6 +131,8 @@ class Player {
 
   std::vector<Beam> beams_;
   double fire_cooldown_ = 0.0;
+
+  PlayerMode map_pushed_mode_ = PlayerMode::Flight;
 };
 
 }  // namespace inf::sim

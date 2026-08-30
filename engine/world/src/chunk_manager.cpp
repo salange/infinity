@@ -5,8 +5,10 @@
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,6 +68,9 @@ struct ChunkManager::Impl {
   std::map<core::ChunkAddr, std::shared_ptr<const ChunkData>, AddrLess> ready;
   std::map<core::ChunkAddr, std::uint64_t, AddrLess> last_wanted;
   std::map<core::ChunkAddr, TransitionMask, AddrLess> in_flight;
+  // Scheduled before an invalidation: results are dropped on arrival and
+  // the chunk is re-scheduled with the sampler's current state.
+  std::set<core::ChunkAddr, AddrLess> stale;
   std::uint64_t frame = 0;
 
   // Worker pool.
@@ -359,6 +364,9 @@ std::vector<ChunkEvent> ChunkManager::update(double camera_x, double camera_y,
   }
   for (auto& data : finished) {
     impl.in_flight.erase(data->addr);
+    if (impl.stale.erase(data->addr) > 0) {
+      continue;  // sampled pre-invalidation; the next update reschedules it
+    }
     impl.ready[data->addr] = data;
     events.push_back(ChunkEvent{ChunkEvent::Kind::Ready, data->addr, data});
   }
@@ -395,6 +403,41 @@ std::vector<std::shared_ptr<const ChunkData>> ChunkManager::resident_chunks() co
     chunks.push_back(data);
   }
   return chunks;
+}
+
+void ChunkManager::invalidate_sphere(double center_x, double center_y, double center_z,
+                                     double radius_m) {
+  Impl& impl = *impl_;
+  const Real surface_radius(impl.sampler.radius_m());
+  const auto intersects = [&](const core::ChunkAddr& addr) {
+    const ChunkGrid grid = ChunkGrid::from_addr(addr, surface_radius);
+    const int mid = static_cast<int>(ChunkGrid::kVoxels) / 2;
+    const Dir3 center = grid.corner_position(mid, mid, mid);
+    double bound_sq = 0.0;
+    for (int corner = 0; corner < 8; ++corner) {
+      const int hi = static_cast<int>(ChunkGrid::kVoxels) + 1;
+      const Dir3 p = grid.corner_position((corner & 1) != 0 ? hi : -1,
+                                          (corner & 2) != 0 ? hi : -1,
+                                          (corner & 4) != 0 ? hi : -1);
+      const double dx = p.x.to_double() - center.x.to_double();
+      const double dy = p.y.to_double() - center.y.to_double();
+      const double dz = p.z.to_double() - center.z.to_double();
+      bound_sq = std::max(bound_sq, dx * dx + dy * dy + dz * dz);
+    }
+    const double dx = center_x - center.x.to_double();
+    const double dy = center_y - center.y.to_double();
+    const double dz = center_z - center.z.to_double();
+    const double reach = radius_m + std::sqrt(bound_sq);
+    return dx * dx + dy * dy + dz * dz <= reach * reach;
+  };
+  for (auto it = impl.ready.begin(); it != impl.ready.end();) {
+    it = intersects(it->first) ? impl.ready.erase(it) : std::next(it);
+  }
+  for (const auto& [addr, mask] : impl.in_flight) {
+    if (intersects(addr)) {
+      impl.stale.insert(addr);
+    }
+  }
 }
 
 std::uint64_t ChunkManager::scene_hash(const std::vector<core::ChunkAddr>& addrs) const {

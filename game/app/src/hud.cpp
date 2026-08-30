@@ -185,6 +185,7 @@ struct Hud::Impl {
   TextLine asl_line;
   TextLine biome_line;
   TextLine letter_n, letter_s, letter_e, letter_w;
+  std::vector<TextLine> card_lines;  // map-mode info card (lazy)
 
   // Terrain radar cache: elevation samples in a fixed east/north tangent
   // frame around a cached center, refreshed round-robin (bounded work per
@@ -220,6 +221,9 @@ struct Hud::Impl {
     for (TextLine* line : {&speed_line, &range_line, &asl_line, &biome_line, &letter_n,
                            &letter_s, &letter_e, &letter_w}) {
       line->destroy(rhi);
+    }
+    for (TextLine& line : card_lines) {
+      line.destroy(rhi);
     }
   }
 
@@ -489,6 +493,50 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
   } else {
     impl.radar_space(items, player, aspect);
     impl.biome_line.set(impl.rhi, "");
+  }
+}
+
+void Hud::build_map_card(std::vector<Rhi::DrawItem>* items,
+                         const std::vector<std::string>& lines, double x_ndc, double y_ndc,
+                         double aspect, int height_px) {
+  Impl& impl = *impl_;
+  if (lines.empty()) {
+    return;
+  }
+  while (impl.card_lines.size() < lines.size()) {
+    impl.card_lines.emplace_back();
+  }
+  const double px = 2.0 / height_px;              // one pixel in NDC-y
+  const double text_scale = px * 1.6;             // stb_easy_font glyph scale
+  const double line_h = 14.0 * text_scale;
+  const double pad = 8.0 * px;
+  double width_px = 0.0;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    impl.card_lines[i].set(impl.rhi, lines[i]);
+    width_px = std::max(width_px, impl.card_lines[i].width_px());
+  }
+  for (std::size_t i = lines.size(); i < impl.card_lines.size(); ++i) {
+    impl.card_lines[i].set(impl.rhi, "");
+  }
+  const double card_w = width_px * text_scale + 2.0 * pad;
+  const double card_h = static_cast<double>(lines.size()) * line_h + 2.0 * pad;
+  // Anchor to the upper right of the pointer, kept on screen.
+  double left = x_ndc + 14.0 * px;
+  double top = y_ndc + card_h * 0.5;
+  left = std::min(left, 1.0 - card_w - 4.0 * px);
+  top = std::clamp(top, -1.0 + card_h + 4.0 * px, 1.0 - 4.0 * px);
+  {
+    Rhi::DrawItem bg = hud_item(impl.quad_mesh, left + card_w * 0.5, top - card_h * 0.5,
+                                card_w, card_h, Color{0.04f, 0.07f, 0.11f}, aspect, 0.00008);
+    bg.color[3] = 0.85f;
+    bg.translucent = true;
+    items->push_back(bg);
+  }
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    const Color color = i == 0 ? Color{1.0f, 0.85f, 0.45f} : Color{0.85f, 0.92f, 1.0f};
+    impl.text_item(items, impl.card_lines[i], left + pad,
+                   top - pad - line_h * static_cast<double>(i) - 2.0 * px, text_scale, color,
+                   aspect);
   }
 }
 

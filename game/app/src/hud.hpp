@@ -34,6 +34,15 @@ class Hud {
   void build(std::vector<render::Rhi::DrawItem>* items, const sim::Player& player,
              double measured_speed_mps, double aspect, int height_px, double dt);
 
+  // Map-mode overlay (design/map-mode.md section 3): the hover info card,
+  // anchored at the pointer (NDC), lines top to bottom. The flight/walk
+  // HUD is hidden in map mode — the app calls this INSTEAD of build().
+  // Implemented on the existing stb_easy_font text path rather than an
+  // ImGui panel (decision logged in T0013).
+  void build_map_card(std::vector<render::Rhi::DrawItem>* items,
+                      const std::vector<std::string>& lines, double x_ndc, double y_ndc,
+                      double aspect, int height_px);
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

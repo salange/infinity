@@ -28,4 +28,9 @@ std::string hash_planet_report();
 // The hashed artifact is the mesh INPUT, never the mesh (T0005).
 std::string hash_density_report();
 
+// M7/M8: effective-density fingerprints with a scripted edit sequence
+// (dig, overlapping dig, refill, deep carve) — locks the CSG fold order,
+// the fixed64 edit encoding, and the edit-aware ground query.
+std::string hash_edits_report();
+
 }  // namespace inf::gen

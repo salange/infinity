@@ -603,3 +603,33 @@ std::string hash_system_report() {
 
 }  // namespace inf::gen
 
+
+namespace inf::gen {
+
+std::string body_display_name(const core::Key& entity_key) {
+  static constexpr const char* kSyllables[] = {
+      "an", "bel", "cor", "dra", "eth",  "fal", "gan", "hel",
+      "ir", "jun", "kar", "lum", "mor",  "nev", "os",  "pra",
+      "qui", "ris", "sol", "tur", "ul",  "vex", "wyn", "xel",
+      "yar", "zon", "tha", "mir", "cae", "dun", "eri", "oa"};
+  // Cheap splitmix over the key words — cosmetic, but stable forever.
+  std::uint64_t h = entity_key.k0 ^ (entity_key.k1 * 0x9E3779B97F4A7C15ULL);
+  const auto next = [&h] {
+    h += 0x9E3779B97F4A7C15ULL;
+    std::uint64_t z = h;
+    z = (z ^ (z >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27U)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31U);
+  };
+  std::string name;
+  const int count = 2 + static_cast<int>(next() % 2U);
+  for (int i = 0; i < count; ++i) {
+    name += kSyllables[next() % (sizeof(kSyllables) / sizeof(kSyllables[0]))];
+  }
+  name[0] = static_cast<char>(name[0] - 'a' + 'A');
+  name += '-';
+  name += std::to_string(100 + next() % 900U);
+  return name;
+}
+
+}  // namespace inf::gen

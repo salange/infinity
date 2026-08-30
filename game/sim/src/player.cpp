@@ -60,8 +60,35 @@ void Player::update(const InputFrame& input) {
     case PlayerMode::OnFoot: update_on_foot(input); break;
     case PlayerMode::Landing:
     case PlayerMode::Takeoff: update_transition(input); break;
+    case PlayerMode::Map: break;  // suspended; the app owns the map camera
   }
   update_beams(input.dt);
+}
+
+void Player::enter_map() {
+  if (mode_ == PlayerMode::Map) {
+    return;
+  }
+  // A mid-air landing/takeoff resumes as its destination mode.
+  map_pushed_mode_ = mode_;
+  if (mode_ == PlayerMode::Landing) {
+    map_pushed_mode_ = PlayerMode::OnFoot;
+  }
+  if (mode_ == PlayerMode::Takeoff) {
+    map_pushed_mode_ = PlayerMode::Flight;
+  }
+  mode_ = PlayerMode::Map;
+  speed_ = 0.0;
+  reticle_x_ = 0.0;
+  reticle_y_ = 0.0;
+}
+
+void Player::exit_map() {
+  if (mode_ != PlayerMode::Map) {
+    return;
+  }
+  mode_ = map_pushed_mode_;
+  speed_ = 0.0;  // velocity = zero per spec; flight resumes as a hover
 }
 
 void Player::update_flight(const InputFrame& input) {

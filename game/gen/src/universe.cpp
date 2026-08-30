@@ -119,4 +119,17 @@ BodyHandle default_body(const core::Seed128& seed) {
   return BodyHandle{node->key(), node->params_key()};
 }
 
+core::Key default_system_key(const core::Seed128& seed) {
+  const auto tree = make_tree(seed);
+  return tree->get(default_system_address())->key();
+}
+
+BodyHandle body_for_slot(const core::Seed128& seed, int slot) {
+  const auto tree = make_tree(seed);
+  const auto address =
+      default_system_address().child(Step{name::PlanetsAxis, Cell::slot(slot)});
+  const auto node = tree->get(address);
+  return BodyHandle{node->key(), node->params_key()};
+}
+
 }  // namespace inf::gen

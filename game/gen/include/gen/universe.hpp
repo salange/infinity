@@ -32,4 +32,11 @@ struct BodyHandle {
 };
 BodyHandle default_body(const core::Seed128& seed);
 
+// The default system's entity key (system layers stellar/disk/... hang
+// off it — feed to generate_system) and the body keys for one of its
+// planet slots. Used by the client to live on a system-generated world
+// (map mode, T0013).
+core::Key default_system_key(const core::Seed128& seed);
+BodyHandle body_for_slot(const core::Seed128& seed, int slot);
+
 }  // namespace inf::gen

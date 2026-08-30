@@ -5,7 +5,8 @@ add_library(engine_world STATIC
   src/noise.cpp
   src/chunk_grid.cpp
   src/mesher.cpp
-  src/chunk_manager.cpp)
+  src/chunk_manager.cpp
+  src/edit_store.cpp)
 add_library(engine::world ALIAS engine_world)
 target_include_directories(engine_world PUBLIC include)
 target_link_libraries(engine_world

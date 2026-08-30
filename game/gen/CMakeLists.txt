@@ -13,10 +13,12 @@ add_library(game_gen STATIC
   src/planet.cpp
   src/provinces.cpp
   src/terrain.cpp
+  src/effective_field.cpp
   src/universe.cpp
   src/system.cpp
   src/golden_core.cpp
-  src/golden_planet.cpp)
+  src/golden_planet.cpp
+  src/golden_edits.cpp)
 add_library(game::gen ALIAS game_gen)
 target_include_directories(game_gen PUBLIC
   include

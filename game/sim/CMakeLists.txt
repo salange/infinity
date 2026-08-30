@@ -1,5 +1,6 @@
 add_library(game_sim STATIC
-  src/player.cpp)
+  src/player.cpp
+  src/map_camera.cpp)
 add_library(game::sim ALIAS game_sim)
 target_include_directories(game_sim PUBLIC include)
 target_link_libraries(game_sim

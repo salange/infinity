@@ -14,6 +14,7 @@
 #include "core/key.hpp"
 #include "core/version.hpp"
 #include "gen/planet.hpp"
+#include "hud.hpp"
 #include "render/math.hpp"
 #include "render/rhi.hpp"
 #include "sim/player.hpp"
@@ -130,6 +131,7 @@ inf::render::Rhi::DrawItem hud_quad(std::uint32_t mesh, double ndc_x, double ndc
 
 int main(int argc, char** argv) {
   long max_frames = 0;
+  double spawn_altitude = -1.0;  // <0: default orbit spawn
   const char* seed_text = "7";
   const char* type_text = nullptr;
   for (int i = 1; i < argc; ++i) {
@@ -139,6 +141,8 @@ int main(int argc, char** argv) {
       seed_text = argv[++i];
     } else if (std::strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
       type_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--spawn-alt") == 0 && i + 1 < argc) {
+      spawn_altitude = std::strtod(argv[++i], nullptr);
     }
   }
 
@@ -176,7 +180,9 @@ int main(int argc, char** argv) {
   }
   config.max_lod = max_lod;
   inf::world::ChunkManager manager(body, planet, config);
-  inf::sim::Player player(manager.field(), SVec3{radius * 2.2, 0.0, 0.0});
+  const double spawn_r = spawn_altitude >= 0.0 ? radius + spawn_altitude : radius * 2.2;
+  inf::sim::Player player(manager.field(),
+                          inf::sim::normalize(SVec3{1.0, 0.15, 0.3}) * spawn_r);
 
   std::printf("infinity %s (%s) — %s planet, radius %.0f m, %u workers\n", inf::core::kVersion,
               inf::core::kGitHash, inf::gen::to_string(planet.type), radius,
@@ -205,6 +211,10 @@ int main(int argc, char** argv) {
 
   const std::vector<float> cube = unit_cube_vertices();
   const std::uint32_t cube_mesh = rhi->create_mesh(cube.data(), cube.size());
+  {  // HUD scope: must destruct before the RHI is torn down.
+  inf::app::Hud hud(rhi.get(), &manager.field(), planet);
+  SVec3 last_player_pos = player.position();
+  double measured_speed = 0.0;
 
   AppState state{rhi.get(), 1280, 720};
   glfwSetWindowUserPointer(window, &state);
@@ -258,6 +268,15 @@ int main(int argc, char** argv) {
     e_was_down = e_down;
 
     player.update(input);
+
+    // Measured velocity (covers ship, walking, and later the rocket
+    // backpack alike), lightly smoothed.
+    if (dt > 0.0) {
+      const double instantaneous =
+          inf::sim::length(player.position() - last_player_pos) / dt;
+      measured_speed += (instantaneous - measured_speed) * std::min(1.0, dt * 8.0);
+    }
+    last_player_pos = player.position();
 
     // --- streaming ------------------------------------------------------
     const SVec3 player_pos = player.position();
@@ -346,6 +365,8 @@ int main(int argc, char** argv) {
       items.push_back(hud_quad(cube_mesh, rx - box / ar, ry, thick / ar, box * 2.2, 1.0f, 0.75f, 0.2f));
     }
 
+    hud.build(&items, player, measured_speed, input.aspect, state.height, dt);
+
     rhi->render_frame(0.05f, 0.06f, 0.12f, items.data(), items.size());
 
     fps_accum += dt;
@@ -373,6 +394,7 @@ int main(int argc, char** argv) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);
     }
   }
+  }  // end HUD scope
 
   rhi.reset();
   glfwDestroyWindow(window);

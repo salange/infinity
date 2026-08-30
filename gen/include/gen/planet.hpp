@@ -20,6 +20,11 @@ enum class PlanetType : std::uint8_t {
 
 const char* to_string(PlanetType type);
 
+// Planet axis convention: the rotation axis is the planet-local +Z axis.
+// +Z = north pole, -Z = south pole; east = north x up (right-handed spin).
+// HUD/radar cardinal directions and later day/night all derive from this.
+inline constexpr double kNorthAxis[3] = {0.0, 0.0, 1.0};
+
 struct PlanetParams {
   PlanetType type{PlanetType::EarthLike};
   det::Real radius_m;         // ~40-100 km, type-dependent

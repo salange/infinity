@@ -165,7 +165,8 @@ void Player::update_on_foot(const InputFrame& input) {
   if (input.right) move = move + walk_right;
   if (input.left) move = move - walk_right;
   if (length(move) > 0.0) {
-    const double walk_speed = input.run ? 7.0 : 3.0;
+    // Brisk default gait (16 km/h); shift sprints.
+    const double walk_speed = input.run ? 7.0 : 4.44;
     position_ = position_ + normalize(move) * (walk_speed * dt);
   }
 

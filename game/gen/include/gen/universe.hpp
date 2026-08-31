@@ -39,6 +39,9 @@ BodyHandle default_body(const core::Seed128& seed);
 // (map mode, T0013).
 core::Key default_system_key(const core::Seed128& seed);
 BodyHandle body_for_slot(const core::Seed128& seed, int slot);
+// A moon of the default system's planet at `slot` (moons axis under the
+// planet node) — moons are full bodies with their own layer keys.
+BodyHandle body_for_moon(const core::Seed128& seed, int slot, int moon_index);
 
 // Convenience: planet params from a BodyHandle (macro reads the entity
 // key, the parameter draws read the params key — two-seed rule).

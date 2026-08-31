@@ -236,6 +236,7 @@ std::vector<float> orbit_ribbon_vertices(const inf::core::OrbitalElements& eleme
 // body keeps its own diff file (persistence stays a per-body diff).
 struct Anchor {
   int slot = 0;
+  int moon = -1;  // >= 0: anchored to that moon of `slot` (T0016)
   inf::gen::BodyHandle keys;
   inf::gen::PlanetParams planet;
   double radius = 0.0;
@@ -249,21 +250,29 @@ struct Anchor {
 
 std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* seed_text,
                                     const inf::gen::StarSystemParams& system, int slot,
+                                    int moon,
                                     std::optional<inf::gen::PlanetType> forced,
                                     const char* diff_override) {
   auto anchor = std::make_unique<Anchor>();
   anchor->slot = slot;
-  anchor->keys = inf::gen::body_for_slot(seed, slot);
-  anchor->planet =
-      forced.has_value()
-          ? inf::gen::derive_planet_params(anchor->keys, forced)
-          : inf::gen::planet_params_for_slot(system, slot, anchor->keys);
+  anchor->moon = moon;
+  if (moon >= 0) {
+    anchor->keys = inf::gen::body_for_moon(seed, slot, moon);
+    anchor->planet = inf::gen::planet_params_for_moon(system, slot, moon, anchor->keys);
+  } else {
+    anchor->keys = inf::gen::body_for_slot(seed, slot);
+    anchor->planet =
+        forced.has_value()
+            ? inf::gen::derive_planet_params(anchor->keys, forced)
+            : inf::gen::planet_params_for_slot(system, slot, anchor->keys);
+  }
   anchor->radius = anchor->planet.radius_m.to_double();
 
-  anchor->diff_path = diff_override != nullptr
-                          ? std::string(diff_override)
-                          : std::string("infinity-") + seed_text + "-s" +
-                                std::to_string(slot) + ".edits";
+  anchor->diff_path =
+      diff_override != nullptr
+          ? std::string(diff_override)
+          : std::string("infinity-") + seed_text + "-s" + std::to_string(slot) +
+                (moon >= 0 ? "m" + std::to_string(moon) : std::string()) + ".edits";
   anchor->edits = std::make_unique<inf::world::CsgEditStore>();
   if (anchor->edits->load(anchor->diff_path)) {
     std::printf("diff: loaded %zu edits from %s\n", anchor->edits->size(),
@@ -467,7 +476,7 @@ int main(int argc, char** argv) {
   // Player-diff overlay (M7): the world files are ONLY per-body diffs —
   // the procedural planets are never stored.
   std::unique_ptr<Anchor> anchor =
-      make_anchor(*seed, seed_text, system, home_slot, forced, diff_text);
+      make_anchor(*seed, seed_text, system, home_slot, -1, forced, diff_text);
   const double spawn_r =
       spawn_altitude >= 0.0 ? anchor->radius + spawn_altitude : anchor->radius * 2.2;
   inf::sim::Player player(*anchor->effective,
@@ -675,6 +684,7 @@ int main(int argc, char** argv) {
   std::size_t script_pc = 0;
   double script_wait = 0.0;
   bool script_thrust = false;
+  bool script_land = false;
 
   // --- map mode state (T0013, design/map-mode.md) -----------------------
   enum class MapPhase { Off, Entering, On, Exiting };
@@ -704,6 +714,7 @@ int main(int argc, char** argv) {
       outer_orbit_m * map_params.frame_margin / std::tan(kFovY * 0.5);
   const double map_px_m = 2.0 * map_distance * std::tan(kFovY * 0.5) / 720.0;
   std::array<std::string, inf::gen::kMaxPlanetSlots> slot_names;
+  std::array<std::vector<std::string>, inf::gen::kMaxPlanetSlots> moon_names;
   std::array<std::uint32_t, inf::gen::kMaxPlanetSlots> orbit_meshes{};
   std::array<std::uint32_t, inf::gen::kMaxPlanetSlots> arc_meshes{};
   for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
@@ -713,6 +724,10 @@ int main(int argc, char** argv) {
     }
     slot_names[static_cast<std::size_t>(slot)] =
         inf::gen::body_display_name(inf::gen::body_for_slot(*seed, slot).entity);
+    for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
+      moon_names[static_cast<std::size_t>(slot)].push_back(inf::gen::body_display_name(
+          inf::gen::body_for_moon(*seed, slot, static_cast<int>(mi)).entity));
+    }
     const auto ribbon =
         orbit_ribbon_vertices(entry.orbit, 0.0, 2.0 * 3.14159265358979323846, 256,
                               map_px_m * 1.6);
@@ -846,7 +861,8 @@ int main(int argc, char** argv) {
     input.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
     input.run = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
     input.fire = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-    input.interact_pressed = e_down && !e_was_down;
+    input.interact_pressed = (e_down && !e_was_down) || script_land;
+    script_land = false;
     input.aspect = static_cast<double>(state.width) / state.height;
     input.fov_y = kFovY;
     last_mx = mx;
@@ -875,41 +891,96 @@ int main(int argc, char** argv) {
       const auto pv = inf::core::Ephemeris::evaluate(orbit, now);
       return SVec3{pv.x.to_double(), pv.y.to_double(), pv.z.to_double()};
     };
-    SVec3 planet_sys;                                       // anchor body, system frame
+    // planet_sys = the ANCHOR BODY's system-frame position (planet, or
+    // planet + moon offset when anchored to a moon — T0016).
+    SVec3 planet_sys;
     std::array<SVec3, inf::gen::kMaxPlanetSlots> planet_local{};  // anchor-local centers
+    struct MoonInstance {
+      SVec3 pos;  // anchor-local
+      double radius;
+      int slot;
+      int index;
+      bool is_anchor;
+    };
+    std::vector<MoonInstance> moons_local;
     const auto recompute_bodies = [&] {
       planet_sys =
           eval_pos(system.planets[static_cast<std::size_t>(anchor->slot)].orbit);
+      if (anchor->moon >= 0) {
+        planet_sys = planet_sys +
+                     eval_pos(system.planets[static_cast<std::size_t>(anchor->slot)]
+                                  .moons[static_cast<std::size_t>(anchor->moon)]
+                                  .orbit);
+      }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
         if (entry.occupied) {
           planet_local[static_cast<std::size_t>(slot)] = eval_pos(entry.orbit) - planet_sys;
         }
       }
+      moons_local.clear();
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied) {
+          continue;
+        }
+        for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
+          MoonInstance moon;
+          moon.pos = planet_local[static_cast<std::size_t>(slot)] +
+                     eval_pos(entry.moons[mi].orbit);
+          moon.radius = entry.moons[mi].phys.radius_m.to_double();
+          moon.slot = slot;
+          moon.index = static_cast<int>(mi);
+          moon.is_anchor = slot == anchor->slot && static_cast<int>(mi) == anchor->moon;
+          moons_local.push_back(moon);
+        }
+      }
     };
     recompute_bodies();
 
-    // --- closest planet (uniform-planet rule, 2026-08-31) ---------------
-    // Every planet is treated the same: whichever is closest by surface
-    // gap governs the speed limit, the flight zone, and landing.
-    const auto closest_planet = [&]() {
+    // --- closest body (uniform-planet rule; moons count too, T0016) -----
+    // Whichever body is closest by surface gap governs the speed limit,
+    // the flight zone, and landing.
+    struct ClosestBody {
+      int slot;
+      int moon;  // -1 = the planet itself
+      double gap;
+      SVec3 center;
+      double radius;
+      double atmosphere;
+    };
+    const auto closest_body = [&]() {
       const SVec3 at = player.position();
-      int best = anchor->slot;
-      double best_gap = inf::sim::length(at) - anchor->radius;
+      ClosestBody best;
+      best.slot = anchor->slot;
+      best.moon = anchor->moon;
+      best.gap = inf::sim::length(at) - anchor->radius;
+      best.center = SVec3{0.0, 0.0, 0.0};
+      best.radius = anchor->radius;
+      best.atmosphere = anchor->planet.atmosphere_height_m.to_double();
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-        if (!entry.occupied || slot == anchor->slot) {
+        if (!entry.occupied || (slot == anchor->slot && anchor->moon < 0)) {
           continue;
         }
+        const double radius = entry.phys.radius_m.to_double();
         const double gap =
-            inf::sim::length(planet_local[static_cast<std::size_t>(slot)] - at) -
-            entry.phys.radius_m.to_double();
-        if (gap < best_gap) {
-          best = slot;
-          best_gap = gap;
+            inf::sim::length(planet_local[static_cast<std::size_t>(slot)] - at) - radius;
+        if (gap < best.gap) {
+          best = ClosestBody{slot, -1, gap, planet_local[static_cast<std::size_t>(slot)],
+                             radius, entry.phys.atmosphere.height_m.to_double()};
         }
       }
-      return std::pair<int, double>{best, best_gap};
+      for (const MoonInstance& moon : moons_local) {
+        if (moon.is_anchor) {
+          continue;
+        }
+        const double gap = inf::sim::length(moon.pos - at) - moon.radius;
+        if (gap < best.gap) {
+          best = ClosestBody{moon.slot, moon.index, gap, moon.pos, moon.radius, 0.0};
+        }
+      }
+      return best;
     };
 
     // --- anchor switching (T0014): re-anchor to the closest planet ------
@@ -918,37 +989,46 @@ int main(int argc, char** argv) {
     if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
       const SVec3 at = player.position();
       const double anchor_gap = inf::sim::length(at) - anchor->radius;
-      const auto [candidate, candidate_gap] = closest_planet();
-      if (candidate != anchor->slot && candidate_gap < anchor_gap * 0.5) {
+      const ClosestBody candidate = closest_body();
+      const bool is_current =
+          candidate.slot == anchor->slot && candidate.moon == anchor->moon;
+      if (!is_current && candidate.gap < anchor_gap * 0.5) {
         save_anchor_edits(*anchor);
         for (auto& [addr, chunk] : loaded) {
           rhi->destroy_mesh(chunk.mesh_id);
         }
         loaded.clear();
         pending_ready.clear();  // old anchor's frames are meaningless now
-        const SVec3 new_pos = at - planet_local[static_cast<std::size_t>(candidate)];
-        anchor = make_anchor(*seed, seed_text, system, candidate, std::nullopt, nullptr);
+        const SVec3 new_pos = at - candidate.center;
+        anchor = make_anchor(*seed, seed_text, system, candidate.slot, candidate.moon,
+                             std::nullopt, nullptr);
         player.rebase(*anchor->effective, new_pos);
         rebuild_sea();
         hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
         recompute_bodies();
-        std::printf("anchor: %s (slot %d, %s planet, radius %.0f km)\n",
-                    slot_names[static_cast<std::size_t>(candidate)].c_str(), candidate,
-                    inf::gen::to_string(anchor->planet.type), anchor->radius / 1000.0);
+        const std::string& name =
+            candidate.moon >= 0
+                ? moon_names[static_cast<std::size_t>(candidate.slot)]
+                            [static_cast<std::size_t>(candidate.moon)]
+                : slot_names[static_cast<std::size_t>(candidate.slot)];
+        const std::string moon_suffix =
+            candidate.moon >= 0 ? " moon " + std::to_string(candidate.moon) : std::string();
+        std::printf("anchor: %s (slot %d%s, %s %s, radius %.0f km)\n", name.c_str(),
+                    candidate.slot, moon_suffix.c_str(),
+                    inf::gen::to_string(anchor->planet.type),
+                    candidate.moon >= 0 ? "moon" : "planet", anchor->radius / 1000.0);
       }
     }
 
-    // Feed the closest planet to the player (speed governor, zone, the
-    // E-landing gate). Uses the system-layer truths so anchor and
-    // non-anchor planets are treated identically.
+    // Feed the closest body to the player (speed governor, zone, the
+    // E-landing gate). Moons and planets are treated identically.
     {
-      const auto [closest, closest_gap] = closest_planet();
-      const auto& entry = system.planets[static_cast<std::size_t>(closest)];
+      const ClosestBody closest = closest_body();
       inf::sim::NearestBody nearest;
-      nearest.center = planet_local[static_cast<std::size_t>(closest)];
-      nearest.radius_m = entry.phys.radius_m.to_double();
-      nearest.atmosphere_m = entry.phys.atmosphere.height_m.to_double();
-      nearest.is_anchor = closest == anchor->slot;
+      nearest.center = closest.center;
+      nearest.radius_m = closest.radius;
+      nearest.atmosphere_m = closest.atmosphere;
+      nearest.is_anchor = closest.slot == anchor->slot && closest.moon == anchor->moon;
       player.set_nearest_body(nearest);
     }
 
@@ -983,39 +1063,24 @@ int main(int argc, char** argv) {
         stars_local.push_back(star);
       }
     }
-    struct MoonInstance {
-      SVec3 pos;
-      double radius;
-    };
-    std::vector<MoonInstance> moons_local;
-    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
-      const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-      if (!entry.occupied) {
-        continue;
-      }
-      for (const auto& moon : entry.moons) {
-        moons_local.push_back(
-            MoonInstance{planet_local[static_cast<std::size_t>(slot)] + eval_pos(moon.orbit),
-                         moon.phys.radius_m.to_double()});
-      }
-    }
-
     // Keep-out spheres for everything that has no terrain field: the
-    // star, non-anchor planets, and all moons (fly-through is not a
-    // thing; the anchor's real ground is handled by the flight clamp).
+    // star, non-anchor planets, and non-anchor moons (fly-through is not
+    // a thing; the anchor's real ground is handled by the flight clamp).
     if (map_phase == MapPhase::Off) {
       for (const StarInstance& star : stars_local) {
         player.push_out(star.pos, star.radius * 1.6);
       }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-        if (entry.occupied && slot != anchor->slot) {
+        if (entry.occupied && !(slot == anchor->slot && anchor->moon < 0)) {
           player.push_out(planet_local[static_cast<std::size_t>(slot)],
                           entry.phys.radius_m.to_double() * 1.02 + 5.0);
         }
       }
       for (const MoonInstance& moon : moons_local) {
-        player.push_out(moon.pos, moon.radius * 1.02 + 5.0);
+        if (!moon.is_anchor) {
+          player.push_out(moon.pos, moon.radius * 1.02 + 5.0);
+        }
       }
     }
 
@@ -1053,6 +1118,19 @@ int main(int argc, char** argv) {
         const SVec3 dir = inf::sim::normalize(
             SVec3{sun.x * c - sun.y * s, sun.x * s + sun.y * c, sun.z});
         player.set_position(dir * (anchor->radius + arg_d(0)));
+      } else if (cmd.op == "posmoon" && cmd.args.size() >= 3) {
+        // Place near moon <slot> <index> at <alt> above its surface.
+        for (const MoonInstance& moon : moons_local) {
+          if (moon.slot == static_cast<int>(arg_d(0)) &&
+              moon.index == static_cast<int>(arg_d(1))) {
+            const SVec3 out = inf::sim::normalize(
+                inf::sim::length(moon.pos) > 1.0 ? moon.pos : SVec3{1.0, 0.0, 0.0});
+            player.set_position(moon.pos + out * (moon.radius + arg_d(2)));
+            aim_at(inf::sim::normalize(moon.pos - player.position()));
+          }
+        }
+      } else if (cmd.op == "land") {
+        script_land = true;
       } else if (cmd.op == "aim" && !cmd.args.empty()) {
         if (cmd.args[0] == "sun") {
           aim_at(inf::sim::normalize(star_local - player.position()));
@@ -1400,7 +1478,7 @@ int main(int argc, char** argv) {
       }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-        if (!entry.occupied || slot == anchor->slot) {
+        if (!entry.occupied || (slot == anchor->slot && anchor->moon < 0)) {
           continue;
         }
         float color[3];
@@ -1462,7 +1540,9 @@ int main(int argc, char** argv) {
         }
       }
       for (const MoonInstance& moon : moons_local) {
-        draw_ball(moon.pos, moon.radius, 2.0, 0.62f, 0.62f, 0.66f);
+        if (!moon.is_anchor) {
+          draw_ball(moon.pos, moon.radius, 2.0, 0.62f, 0.62f, 0.66f);
+        }
       }
 
       // --- atmosphere limb glow (space view) ---------------------------
@@ -1562,15 +1642,8 @@ int main(int argc, char** argv) {
         // glare snap on/off whenever the line of sight grazed a planet
         // edge (the reported sun flicker).
         double visibility = 1.0;
-        for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
-          const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-          if (!entry.occupied) {
-            continue;
-          }
-          const SVec3 center =
-              planet_local[static_cast<std::size_t>(slot)] - cam_pos_local;
-          const double radius = slot == anchor->slot ? anchor->radius
-                                                     : entry.phys.radius_m.to_double();
+        const auto occlude = [&](const SVec3& body_center, double radius) {
+          const SVec3 center = body_center - cam_pos_local;
           const double t = inf::sim::dot(center, dir);
           if (t > 0.0 && t < dist) {
             const double c2 = std::max(0.0, inf::sim::dot(center, center) - t * t);
@@ -1579,6 +1652,19 @@ int main(int argc, char** argv) {
                 visibility,
                 std::clamp((closest - radius) / (radius * 0.06), 0.0, 1.0));
           }
+        };
+        for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+          const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+          if (!entry.occupied) {
+            continue;
+          }
+          occlude(planet_local[static_cast<std::size_t>(slot)],
+                  slot == anchor->slot && anchor->moon < 0
+                      ? anchor->radius
+                      : entry.phys.radius_m.to_double());
+        }
+        for (const MoonInstance& moon : moons_local) {
+          occlude(moon.pos, moon.is_anchor ? anchor->radius : moon.radius);
         }
         // Closeness drives everything: 1 within ~8 star radii, fading
         // with distance (at a habitable-zone planet the veil is a subtle
@@ -1655,7 +1741,7 @@ int main(int argc, char** argv) {
         icon.rel = planet_local[static_cast<std::size_t>(slot)] - player_pos;
         slot_color(slot, icon.color);
         icon.scale = 1.0f;
-        icon.anchor = slot == anchor->slot;
+        icon.anchor = slot == anchor->slot && anchor->moon < 0;
         radar_bodies.push_back(icon);
       }
       for (const MoonInstance& moon : moons_local) {
@@ -1665,6 +1751,7 @@ int main(int argc, char** argv) {
         icon.color[1] = 0.62f;
         icon.color[2] = 0.66f;
         icon.scale = 0.55f;
+        icon.anchor = moon.is_anchor;
         radar_bodies.push_back(icon);
       }
     }
@@ -1963,11 +2050,42 @@ int main(int argc, char** argv) {
           target.eta_s = closing > 1.0 ? target.distance_m / closing : -1.0;
         }
       }
+      // Moons under the crosshair (T0016: full bodies with names).
+      for (const MoonInstance& moon : moons_local) {
+        const SVec3 rel = moon.pos - player_pos;
+        const double dist = inf::sim::length(rel);
+        if (moon.is_anchor && dist - moon.radius < moon.radius) {
+          continue;  // flying close over the anchor moon: readout is noise
+        }
+        if (dist <= moon.radius) {
+          continue;
+        }
+        const double cos_ang = inf::sim::dot(fwd, rel * (1.0 / dist));
+        if (cos_ang <= 0.0) {
+          continue;
+        }
+        const double ang = std::acos(std::clamp(cos_ang, -1.0, 1.0));
+        const double ang_radius = std::asin(std::clamp(moon.radius / dist, 0.0, 1.0));
+        const double margin = ang - ang_radius;
+        if (margin < best_margin) {
+          best_margin = margin;
+          target.valid = true;
+          target.name = moon_names[static_cast<std::size_t>(moon.slot)]
+                                  [static_cast<std::size_t>(moon.index)];
+          target.distance_m = dist - moon.radius;
+          const double closing = player.speed() * cos_ang;
+          target.eta_s = closing > 1.0 ? target.distance_m / closing : -1.0;
+        }
+      }
     }
 
     if (map_phase == MapPhase::Off) {
+      const std::string& location_name =
+          anchor->moon >= 0 ? moon_names[static_cast<std::size_t>(anchor->slot)]
+                                        [static_cast<std::size_t>(anchor->moon)]
+                            : slot_names[static_cast<std::size_t>(anchor->slot)];
       hud->build(&items, player, radar_bodies, measured_speed, input.aspect, state.height,
-                 dt, slot_names[static_cast<std::size_t>(anchor->slot)], target);
+                 dt, location_name, target);
     } else if (map_phase == MapPhase::On && hovered_slot >= 0) {
       // Info card from the forever-state payloads (map-mode spec §3).
       const auto& entry = system.planets[static_cast<std::size_t>(hovered_slot)];

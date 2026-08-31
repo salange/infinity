@@ -104,6 +104,7 @@ class TerrainField {
   MaterialField material_;
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;
+  Dir3 detail_axis_{det::Real(0.0), det::Real(0.0), det::Real(1.0)};
 };
 
 

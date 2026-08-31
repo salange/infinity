@@ -22,6 +22,10 @@ struct FbmParams {
   det::Real octave0_damp{0.5};
   // Ridge/billow blend ("sharpness"): 0 = smooth fBm, 1 = fully ridged.
   det::Real sharpness{0.0};
+  // Normalize by the weight of only the first N octaves (0 = all).
+  // Extra octaves beyond N then ADD detail at their natural amplitude
+  // instead of diluting the coarse band (T0015 WP4).
+  int normalize_octaves{0};
 };
 
 // Fractal sum with per-octave emphasis. Output roughly in [-1, 1].

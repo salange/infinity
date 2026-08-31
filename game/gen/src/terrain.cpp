@@ -20,6 +20,17 @@ TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet
   const core::Key terrain_key = core::derive_named(body_key, name::TerrainV2);
   elevation_lattice_ = core::lattice_key(terrain_key, channel::Lattice);
   detail_lattice_ = det::mix64(elevation_lattice_ ^ 0xD3A11E77E44A1EB5ULL);
+  // Per-body anisotropy direction for the detail term (prevailing-wind /
+  // lineation stand-in until a climate field provides one).
+  {
+    const std::uint64_t a = det::mix64(detail_lattice_ ^ 0xA717);
+    const std::uint64_t b = det::mix64(detail_lattice_ ^ 0xB818);
+    const Real ax(static_cast<double>(a >> 11U) * 0x1.0p-53 * 2.0 - 1.0);
+    const Real ay(static_cast<double>(b >> 11U) * 0x1.0p-53 * 2.0 - 1.0);
+    const Real az(0.35);
+    const Real len = det::sqrt(ax * ax + ay * ay + az * az);
+    detail_axis_ = Dir3{ax / len, ay / len, az / len};
+  }
 }
 
 Real TerrainField::elevation_m(const Dir3& unit_dir) const {
@@ -102,12 +113,28 @@ struct NoiseControls {
   Real warp;
 };
 
-NoiseControls noise_controls(const BlendedParams& params, std::uint32_t cells_per_face) {
+NoiseControls noise_controls(const BlendedParams& params, std::uint32_t cells_per_face,
+                             double radius_m) {
   NoiseControls controls;
   // Noise domain: unit direction scaled so one lattice cell spans roughly
   // one-third of a province cell (features live inside provinces).
   controls.frequency = Real(3.0 * static_cast<double>(cells_per_face));
-  controls.fbm.octaves = 6;
+  // T0015 WP4: radius-dependent octave count so the finest octave lands
+  // near ~3 m regardless of body size (the old fixed 6 bottomed out at
+  // ~563 m — nothing at walking scale). Pure halving loop, no libm.
+  {
+    double wavelength = radius_m / (3.0 * static_cast<double>(cells_per_face));
+    int octaves = 1;
+    while (wavelength > 3.0 && octaves < 12) {
+      wavelength *= 0.5;
+      ++octaves;
+    }
+    controls.fbm.octaves = octaves < 6 ? 6 : octaves;
+    // Keep the first six octaves at their v1 amplitudes; the added
+    // fine octaves contribute walking-scale detail on top instead of diluting the
+    // mountain-scale bands.
+    controls.fbm.normalize_octaves = 6;
+  }
   // Ruggedness drives per-octave persistence and crest sharpness;
   // carving drives domain warp (coastline/valley wander — Murray's trick).
   controls.fbm.gain = Real(0.4) + params.ruggedness * Real(0.25);
@@ -127,7 +154,8 @@ Real TerrainField::elevation_from_params(const Dir3& unit_dir,
 
 Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
                                          Real macro_rel) const {
-  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face());
+  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
+                                               planet_.radius_m.to_double());
   const Real noise = warped_fbm3(elevation_lattice_, unit_dir.x * controls.frequency,
                                  unit_dir.y * controls.frequency,
                                  unit_dir.z * controls.frequency, controls.fbm,
@@ -152,7 +180,8 @@ TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_d
   params.ruggedness = canonical.ruggedness;
   params.carving = canonical.carving;
 
-  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face());
+  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
+                                               planet_.radius_m.to_double());
   const world::NoiseD noise = world::warped_fbm3_d(
       elevation_lattice_, unit_dir.x * controls.frequency, unit_dir.y * controls.frequency,
       unit_dir.z * controls.frequency, controls.fbm, controls.warp);
@@ -184,10 +213,32 @@ TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_d
 }
 
 Real TerrainField::detail_m(const Dir3& position_m) const {
-  const Real kilo(0.001);
-  return gradient_noise3(detail_lattice_, position_m.x * kilo * Real(50.0),
-                         position_m.y * kilo * Real(50.0), position_m.z * kilo * Real(50.0)) *
-         Real(2.0);
+  // T0015 WP4: the fixed +-2 m isotropic wobble becomes type-dependent —
+  // dunes want a directional ripple, ice wants fracture lineation,
+  // regolith wants coarser pitting. Anisotropy: compress the domain
+  // along a per-body direction so features elongate across it.
+  double amplitude;
+  double inv_wavelength;
+  double anisotropy;
+  switch (planet_.type) {
+    case PlanetType::Desert: amplitude = 2.6; inv_wavelength = 1.0 / 34.0; anisotropy = 0.8; break;
+    case PlanetType::Ice: amplitude = 2.0; inv_wavelength = 1.0 / 26.0; anisotropy = 0.65; break;
+    case PlanetType::Barren: amplitude = 2.8; inv_wavelength = 1.0 / 30.0; anisotropy = 0.0; break;
+    case PlanetType::EarthLike:
+    default: amplitude = 1.6; inv_wavelength = 1.0 / 20.0; anisotropy = 0.0; break;
+  }
+  Real x = position_m.x;
+  Real y = position_m.y;
+  Real z = position_m.z;
+  if (anisotropy > 0.0) {
+    const Real along = x * detail_axis_.x + y * detail_axis_.y + z * detail_axis_.z;
+    const Real squeeze = along * Real(anisotropy);
+    x = x - detail_axis_.x * squeeze;
+    y = y - detail_axis_.y * squeeze;
+    z = z - detail_axis_.z * squeeze;
+  }
+  const Real f(inv_wavelength);
+  return gradient_noise3(detail_lattice_, x * f, y * f, z * f) * Real(amplitude);
 }
 
 Real TerrainField::density(const Dir3& position_m) const {
@@ -211,13 +262,13 @@ Real TerrainField::ground_radius_m(const Dir3& unit_dir) const {
     const Dir3 position{unit_dir.x * r, unit_dir.y * r, unit_dir.z * r};
     return (surface - r) + detail_m(position);
   };
-  Real lo = surface - Real(4.0);   // below: expect solid (density > 0)
-  Real hi = surface + Real(4.0);   // above: expect air (density < 0)
+  Real lo = surface - Real(6.0);   // below: expect solid (density > 0)
+  Real hi = surface + Real(6.0);   // above: expect air (density < 0)
   if (density_at(lo) <= Real(0.0) || density_at(hi) >= Real(0.0)) {
     // Bracket failed (extreme detail constellation): widen once, then
     // fall back to the elevation surface.
-    lo = surface - Real(8.0);
-    hi = surface + Real(8.0);
+    lo = surface - Real(12.0);
+    hi = surface + Real(12.0);
     if (density_at(lo) <= Real(0.0) || density_at(hi) >= Real(0.0)) {
       return surface;
     }

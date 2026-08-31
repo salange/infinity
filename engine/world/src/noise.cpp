@@ -135,7 +135,9 @@ Real fbm3(std::uint64_t lattice_key, Real x, Real y, Real z, const FbmParams& pa
       weight = weight * params.octave0_damp;
     }
     sum += value * weight;
-    total += weight;
+    if (params.normalize_octaves == 0 || octave < params.normalize_octaves) {
+      total += weight;
+    }
     amplitude = amplitude * params.gain;
     frequency = frequency * params.lacunarity;
   }
@@ -247,7 +249,9 @@ NoiseD fbm3_d(std::uint64_t lattice_key, Real x, Real y, Real z, const FbmParams
     sum_dx += ddx * weight;
     sum_dy += ddy * weight;
     sum_dz += ddz * weight;
-    total += weight;
+    if (params.normalize_octaves == 0 || octave < params.normalize_octaves) {
+      total += weight;
+    }
     amplitude = amplitude * params.gain;
     frequency = frequency * params.lacunarity;
   }

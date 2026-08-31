@@ -298,4 +298,63 @@ int cmd_macro_stats(int seed_count) {
   return 0;
 }
 
+int cmd_terrain_stats(const core::Seed128& seed) {
+  // T0015 WP4 acceptance: mean |dz| per horizontal run at walking scales.
+  const gen::BodyHandle body = body_for(seed);
+  for (std::uint32_t t = 0; t < 4; ++t) {
+    const auto type = static_cast<gen::PlanetType>(t);
+    const gen::PlanetParams planet = gen::derive_planet_params(body, type);
+    const gen::TerrainField field(body.entity, planet);
+    const double radius = planet.radius_m.to_double();
+    gen::TerrainField::ParamCache cache;
+    const int kSteps = 1200;
+    const double step_m = 5.0;
+    const double step_rad = step_m / radius;
+    double sum5 = 0.0, sum20 = 0.0, sum100 = 0.0;
+    int n5 = 0, n20 = 0, n100 = 0;
+    std::vector<double> h(kSteps);
+    for (int arc = 0; arc < 3; ++arc) {
+      const double a = 0.7 + arc * 1.9;
+      gen::Dir3 d{det::Real(std::cos(a)), det::Real(std::sin(a)), det::Real(0.2 * arc)};
+      const double dl = std::sqrt(d.x.to_double() * d.x.to_double() +
+                                  d.y.to_double() * d.y.to_double() +
+                                  d.z.to_double() * d.z.to_double());
+      gen::Dir3 dir{det::Real(d.x.to_double() / dl), det::Real(d.y.to_double() / dl),
+                    det::Real(d.z.to_double() / dl)};
+      // Tangent via cross with z-ish axis.
+      double tx = -dir.y.to_double(), ty = dir.x.to_double(), tz = 0.0;
+      const double tl = std::sqrt(tx * tx + ty * ty + tz * tz);
+      tx /= tl; ty /= tl;
+      for (int i = 0; i < kSteps; ++i) {
+        const double ang = step_rad * i;
+        const double c = std::cos(ang), sn = std::sin(ang);
+        const double px = dir.x.to_double() * c + tx * sn;
+        const double py = dir.y.to_double() * c + ty * sn;
+        const double pz = dir.z.to_double() * c + tz * sn;
+        const double pl = std::sqrt(px * px + py * py + pz * pz);
+        const gen::Dir3 pd{det::Real(px / pl), det::Real(py / pl), det::Real(pz / pl)};
+        const auto canonical = field.canonical_params(gen::dir_to_face_uv(pd), &cache);
+        gen::BlendedParams params{};
+        params.relief_amplitude_m = canonical.relief_amplitude_m;
+        params.base_elevation_m = canonical.base_elevation_m;
+        params.ruggedness = canonical.ruggedness;
+        params.carving = canonical.carving;
+        // Full surface height incl. the 3D detail term at the surface.
+        const gen::Dir3 pos{det::Real(pd.x.to_double() * radius),
+                            det::Real(pd.y.to_double() * radius),
+                            det::Real(pd.z.to_double() * radius)};
+        h[static_cast<std::size_t>(i)] =
+            field.elevation_from_params(pd, params, canonical.macro_rel).to_double() +
+            field.detail_m(pos).to_double();
+      }
+      for (int i = 1; i < kSteps; ++i) { sum5 += std::abs(h[i] - h[i - 1]); ++n5; }
+      for (int i = 4; i < kSteps; i += 4) { sum20 += std::abs(h[i] - h[i - 4]); ++n20; }
+      for (int i = 20; i < kSteps; i += 20) { sum100 += std::abs(h[i] - h[i - 20]); ++n100; }
+    }
+    std::printf("%-10s mean|dz|: 5m=%.2f  20m=%.2f  100m=%.2f\n", gen::to_string(type),
+                sum5 / n5, sum20 / n20, sum100 / n100);
+  }
+  return 0;
+}
+
 }  // namespace inf::cli

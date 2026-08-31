@@ -132,6 +132,21 @@ int main(int argc, char** argv) {
     return inf::cli::cmd_dump_system(*seed, start_ns, span_ns, steps);
   }
 
+  if (std::strcmp(argv[1], "terrain-stats") == 0) {
+    const char* seed_text2 = "83";
+    for (int i = 2; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+        seed_text2 = argv[++i];
+      }
+    }
+    const auto seed2 = inf::core::parse_seed(seed_text2);
+    if (!seed2.has_value()) {
+      std::fprintf(stderr, "invalid seed: %s\n", seed_text2);
+      return 1;
+    }
+    return inf::cli::cmd_terrain_stats(*seed2);
+  }
+
   if (std::strcmp(argv[1], "macro-stats") == 0) {
     int seeds = 100;
     for (int i = 2; i < argc; ++i) {

@@ -79,7 +79,7 @@ TEST_CASE("map transition: hits both endpoints, stays finite and orthonormal") {
 TEST_CASE("player: map mode pushes and restores, planet-local, velocity zero") {
   const gen::BodyHandle body = gen::default_body(core::Seed128{0, 0xBEEF});
   const gen::PlanetParams planet =
-      gen::derive_planet_params(body.params, gen::PlanetType::Barren);
+      gen::derive_planet_params(body, gen::PlanetType::Barren);
   const gen::TerrainField field(body.entity, planet);
   const gen::EffectiveField effective(field);
   sim::Player player(effective, Vec3{planet.radius_m.to_double() * 2.0, 0.0, 0.0});
@@ -112,7 +112,7 @@ TEST_CASE("player: map mode pushes and restores, planet-local, velocity zero") {
 TEST_CASE("player: rebase swaps the anchor frame; push_out keeps bodies solid") {
   const gen::BodyHandle body_a = gen::default_body(core::Seed128{0, 0xA});
   const gen::PlanetParams planet_a =
-      gen::derive_planet_params(body_a.params, gen::PlanetType::Barren);
+      gen::derive_planet_params(body_a, gen::PlanetType::Barren);
   const gen::TerrainField field_a(body_a.entity, planet_a);
   const gen::EffectiveField effective_a(field_a);
   sim::Player player(effective_a, Vec3{planet_a.radius_m.to_double() * 3.0, 0.0, 0.0});
@@ -128,7 +128,7 @@ TEST_CASE("player: rebase swaps the anchor frame; push_out keeps bodies solid") 
   // rebase: new field + frame, attitude kept, speed kept, mode kept.
   const gen::BodyHandle body_b = gen::default_body(core::Seed128{0, 0xB});
   const gen::PlanetParams planet_b =
-      gen::derive_planet_params(body_b.params, gen::PlanetType::Ice);
+      gen::derive_planet_params(body_b, gen::PlanetType::Ice);
   const gen::TerrainField field_b(body_b.entity, planet_b);
   const gen::EffectiveField effective_b(field_b);
   const Vec3 fwd_before = player.forward();

@@ -132,4 +132,9 @@ BodyHandle body_for_slot(const core::Seed128& seed, int slot) {
   return BodyHandle{node->key(), node->params_key()};
 }
 
+PlanetParams derive_planet_params(const BodyHandle& body,
+                                  std::optional<PlanetType> forced_type) {
+  return derive_planet_params(body.entity, body.params, forced_type);
+}
+
 }  // namespace inf::gen

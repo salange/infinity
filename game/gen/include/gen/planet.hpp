@@ -7,6 +7,7 @@
 #include "core/det/real.hpp"
 #include "core/ephem/elements.hpp"
 #include "core/key.hpp"
+#include "gen/macro.hpp"
 #include "gen/names.hpp"
 
 namespace inf::gen {
@@ -65,8 +66,17 @@ struct PlanetParams {
   det::Real radius_m;         // from radius_range_m() — 1:10 of real
   det::Real core_radius_m;    // impenetrable core (fraction of radius)
   det::Real gravity;          // m/s^2, cosmetic-ish in v0
-  det::Real sea_level_m;      // EarthLike only; offset above radius_m, else 0
+  // SOLVED, not drawn (T0015 WP1): the macro-elevation quantile at
+  // (1 - land_fraction), in metres relative to the nominal radius. May be
+  // negative; on dry worlds it sits below the global minimum.
+  det::Real sea_level_m;
   det::Real atmosphere_height_m;  // 0 for Barren
+  // macro/v1 descriptor: continent pattern, the water-inventory target
+  // (1.0 = dry world, ~0 = global ocean), and the macro field's sigma in
+  // metres (pattern fraction x radius) — terrain/v2 composes with these.
+  MacroPattern macro_pattern{MacroPattern::FewContinents};
+  det::Real land_fraction{1.0};
+  det::Real macro_amplitude_m{0.0};
   std::uint32_t sky_palette{0};
   std::uint32_t cells_per_face{0};  // province grid resolution N (per face edge)
   std::uint32_t palette_id{0};
@@ -76,10 +86,13 @@ struct PlanetParams {
   std::string to_json() const;
 };
 
-// Derives all planet parameters from K_body via the "planet-params/v1"
-// layer. forced_type overrides the seeded type pick (CLI flag) but keeps
-// every other draw identical.
-PlanetParams derive_planet_params(const core::Key& body_key,
+// Derives all planet parameters. Draws come from the params key
+// ("planet-params/v1", two-seed rule); the sea-level solve reads the
+// macro/v1 layer, which hangs off the body ENTITY key like every other
+// world-structure layer — hence both keys. forced_type overrides the
+// seeded type pick (CLI flag) but keeps every other draw identical.
+PlanetParams derive_planet_params(const core::Key& body_entity_key,
+                                  const core::Key& params_key,
                                   std::optional<PlanetType> forced_type = std::nullopt);
 
 }  // namespace inf::gen

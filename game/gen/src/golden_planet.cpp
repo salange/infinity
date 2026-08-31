@@ -26,7 +26,7 @@ std::uint64_t hash_planet_script(const core::Seed128& seed, std::uint32_t forced
   core::GoldenHash hash;
   const BodyHandle body = test_body(seed);
   const PlanetParams planet =
-      derive_planet_params(body.params, static_cast<PlanetType>(forced_type & 3U));
+      derive_planet_params(body, static_cast<PlanetType>(forced_type & 3U));
 
   hash.feed(static_cast<std::uint64_t>(planet.type));
   feed_real(hash, planet.radius_m);
@@ -80,7 +80,7 @@ std::string hash_density_report() {
   std::string report = "hash-density v1\n";
   const BodyHandle body = test_body(seed);
   for (std::uint32_t type = 0; type < 4; ++type) {
-    const PlanetParams planet = derive_planet_params(body.params, static_cast<PlanetType>(type));
+    const PlanetParams planet = derive_planet_params(body, static_cast<PlanetType>(type));
     const TerrainField field(body.entity, planet);
     static constexpr std::array<core::ChunkAddr, 5> kAddrs = {{
         {0, 11, 1024, 1024, 0},    // surface shell, face 0 center

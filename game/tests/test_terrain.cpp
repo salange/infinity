@@ -60,7 +60,7 @@ TEST_CASE("noise: fbm sharpness and octave damping change the signal") {
 
 TEST_CASE("terrain: density signs are physical") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
   const double radius = planet.radius_m.to_double();
 
@@ -75,7 +75,7 @@ TEST_CASE("terrain: density signs are physical") {
 
 TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
 
   // A chunk straddling the surface at the +X face center: find the shell
@@ -155,7 +155,7 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
 TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
   const gen::BodyHandle body = body_for(0x7E11);
   const gen::PlanetParams planet =
-      gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+      gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
   const double radius = planet.radius_m.to_double();
 
@@ -174,15 +174,16 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
     const auto result = field.elevation_and_gradient(dir);
 
     // The gradient covers the noise term with locally-constant params:
-    // difference elevation_from_params with the params frozen at dir.
+    // difference elevation_from_params with params AND macro frozen at dir.
     const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir));
     gen::BlendedParams params{};
     params.relief_amplitude_m = canonical.relief_amplitude_m;
     params.base_elevation_m = canonical.base_elevation_m;
     params.ruggedness = canonical.ruggedness;
     params.carving = canonical.carving;
+    const Real macro_rel = canonical.macro_rel;
     CHECK(std::abs(result.elevation_m.to_double() -
-                   field.elevation_from_params(dir, params).to_double()) < 1e-9);
+                   field.elevation_from_params(dir, params, macro_rel).to_double()) < 1e-9);
 
     // Two tangent directions.
     gen::Dir3 t1 = unit(-dir.y.to_double(), dir.x.to_double(), 0.0);
@@ -203,9 +204,9 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
                     dir.y.to_double() + sign * eps * t.y.to_double(),
                     dir.z.to_double() + sign * eps * t.z.to_double());
       };
-      const double h_hi = field.elevation_from_params(offset(1.0), params).to_double();
-      const double h_mid = field.elevation_from_params(dir, params).to_double();
-      const double h_lo = field.elevation_from_params(offset(-1.0), params).to_double();
+      const double h_hi = field.elevation_from_params(offset(1.0), params, macro_rel).to_double();
+      const double h_mid = field.elevation_from_params(dir, params, macro_rel).to_double();
+      const double h_lo = field.elevation_from_params(offset(-1.0), params, macro_rel).to_double();
       const double forward = (h_hi - h_mid) / (eps * radius);
       const double backward = (h_mid - h_lo) / (eps * radius);
       if (std::abs(forward - backward) > 1e-2 * (1.0 + std::abs(forward))) {
@@ -228,4 +229,45 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
     CHECK(std::abs(radial) < 1e-9);
   }
   CHECK(checked > 300);
+}
+
+TEST_CASE("terrain: measured land fraction tracks the solved sea level (WP1)") {
+  // The T0015 WP1 contract: the sea level is SOLVED from the macro
+  // quantile, so measured land must track the drawn target. The wide
+  // 100-seed sweep lives in `infinity-cli macro-stats`; this is the
+  // in-tree canary.
+  constexpr double kPi = 3.14159265358979323846;
+  for (std::uint64_t seed : {3ULL, 7ULL, 0x83ULL, 0x2fULL, 21ULL, 55ULL}) {
+    const gen::BodyHandle body = body_for(seed);
+    const gen::PlanetParams planet =
+        gen::derive_planet_params(body, gen::PlanetType::EarthLike);
+    const gen::TerrainField field(body.entity, planet);
+    const double sea = planet.sea_level_m.to_double();
+    gen::TerrainField::ParamCache cache;
+    double land = 0.0;
+    double total = 0.0;
+    for (int y = 0; y < 24; ++y) {
+      const double lat = kPi * (0.5 - (y + 0.5) / 24.0);
+      const double weight = std::cos(lat);
+      for (int x = 0; x < 48; ++x) {
+        const double lon = 2.0 * kPi * ((x + 0.5) / 48.0) - kPi;
+        const double cos_lat = std::cos(lat);
+        const gen::Dir3 dir{Real(cos_lat * std::cos(lon)), Real(cos_lat * std::sin(lon)),
+                            Real(std::sin(lat))};
+        const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir), &cache);
+        gen::BlendedParams params{};
+        params.relief_amplitude_m = canonical.relief_amplitude_m;
+        params.base_elevation_m = canonical.base_elevation_m;
+        params.ruggedness = canonical.ruggedness;
+        params.carving = canonical.carving;
+        if (field.elevation_from_params(dir, params, canonical.macro_rel).to_double() >
+            sea) {
+          land += weight;
+        }
+        total += weight;
+      }
+    }
+    CAPTURE(seed);
+    CHECK(std::abs(land / total - planet.land_fraction.to_double()) < 0.06);
+  }
 }

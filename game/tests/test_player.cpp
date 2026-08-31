@@ -37,7 +37,7 @@ double ground_r(const gen::TerrainField& field, const Vec3& pos) {
 
 TEST_CASE("player: ship cannot penetrate the ground") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
 
   // Spawn deliberately below the surface: the first update must clamp the
@@ -63,7 +63,7 @@ TEST_CASE("player: ship cannot penetrate the ground") {
 
 TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
 
   const Vec3 unit = sim::normalize(Vec3{1.0, -0.3, 0.25});
@@ -109,7 +109,7 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
 
 TEST_CASE("player: beams fire toward the crosshair and expire by distance") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::Barren);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::Barren);
   const gen::TerrainField field(body.entity, planet);
   const Vec3 unit = sim::normalize(Vec3{0.3, 1.0, 0.2});
   const gen::EffectiveField eff(field);
@@ -138,7 +138,7 @@ TEST_CASE("player: beams fire toward the crosshair and expire by distance") {
 
 TEST_CASE("player: throttle never reverses") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::Ice);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::Ice);
   const gen::TerrainField field(body.entity, planet);
   const Vec3 unit = sim::normalize(Vec3{1.0, 0.0, 0.0});
   const gen::EffectiveField eff(field);

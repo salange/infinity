@@ -459,15 +459,22 @@ int default_landable_slot(const StarSystemParams& system) {
 }
 
 PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
-                                    const core::Key& planet_params_key) {
+                                    const BodyHandle& body) {
   const SystemPlanet& sys_planet = system.planets[static_cast<std::size_t>(slot)];
-  PlanetParams params = derive_planet_params(planet_params_key, sys_planet.surface_type);
+  PlanetParams params = derive_planet_params(body, sys_planet.surface_type);
+  // The solved sea level is a dimensionless quantile times the macro
+  // amplitude; recover the quantile before the radius override so both
+  // rescale together (fraction-of-radius rule, brief section 13).
+  const Real sea_quantile = params.sea_level_m / params.macro_amplitude_m;
   // System-layer truths override the standalone draws (one-directional
   // layering: planets/v1 decides, the surface generator obeys).
   params.radius_m = sys_planet.phys.radius_m;
   params.core_radius_m = params.radius_m * Real(0.7);
   params.gravity = sys_planet.phys.g_surface;
   params.atmosphere_height_m = sys_planet.phys.atmosphere.height_m;
+  params.macro_amplitude_m =
+      params.radius_m * macro_amplitude_fraction(params.macro_pattern);
+  params.sea_level_m = sea_quantile * params.macro_amplitude_m;
   return params;
 }
 

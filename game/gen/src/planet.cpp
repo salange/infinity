@@ -122,12 +122,14 @@ core::PlanetClass class_for_surface_type(PlanetType type, std::uint64_t word) {
   return core::PlanetClass::Rocky;  // airless rock/moon; giants come via the system
 }
 
-PlanetParams derive_planet_params(const core::Key& body_key,
+PlanetParams derive_planet_params(const core::Key& body_entity_key,
+                                  const core::Key& params_key_root,
                                   std::optional<PlanetType> forced_type) {
-  const core::Key params_key = core::derive_named(body_key, name::PlanetParamsV1);
+  const core::Key params_key = core::derive_named(params_key_root, name::PlanetParamsV1);
   const auto draw0 = core::draw_point(params_key, channel::Params, 0, 0, 0);
   const auto draw1 = core::draw_point(params_key, channel::Params, 1, 0, 0);
   const auto draw2 = core::draw_point(params_key, channel::Params, 2, 0, 0);
+  const auto draw3 = core::draw_point(params_key, channel::Params, 3, 0, 0);
 
   PlanetParams params;
   params.type = forced_type.value_or(static_cast<PlanetType>(pick(draw0[0], 4)));
@@ -145,8 +147,51 @@ PlanetParams derive_planet_params(const core::Key& body_key,
   params.core_radius_m = params.radius_m * uniform(draw0[2], table.core_frac_lo, table.core_frac_hi);
   params.gravity = surface_gravity(mass_earth_for(cls, params.radius_m), params.radius_m,
                                    uniform(draw0[3], 0.9, 1.1).to_double());
-  params.sea_level_m = uniform(draw1[0], table.sea_offset_lo_m, table.sea_offset_hi_m);
   params.atmosphere_height_m = uniform(draw1[1], table.atmo_lo_m, table.atmo_hi_m);
+
+  // --- macro/v1: continents + the SOLVED sea level (T0015 WP1) ---------
+  // The continent pattern comes from the macro layer's own key; the
+  // water inventory is an independent draw here (orthogonal axes). The
+  // sea level is the macro-elevation quantile at (1 - land) — that is
+  // what makes the measured land fraction track the target.
+  const MacroField macro(body_entity_key);
+  params.macro_pattern = macro.pattern();
+  params.macro_amplitude_m = params.radius_m * macro_amplitude_fraction(macro.pattern());
+  switch (params.type) {
+    case PlanetType::EarthLike:
+      // EarthLike means "has water" by definition: temperate band.
+      params.land_fraction = uniform(draw3[0], 0.15, 0.45);
+      break;
+    case PlanetType::Ice: {
+      // Sheet worlds span the full range: frozen-dry through global sheet.
+      const double roll = u01(draw3[1]).to_double();
+      if (roll < 0.18) {
+        params.land_fraction = Real(1.0);
+      } else if (roll < 0.30) {
+        params.land_fraction = uniform(draw3[0], 0.0, 0.05);
+      } else {
+        params.land_fraction = uniform(draw3[0], 0.10, 0.50);
+      }
+      break;
+    }
+    case PlanetType::Desert:
+    case PlanetType::Barren:
+      params.land_fraction = Real(1.0);  // dry: basins are dry lowlands
+      break;
+  }
+  // The province layer rides on top of macro with a positive mean base
+  // elevation, which lifts land above the pure-macro quantile. Correct
+  // the solved sea level by the type's EXPECTED province base (weights x
+  // range midpoints of the archetype table) so measured land tracks the
+  // target. Calibrated against `infinity-cli macro-stats`.
+  constexpr double kExpectedProvinceBase[4] = {402.0, 202.0, 184.0, 329.0};
+  const Real base_correction =
+      Real(kExpectedProvinceBase[static_cast<std::size_t>(params.type)] * 1.05);
+  params.sea_level_m =
+      macro.solve_sea_level(params.land_fraction) * params.macro_amplitude_m +
+      (params.land_fraction.to_double() < 0.999 ? base_correction : Real(0.0));
+  (void)table.sea_offset_lo_m;  // superseded by the solve; table kept for layout
+  (void)table.sea_offset_hi_m;
   params.sky_palette = static_cast<std::uint32_t>(draw1[2] >> 40U);
   // Province grid scales with radius: target province size ~60-120 km
   // (Earth/10 country scale), plus seeded variance within the type range.
@@ -168,6 +213,11 @@ std::string PlanetParams::to_json() const {
   append_real(out, "gravity", gravity);
   append_real(out, "sea_level_m", sea_level_m);
   append_real(out, "atmosphere_height_m", atmosphere_height_m);
+  out += "  \"macro_pattern\": \"";
+  out += gen::to_string(macro_pattern);
+  out += "\",\n";
+  append_real(out, "land_fraction", land_fraction);
+  append_real(out, "macro_amplitude_m", macro_amplitude_m);
   char buffer[128];
   std::snprintf(buffer, sizeof(buffer),
                 "  \"sky_palette\": %u,\n  \"cells_per_face\": %u,\n  \"palette_id\": %u\n",

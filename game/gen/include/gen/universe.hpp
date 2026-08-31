@@ -5,6 +5,7 @@
 #include "core/seed.hpp"
 #include "core/tree/tree.hpp"
 #include "gen/names.hpp"
+#include "gen/planet.hpp"
 
 namespace inf::gen {
 
@@ -38,5 +39,10 @@ BodyHandle default_body(const core::Seed128& seed);
 // (map mode, T0013).
 core::Key default_system_key(const core::Seed128& seed);
 BodyHandle body_for_slot(const core::Seed128& seed, int slot);
+
+// Convenience: planet params from a BodyHandle (macro reads the entity
+// key, the parameter draws read the params key — two-seed rule).
+PlanetParams derive_planet_params(const BodyHandle& body,
+                                  std::optional<PlanetType> forced_type = std::nullopt);
 
 }  // namespace inf::gen

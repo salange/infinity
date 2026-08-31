@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "core/det/mix.hpp"
+#include "core/det/trig.hpp"
 #include "core/golden.hpp"
 #include "gen/geo.hpp"
 
@@ -152,17 +153,110 @@ Real TerrainField::elevation_from_params(const Dir3& unit_dir,
                                macro_.canonical_value(dir_to_face_uv(unit_dir)));
 }
 
-Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
-                                         Real macro_rel) const {
+// Shared evaluator: base composition (macro + attenuated province fBm),
+// the analytic tangent gradient of the noise term, then the T0015 WP2
+// erosion operators applied against that gradient:
+//  - talus / slope-limiting (5.1): h -= k * max(0, |grad h| - tan(theta)) * L
+//    with theta blended from ruggedness (sand ~34deg .. competent rock
+//    ~50deg). Fakes thermal erosion end-states pointwise.
+//  - gradient-oriented ravines (5.3, phasor-lite): a groove oscillation
+//    whose crests run ALONG the downhill direction (phase coordinate is
+//    the position projected on the tangent perpendicular to the slope),
+//    jittered by the base noise, windowed to mid slopes. Pointwise,
+//    resolution-independent, orientation from the analytic derivative —
+//    the Grenier-2024 idea reduced to one oscillation.
+// The RETURNED gradient covers the base term only (erosion terms are
+// small local corrections; materials/talus consumers tolerate the
+// approximation, and the provable derivative contract lives in
+// elevation_base_from_params + the noise-level tests).
+Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
+                                      Real macro_rel, Dir3* slope_out) const {
+  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
+                                               planet_.radius_m.to_double());
+  const world::NoiseD noise = world::warped_fbm3_d(
+      elevation_lattice_, unit_dir.x * controls.frequency, unit_dir.y * controls.frequency,
+      unit_dir.z * controls.frequency, controls.fbm, controls.warp);
+
+  const Real macro_m = macro_rel * planet_.macro_amplitude_m;
+  const Real above_sea = macro_m - planet_.sea_level_m;
+  const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
+  const Real smooth = t * t * (Real(3.0) - (t + t));
+  const Real attenuation = Real(0.15) + Real(0.85) * smooth;
+  Real height = macro_m +
+                attenuation * (params.base_elevation_m + noise.value * params.relief_amplitude_m);
+
+  // Tangent slope of the noise term, metres per metre.
+  const Real k = attenuation * params.relief_amplitude_m * controls.frequency /
+                 planet_.radius_m;
+  const Dir3 gradient{noise.dx * k, noise.dy * k, noise.dz * k};
+  const Real radial = dot(gradient, unit_dir);
+  const Dir3 slope{gradient.x - unit_dir.x * radial, gradient.y - unit_dir.y * radial,
+                   gradient.z - unit_dir.z * radial};
+  if (slope_out != nullptr) {
+    *slope_out = slope;
+  }
+  // Erosion reacts to a SMOOTHED slope: the full 12-octave gradient
+  // wiggles at 3 m scale and would turn both operators into noise (the
+  // Grenier paper likewise orients by a smoothed gradient). Four
+  // unwarped octaves = the landform-scale flow field.
+  world::FbmParams coarse_fbm = controls.fbm;
+  coarse_fbm.octaves = 4;
+  coarse_fbm.sharpness = Real(0.0);
+  coarse_fbm.normalize_octaves = 0;
+  const world::NoiseD flow =
+      world::fbm3_d(elevation_lattice_, unit_dir.x * controls.frequency,
+                    unit_dir.y * controls.frequency, unit_dir.z * controls.frequency,
+                    coarse_fbm);
+  const Dir3 flow_grad{flow.dx * k, flow.dy * k, flow.dz * k};
+  const Real flow_radial = dot(flow_grad, unit_dir);
+  const Dir3 flow_slope{flow_grad.x - unit_dir.x * flow_radial,
+                        flow_grad.y - unit_dir.y * flow_radial,
+                        flow_grad.z - unit_dir.z * flow_radial};
+  const Real slope_mag = det::sqrt(dot(flow_slope, flow_slope));
+
+  // --- talus (thermal erosion end-state) -------------------------------
+  const Real tan_talus = Real(0.30) + params.ruggedness * Real(0.35);
+  const Real excess = det::max(Real(0.0), slope_mag - tan_talus);
+  height = height - det::min(excess, Real(1.2)) * Real(0.85) * Real(140.0);
+
+  // --- gradient-oriented ravines (only above water, mid slopes) --------
+  const Real window = det::clamp((slope_mag - Real(0.03)) / Real(0.06), Real(0.0), Real(1.0)) *
+                      det::clamp((Real(0.9) - slope_mag) / Real(0.4), Real(0.0), Real(1.0)) *
+                      det::clamp((height - planet_.sea_level_m) / Real(300.0), Real(0.0),
+                                 Real(1.0));
+  if (window > Real(0.001) && slope_mag > Real(1.0e-9)) {
+    // Tangent direction perpendicular to the downhill direction.
+    const Dir3 perp{unit_dir.y * flow_slope.z - unit_dir.z * flow_slope.y,
+                    unit_dir.z * flow_slope.x - unit_dir.x * flow_slope.z,
+                    unit_dir.x * flow_slope.y - unit_dir.y * flow_slope.x};
+    const Real perp_len = det::sqrt(dot(perp, perp));
+    const Real inv_len = Real(1.0) / perp_len;
+    const Real radius = planet_.radius_m;
+    // Phase coordinate: position (metres) projected across the flow.
+    const Real px = unit_dir.x * radius;
+    const Real py = unit_dir.y * radius;
+    const Real pz = unit_dir.z * radius;
+    const Real along_perp =
+        (px * perp.x + py * perp.y + pz * perp.z) * inv_len;
+    const Real jitter = flow.value * Real(2.2);
+    const Real phase = along_perp * Real(6.28318530717958647692 / 190.0) + jitter;
+    const Real wave = det::sin(phase);
+    const Real groove = (Real(0.5) + Real(0.5) * wave);
+    const Real cut = groove * groove * groove;
+    height = height - cut * window * params.carving * Real(26.0);
+  }
+  return height;
+}
+
+Real TerrainField::elevation_base_from_params(const Dir3& unit_dir,
+                                              const BlendedParams& params,
+                                              Real macro_rel) const {
   const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
                                                planet_.radius_m.to_double());
   const Real noise = warped_fbm3(elevation_lattice_, unit_dir.x * controls.frequency,
                                  unit_dir.y * controls.frequency,
                                  unit_dir.z * controls.frequency, controls.fbm,
                                  controls.warp);
-  // Composition (brief section 4.5): macro carries the continents; the
-  // province fBm rides on top, ATTENUATED in ocean basins (abyssal
-  // plains are smooth) and at full strength from the shelf upward.
   const Real macro_m = macro_rel * planet_.macro_amplitude_m;
   const Real above_sea = macro_m - planet_.sea_level_m;
   const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
@@ -172,6 +266,11 @@ Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedPara
          attenuation * (params.base_elevation_m + noise * params.relief_amplitude_m);
 }
 
+Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
+                                         Real macro_rel) const {
+  return evaluate_elevation(unit_dir, params, macro_rel, nullptr);
+}
+
 TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_dir) const {
   const CanonicalParams canonical = canonical_params(dir_to_face_uv(unit_dir));
   BlendedParams params{};
@@ -179,36 +278,8 @@ TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_d
   params.base_elevation_m = canonical.base_elevation_m;
   params.ruggedness = canonical.ruggedness;
   params.carving = canonical.carving;
-
-  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
-                                               planet_.radius_m.to_double());
-  const world::NoiseD noise = world::warped_fbm3_d(
-      elevation_lattice_, unit_dir.x * controls.frequency, unit_dir.y * controls.frequency,
-      unit_dir.z * controls.frequency, controls.fbm, controls.warp);
-
-  // Compose exactly like elevation_from_params with macro/params frozen —
-  // the gradient covers the noise term (macro and the province fields
-  // vary on multi-km scales and are treated as locally constant).
-  const Real macro_m = canonical.macro_rel * planet_.macro_amplitude_m;
-  const Real above_sea = macro_m - planet_.sea_level_m;
-  const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
-  const Real smooth = t * t * (Real(3.0) - (t + t));
-  const Real attenuation = Real(0.15) + Real(0.85) * smooth;
-
   ElevationD out;
-  out.elevation_m =
-      macro_m +
-      attenuation * (params.base_elevation_m + noise.value * params.relief_amplitude_m);
-  // d h/d dir picks up the noise-domain frequency, the amplitude, and the
-  // basin attenuation; the tangent projection removes the radial
-  // component, and dividing by the radius converts "per unit direction"
-  // into metres per metre walked.
-  const Real k =
-      attenuation * params.relief_amplitude_m * controls.frequency / planet_.radius_m;
-  const Dir3 gradient{noise.dx * k, noise.dy * k, noise.dz * k};
-  const Real radial = dot(gradient, unit_dir);
-  out.slope = Dir3{gradient.x - unit_dir.x * radial, gradient.y - unit_dir.y * radial,
-                   gradient.z - unit_dir.z * radial};
+  out.elevation_m = evaluate_elevation(unit_dir, params, canonical.macro_rel, &out.slope);
   return out;
 }
 

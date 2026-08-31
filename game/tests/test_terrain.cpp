@@ -351,3 +351,100 @@ TEST_CASE("features: craters are bounded, continuous and free for EarthLike (WP5
     FAIL("no crater found on the face-0 diagonal");
   }
 }
+
+TEST_CASE("caves: bounded systems, guaranteed mouths, topmost ground (WP7)") {
+  const gen::BodyHandle body = body_for(0x83);
+
+  SUBCASE("EarthLike hosts no caves and pays no cost") {
+    const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::EarthLike);
+    const gen::TerrainField field(body.entity, planet);
+    CHECK(!field.caves().enabled());
+    CHECK(field.cave_depth_budget_m(gen::Dir3{Real(1.0), Real(0.0), Real(0.0)})
+              .to_double() == 0.0);
+  }
+
+  const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::Barren);
+  const gen::TerrainField field(body.entity, planet);
+  const gen::CaveField& caves = field.caves();
+  REQUIRE(caves.enabled());
+
+  // Find hosted systems and check the geometric contracts.
+  int hosted = 0;
+  gen::CaveField::System mouth_system;
+  for (std::uint32_t ci = 0; ci < caves.cells_per_face(); ++ci) {
+    for (std::uint32_t cj = 0; cj < caves.cells_per_face(); ++cj) {
+      const gen::CellId cell{2, ci, cj};
+      if (!caves.hosted(cell)) continue;
+      ++hosted;
+      const Real sa = planet.radius_m + field.elevation_m(caves.anchor_dir(cell));
+      const gen::Dir3 md = caves.mouth_probe_dir(cell, sa);
+      const Real sm = planet.radius_m + field.elevation_m(md);
+      const auto sys = caves.build_system(cell, sa, sm);
+      REQUIRE(sys.hosted);
+      // Determinism: rebuilding gives the identical system.
+      const auto sys2 = caves.build_system(cell, sa, sm);
+      CHECK(sys.bound_m.to_double() == sys2.bound_m.to_double());
+      CHECK(sys.node_count == sys2.node_count);
+      // Stencil invariant: the bound respects the hard cap.
+      CHECK(sys.bound_m.to_double() <= gen::CaveField::kBoundCapM);
+      // Every node (radius included) lies inside the bound; none above
+      // the surface except via the mouth capsule.
+      for (int i = 0; i < sys.node_count; ++i) {
+        const gen::Dir3 rel{sys.nodes[i].x - sys.bound_center.x,
+                            sys.nodes[i].y - sys.bound_center.y,
+                            sys.nodes[i].z - sys.bound_center.z};
+        CHECK(det::sqrt(dot(rel, rel)).to_double() + sys.node_r[i].to_double() <=
+              sys.bound_m.to_double() + 0.01);
+        CHECK(det::sqrt(dot(sys.nodes[i], sys.nodes[i])).to_double() <= sa.to_double());
+        // No cave near the impenetrable core on any sane body.
+        CHECK(det::sqrt(dot(sys.nodes[i], sys.nodes[i])).to_double() >
+              planet.core_radius_m.to_double());
+      }
+      if (sys.has_mouth && mouth_system.node_count == 0) {
+        mouth_system = sys;
+      }
+    }
+  }
+  CHECK(hosted > 0);
+  REQUIRE(mouth_system.node_count > 0);
+
+  SUBCASE("a mouth column's topmost ground is the tunnel floor (Blocker B)") {
+    int top = 0;
+    Real best(-1.0e30);
+    for (int i = 0; i < mouth_system.node_count; ++i) {
+      const Real r = det::sqrt(dot(mouth_system.nodes[i], mouth_system.nodes[i]));
+      if (r > best) { best = r; top = i; }
+    }
+    const gen::Dir3 dir = gen::normalize(mouth_system.nodes[top]);
+    const double surface = (planet.radius_m + field.elevation_m(dir)).to_double();
+    const double ground = field.ground_radius_m(dir).to_double();
+    // The mouth carves the column: the reported ground sits below the
+    // plain surface, exactly on a zero crossing of the composed density.
+    CHECK(ground < surface - 2.0);
+    const gen::Dir3 above{dir.x * Real(ground + 0.5), dir.y * Real(ground + 0.5),
+                          dir.z * Real(ground + 0.5)};
+    const gen::Dir3 below{dir.x * Real(ground - 0.5), dir.y * Real(ground - 0.5),
+                          dir.z * Real(ground - 0.5)};
+    CHECK(field.density(above).to_double() < 0.0);
+    CHECK(field.density(below).to_double() > 0.0);
+  }
+
+  SUBCASE("inside a tunnel the walking floor is below the roof") {
+    // An interior node away from the mouth: solid overhead, air at the node.
+    int pick = -1;
+    for (int i = 1; i + 1 < mouth_system.node_count; ++i) {
+      const gen::Dir3& node = mouth_system.nodes[i];
+      if (field.density(node).to_double() < -1.0) { pick = i; break; }
+    }
+    REQUIRE(pick >= 0);
+    const gen::Dir3& node = mouth_system.nodes[pick];
+    const gen::Dir3 dir = gen::normalize(node);
+    const Real node_r = det::sqrt(dot(node, node));
+    const double floor_r = field.ground_radius_below_m(dir, node_r).to_double();
+    CHECK(floor_r < node_r.to_double());
+    CHECK(floor_r > node_r.to_double() - 80.0);
+    // Depth budget marks this column for the streamer (Blocker A).
+    CHECK(field.cave_depth_budget_m(dir).to_double() ==
+          gen::CaveField::kDepthBudgetM);
+  }
+}

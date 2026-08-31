@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 #include "gen/terrain.hpp"
 #include "world/chunk_sampler.hpp"
@@ -70,9 +71,39 @@ class TerrainSampler final : public world::ChunkSampler {
     return field_.elevation_m(unit_dir).to_double();
   }
 
+  int underground_intervals(const world::Dir3& unit_dir, DepthInterval* out,
+                            int max_intervals) const override {
+    if (!field_.caves().enabled()) {
+      return 0;
+    }
+    TerrainField::CaveQuery query;
+    {
+      // The cave cache is shared across columns; the streamer calls this
+      // from its update pass, workers never do.
+      const std::lock_guard<std::mutex> lock(cave_cache_mutex_);
+      field_.gather_caves(unit_dir, &cave_cache_, &query);
+    }
+    int count = 0;
+    const double radius = field_.planet().radius_m.to_double();
+    for (int s = 0; s < query.count && count < max_intervals; ++s) {
+      double lo[CaveField::kMaxNodes + 4];
+      double hi[CaveField::kMaxNodes + 4];
+      const int n = CaveField::radial_intervals(*query.systems[s], unit_dir, lo, hi,
+                                                CaveField::kMaxNodes + 4);
+      for (int i = 0; i < n && count < max_intervals; ++i) {
+        out[count].lo_m = lo[i] - radius;  // relative to the nominal radius,
+        out[count].hi_m = hi[i] - radius;  // matching surface_elevation_m
+        ++count;
+      }
+    }
+    return count;
+  }
+
  private:
   const TerrainField& field_;
   const world::EditStore* edits_;
+  mutable TerrainField::ParamCache cave_cache_;
+  mutable std::mutex cave_cache_mutex_;
 };
 
 }  // namespace inf::gen

@@ -154,6 +154,7 @@ class Player {
   void update_beams(double dt);
   void try_fire(const InputFrame& input);
   double ground_radius(const Vec3& dir) const;
+  double ground_floor(const Vec3& dir, double below_r) const;
   double water_radius() const;
   void clamp_to_ground_flight();
   NearestBody nearest_or_anchor() const;

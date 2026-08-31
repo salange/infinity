@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/key.hpp"
+#include "gen/caves.hpp"
 #include "gen/features.hpp"
 #include "gen/geo.hpp"
 #include "gen/names.hpp"
@@ -84,6 +85,7 @@ class TerrainField {
     std::unordered_map<std::uint64_t, CanonicalParams> params;
     MacroField::Cache macro;
     FeatureField::Cache features;
+    CaveField::Cache caves;
   };
   CanonicalParams canonical_params(const FaceUV& face_uv, ParamCache* cache = nullptr) const;
 
@@ -95,11 +97,41 @@ class TerrainField {
   // 3D detail term at a planet-local position (meters).
   det::Real detail_m(const Dir3& position_m) const;
 
-  // Radius of the terrain surface (the density zero crossing) along the
-  // radial through unit_dir — the ground under a ship/player. One
-  // elevation evaluation plus a cheap bisection over the detail term, so
-  // it matches the meshed isosurface to sub-voxel precision.
+  // Radius of the TOPMOST terrain surface crossing along the radial
+  // through unit_dir — the ground under a ship. Without caves near the
+  // radial this is one elevation evaluation plus a cheap bisection over
+  // the detail term; near a cave system it becomes a fixed-step downward
+  // scan so a mouth column reports the tunnel floor, never a cave roof
+  // to fall through (T0015 WP7 Blocker B).
   det::Real ground_radius_m(const Dir3& unit_dir) const;
+
+  // First surface crossing at or below from_r — the floor under a WALKING
+  // player. On the open surface it equals ground_radius_m; inside a cave
+  // it is the tunnel floor rather than the terrain surface overhead.
+  det::Real ground_radius_below_m(const Dir3& unit_dir, det::Real from_r) const;
+
+  // Nearby cave systems for one radial, gathered ONCE per column/query
+  // (candidate probing + host draws are too hot for per-voxel work):
+  // pointers either into the cache or into local storage.
+  struct CaveQuery {
+    const CaveField::System* systems[CaveField::kMaxCandidates];
+    int count{0};
+    CaveField::System storage[CaveField::kMaxCandidates];
+  };
+  void gather_caves(const Dir3& unit_dir, ParamCache* cache, CaveQuery* out) const;
+
+  // Cave-aware carve: the smooth-min of the terrain density with every
+  // gathered system's SDF. density passes through unchanged when no
+  // system's bound reaches the position.
+  det::Real apply_caves(const Dir3& position_m, det::Real surface_r, det::Real density,
+                        const CaveQuery& query) const;
+
+  // Extra meshing depth the chunk streamer needs below the surface at a
+  // direction: 0 almost everywhere, CaveField::kDepthBudgetM for columns
+  // whose radial can meet a cave system (WP7 Blocker A).
+  det::Real cave_depth_budget_m(const Dir3& unit_dir) const;
+
+  const CaveField& caves() const { return caves_; }
 
   // Signed density (meters-ish) at a planet-local position given in
   // meters. Positive = solid.
@@ -116,6 +148,10 @@ class TerrainField {
   MacroField macro_;
   MaterialField material_;
   FeatureField features_;
+  CaveField caves_;
+
+  const CaveField::System* cached_system(const CellId& cell, ParamCache* cache,
+                                         CaveField::System* storage) const;
   det::Real evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
                                det::Real macro_rel, Dir3* slope_out,
                                ParamCache* cache = nullptr) const;

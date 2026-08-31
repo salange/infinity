@@ -18,6 +18,9 @@ class EffectiveField {
   // Topmost solid/air crossing along the radial through unit_dir — the
   // walkable ground, craters and built-up material included.
   det::Real ground_radius_m(const gen::Dir3& unit_dir) const;
+  // Walking floor: first crossing at or below from_r (cave interiors),
+  // with the edit overlay applied — see TerrainField::ground_radius_below_m.
+  det::Real ground_radius_below_m(const gen::Dir3& unit_dir, det::Real from_r) const;
 
   det::Real density(const gen::Dir3& position_m) const;
 

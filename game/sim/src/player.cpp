@@ -39,6 +39,14 @@ double Player::ground_radius(const Vec3& dir) const {
   return field_->ground_radius_m(unit).to_double();
 }
 
+double Player::ground_floor(const Vec3& dir, double below_r) const {
+  // Walking floor: the first crossing at or below the feet, so a player
+  // inside a cave stands on the tunnel floor instead of snapping up
+  // through the roof to the terrain surface.
+  const gen::Dir3 unit{det::Real(dir.x), det::Real(dir.y), det::Real(dir.z)};
+  return field_->ground_radius_below_m(unit, det::Real(below_r)).to_double();
+}
+
 NearestBody Player::nearest_or_anchor() const {
   if (has_nearest_) {
     return nearest_;
@@ -291,7 +299,7 @@ void Player::update_on_foot(const InputFrame& input) {
   // Glued to the ground: eye height above the surface along the radial —
   // never below the water surface (wading stops at the sea).
   const Vec3 new_radial = normalize(position_);
-  double stand_r = ground_radius(new_radial);
+  double stand_r = ground_floor(new_radial, length(position_) + 0.5);
   const double water = water_radius();
   if (water > 0.0) {
     stand_r = std::max(stand_r, water);

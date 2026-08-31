@@ -43,7 +43,8 @@ struct ChunkManagerConfig {
   // Split a quadtree node while (lateral size / distance) exceeds this.
   double split_factor = 2.0;
   std::uint8_t max_lod = 16;         // ~1-2 m voxels at 40-100 km radii
-  std::size_t resident_budget = 2048;  // max cached chunks
+  std::size_t resident_budget = 3072;  // max cached chunks (headroom for
+                                       // cave columns' extra shells)
   std::size_t uploads_per_update = 8;  // max Ready events delivered per tick
 };
 

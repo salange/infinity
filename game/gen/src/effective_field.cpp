@@ -120,4 +120,48 @@ det::Real EffectiveField::ground_radius_m(const gen::Dir3& unit_dir) const {
   return Real(0.5 * (solid + air));
 }
 
+det::Real EffectiveField::ground_radius_below_m(const gen::Dir3& unit_dir,
+                                               det::Real from_r) const {
+  const Real base = field_.ground_radius_below_m(unit_dir, from_r);
+  if (edits_ == nullptr || edits_->size() == 0) {
+    return base;
+  }
+  const auto hits = edits_near(*edits_, unit_dir, base.to_double());
+  if (hits.empty()) {
+    return base;
+  }
+  // Scan down from the caller for the first air->solid crossing of the
+  // fully composed field (terrain + caves + edit overlay).
+  const double dx = unit_dir.x.to_double();
+  const double dy = unit_dir.y.to_double();
+  const double dz = unit_dir.z.to_double();
+  const auto effective_at = [&](double r) {
+    const gen::Dir3 p{Real(dx * r), Real(dy * r), Real(dz * r)};
+    return world::apply_edits(field_.density(p).to_double(), hits, dx * r, dy * r, dz * r);
+  };
+  double air = from_r.to_double();
+  double solid = air;
+  bool found = false;
+  for (int step = 1; step <= 200; ++step) {
+    solid = from_r.to_double() - kScanStep * static_cast<double>(step);
+    if (effective_at(solid) > 0.0) {
+      found = true;
+      break;
+    }
+    air = solid;
+  }
+  if (!found) {
+    return base;
+  }
+  for (int i = 0; i < kBisectSteps; ++i) {
+    const double mid = 0.5 * (solid + air);
+    if (effective_at(mid) > 0.0) {
+      solid = mid;
+    } else {
+      air = mid;
+    }
+  }
+  return Real(0.5 * (solid + air));
+}
+
 }  // namespace inf::gen

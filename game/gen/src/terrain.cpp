@@ -14,7 +14,8 @@ using det::Real;
 
 TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet)
     : planet_(planet), provinces_(body_key, planet), macro_(body_key),
-      material_(body_key, planet), features_(body_key, planet) {
+      material_(body_key, planet), features_(body_key, planet),
+      caves_(body_key, planet) {
   // terrain/v2 (T0015 WP1): the layer name is bumped because the output
   // now composes macro/v1 — per the seeding spec's versioning rule, a
   // behaviour change is a NEW name, never a silent redefinition.
@@ -336,18 +337,161 @@ Real TerrainField::density(const Dir3& position_m) const {
   }
   const Dir3 unit_dir{position_m.x / radius, position_m.y / radius, position_m.z / radius};
   const Real surface_r = planet_.radius_m + elevation_m(unit_dir);
-  return (surface_r - radius) + detail_m(position_m);
+  const Real density = (surface_r - radius) + detail_m(position_m);
+  if (!caves_.enabled()) {
+    return density;
+  }
+  CaveQuery query;
+  gather_caves(unit_dir, nullptr, &query);
+  return apply_caves(position_m, surface_r, density, query);
+}
+
+const CaveField::System* TerrainField::cached_system(const CellId& cell, ParamCache* cache,
+                                                     CaveField::System* storage) const {
+  const auto build = [&]() {
+    // The system needs the surface radius at its anchor (and mouth) —
+    // pure functions of direction, so both clients agree bit-exactly.
+    const Real surface_anchor = planet_.radius_m + elevation_m(caves_.anchor_dir(cell));
+    const Dir3 mouth_dir = caves_.mouth_probe_dir(cell, surface_anchor);
+    const Real surface_mouth = planet_.radius_m + elevation_m(mouth_dir);
+    return caves_.build_system(cell, surface_anchor, surface_mouth);
+  };
+  if (cache == nullptr) {
+    if (!caves_.hosted(cell)) {
+      return nullptr;
+    }
+    *storage = build();
+    return storage;
+  }
+  const std::uint64_t packed = (static_cast<std::uint64_t>(cell.face) << 40U) |
+                               (static_cast<std::uint64_t>(cell.ci) << 20U) | cell.cj;
+  const auto it = cache->caves.find(packed);
+  if (it != cache->caves.end()) {
+    return it->second.hosted ? &it->second : nullptr;
+  }
+  const CaveField::System system = caves_.hosted(cell) ? build() : CaveField::System{};
+  const auto& stored = cache->caves.emplace(packed, system).first->second;
+  return stored.hosted ? &stored : nullptr;
+}
+
+void TerrainField::gather_caves(const Dir3& unit_dir, ParamCache* cache,
+                                CaveQuery* out) const {
+  out->count = 0;
+  if (!caves_.enabled()) {
+    return;
+  }
+  CellId cells[CaveField::kMaxCandidates];
+  const int cell_count = caves_.candidates(unit_dir, cells);
+  for (int c = 0; c < cell_count; ++c) {
+    const CaveField::System* system =
+        cached_system(cells[c], cache, &out->storage[out->count]);
+    if (system != nullptr) {
+      out->systems[out->count++] = system;
+    }
+  }
+}
+
+Real TerrainField::apply_caves(const Dir3& position_m, Real surface_r, Real density,
+                               const CaveQuery& query) const {
+  if (query.count == 0) {
+    return density;
+  }
+  // Caves live in a shallow band under (and, at mouths, slightly above)
+  // the surface — everything else skips the SDF work entirely.
+  const Real r = det::sqrt(dot(position_m, position_m));
+  if (r < surface_r - Real(CaveField::kDepthBudgetM + 60.0) || r > surface_r + Real(90.0)) {
+    return density;
+  }
+  for (int i = 0; i < query.count; ++i) {
+    density = smin(density, CaveField::system_sdf(*query.systems[i], position_m),
+                   Real(CaveField::kSminM));
+  }
+  return density;
+}
+
+Real TerrainField::cave_depth_budget_m(const Dir3& unit_dir) const {
+  if (!caves_.enabled()) {
+    return Real(0.0);
+  }
+  CellId cells[CaveField::kMaxCandidates];
+  const int cell_count = caves_.candidates(unit_dir, cells);
+  const Real reach((CaveField::kBoundCapM + 40.0) / planet_.radius_m.to_double());
+  for (int c = 0; c < cell_count; ++c) {
+    if (!caves_.hosted(cells[c])) {
+      continue;
+    }
+    if (chord_sq(unit_dir, caves_.anchor_dir(cells[c])) < reach * reach) {
+      return Real(CaveField::kDepthBudgetM);
+    }
+  }
+  return Real(0.0);
 }
 
 Real TerrainField::ground_radius_m(const Dir3& unit_dir) const {
   const Real surface = planet_.radius_m + elevation_m(unit_dir);
   // density(r) = (surface - r) + detail(dir * r); detail is bounded by
-  // +-2 m, so the zero crossing lies within surface +- 4 m. Bisect on the
+  // +-3 m, so the zero crossing lies within surface +- 6 m. Bisect on the
   // cheap detail-only expression (elevation already folded into surface).
   const auto density_at = [&](Real r) {
     const Dir3 position{unit_dir.x * r, unit_dir.y * r, unit_dir.z * r};
     return (surface - r) + detail_m(position);
   };
+
+  // WP7 Blocker B: caves break the single-crossing assumption. When a
+  // system's bound can meet this radial, scan down from above the surface
+  // with a fixed step and return the TOPMOST crossing — a mouth column
+  // then reports the tunnel floor instead of a roof to fall through.
+  if (caves_.enabled()) {
+    CaveQuery query;
+    gather_caves(unit_dir, nullptr, &query);
+    bool near_cave = false;
+    for (int i = 0; i < query.count; ++i) {
+      const CaveField::System& system = *query.systems[i];
+      const Real along = dot(system.bound_center, unit_dir);
+      const Dir3 off{system.bound_center.x - unit_dir.x * along,
+                     system.bound_center.y - unit_dir.y * along,
+                     system.bound_center.z - unit_dir.z * along};
+      if (dot(off, off) < system.bound_m * system.bound_m) {
+        near_cave = true;
+        break;
+      }
+    }
+    if (near_cave) {
+      const auto cave_density_at = [&](Real r) {
+        const Dir3 position{unit_dir.x * r, unit_dir.y * r, unit_dir.z * r};
+        Real density = density_at(r);
+        for (int i = 0; i < query.count; ++i) {
+          density = smin(density, CaveField::system_sdf(*query.systems[i], position),
+                         Real(CaveField::kSminM));
+        }
+        return density;
+      };
+      Real hi = surface + Real(15.0);
+      Real lo = hi;
+      bool found = false;
+      for (int step = 1; step <= 170; ++step) {
+        lo = surface + Real(15.0) - Real(3.0) * Real(static_cast<double>(step));
+        if (cave_density_at(lo) > Real(0.0)) {
+          found = true;
+          break;
+        }
+        hi = lo;
+      }
+      if (!found) {
+        return surface;  // bound bookkeeping guarantees solid by here
+      }
+      for (int i = 0; i < 20; ++i) {
+        const Real mid = (lo + hi) * Real(0.5);
+        if (cave_density_at(mid) > Real(0.0)) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      return (lo + hi) * Real(0.5);
+    }
+  }
+
   Real lo = surface - Real(6.0);   // below: expect solid (density > 0)
   Real hi = surface + Real(6.0);   // above: expect air (density < 0)
   if (density_at(lo) <= Real(0.0) || density_at(hi) >= Real(0.0)) {
@@ -362,6 +506,50 @@ Real TerrainField::ground_radius_m(const Dir3& unit_dir) const {
   for (int i = 0; i < 24; ++i) {
     const Real mid = (lo + hi) * Real(0.5);
     if (density_at(mid) > Real(0.0)) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return (lo + hi) * Real(0.5);
+}
+
+Real TerrainField::ground_radius_below_m(const Dir3& unit_dir, Real from_r) const {
+  const Real top = ground_radius_m(unit_dir);
+  if (!caves_.enabled() || from_r >= top) {
+    return top;  // above ground: the floor IS the topmost surface
+  }
+  // Below the topmost surface (inside a cave): first crossing under the
+  // caller. Fixed-step scan + bisection, cave-aware density.
+  CaveQuery query;
+  gather_caves(unit_dir, nullptr, &query);
+  const Real surface = planet_.radius_m + elevation_m(unit_dir);
+  const auto cave_density_at = [&](Real r) {
+    const Dir3 position{unit_dir.x * r, unit_dir.y * r, unit_dir.z * r};
+    Real density = (surface - r) + detail_m(position);
+    for (int i = 0; i < query.count; ++i) {
+      density = smin(density, CaveField::system_sdf(*query.systems[i], position),
+                     Real(CaveField::kSminM));
+    }
+    return density;
+  };
+  Real hi = from_r;
+  Real lo = hi;
+  bool found = false;
+  for (int step = 1; step <= 200; ++step) {
+    lo = from_r - Real(2.5) * Real(static_cast<double>(step));
+    if (cave_density_at(lo) > Real(0.0)) {
+      found = true;
+      break;
+    }
+    hi = lo;
+  }
+  if (!found) {
+    return top;
+  }
+  for (int i = 0; i < 20; ++i) {
+    const Real mid = (lo + hi) * Real(0.5);
+    if (cave_density_at(mid) > Real(0.0)) {
       lo = mid;
     } else {
       hi = mid;
@@ -406,6 +594,8 @@ std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid,
       const Real surface_r =
           field.planet().radius_m +
           field.elevation_from_params(dir, params, canonical.macro_rel, &param_cache);
+      TerrainField::CaveQuery cave_query;
+      field.gather_caves(dir, &param_cache, &cave_query);
 
       for (int gz = lo; gz <= hi; ++gz) {
         const Real fz(static_cast<double>(gz) / ChunkGrid::kVoxels);
@@ -413,7 +603,9 @@ std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid,
         const Dir3 position{dir.x * r, dir.y * r, dir.z * r};
         Real density = r <= field.planet().core_radius_m
                            ? Real(1.0e9)
-                           : (surface_r - r) + field.detail_m(position);
+                           : field.apply_caves(position, surface_r,
+                                               (surface_r - r) + field.detail_m(position),
+                                               cave_query);
         densities[(static_cast<std::size_t>(gz - lo) * count +
                    static_cast<std::size_t>(gy - lo)) *
                       count +

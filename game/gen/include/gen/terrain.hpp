@@ -28,6 +28,19 @@ class TerrainField {
   // Elevation with explicit (pre-blended) province parameters.
   det::Real elevation_from_params(const Dir3& unit_dir, const BlendedParams& params) const;
 
+  // Elevation plus the SURFACE-TANGENT gradient (terrain-stack v2 WP0):
+  // the 3D noise gradient projected onto the tangent plane at unit_dir
+  // and divided by the planet radius, i.e. metres of elevation change per
+  // metre walked. Feeds talus operators, slope-directed erosion and
+  // slope-based materials. Covers the noise term only — the province
+  // parameter fields vary on >=10 km scales and are treated as locally
+  // constant.
+  struct ElevationD {
+    det::Real elevation_m;
+    Dir3 slope;  // tangent vector, |slope| = m/m grade
+  };
+  ElevationD elevation_and_gradient(const Dir3& unit_dir) const;
+
   // Canonical terrain parameters: the full province blend sampled on a
   // FIXED global lattice (kParamLatticeLod uv grid per cube face) and
   // bilinearly interpolated. A pure function of direction — every chunk,

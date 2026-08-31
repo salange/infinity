@@ -14,7 +14,7 @@ using det::Real;
 
 TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet)
     : planet_(planet), provinces_(body_key, planet), macro_(body_key),
-      material_(body_key, planet) {
+      material_(body_key, planet), features_(body_key, planet) {
   // terrain/v2 (T0015 WP1): the layer name is bumped because the output
   // now composes macro/v1 — per the seeding spec's versioning rule, a
   // behaviour change is a NEW name, never a silent redefinition.
@@ -170,7 +170,8 @@ Real TerrainField::elevation_from_params(const Dir3& unit_dir,
 // approximation, and the provable derivative contract lives in
 // elevation_base_from_params + the noise-level tests).
 Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
-                                      Real macro_rel, Dir3* slope_out) const {
+                                      Real macro_rel, Dir3* slope_out,
+                                      ParamCache* cache) const {
   const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
                                                planet_.radius_m.to_double());
   const world::NoiseD noise = world::warped_fbm3_d(
@@ -245,6 +246,15 @@ Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams&
     const Real cut = groove * groove * groove;
     height = height - cut * window * params.carving * Real(26.0);
   }
+
+  // --- features/v1 (T0015 WP5): bounded surface entities, craters first.
+  // A separately keyed layer reading this one's inputs — bodies without
+  // features (EarthLike) skip it behind a single branch, so their output
+  // and cost are untouched (extension-safety rule).
+  if (features_.enabled()) {
+    height = height + features_.height_offset_m(unit_dir,
+                                                cache != nullptr ? &cache->features : nullptr);
+  }
   return height;
 }
 
@@ -269,6 +279,11 @@ Real TerrainField::elevation_base_from_params(const Dir3& unit_dir,
 Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
                                          Real macro_rel) const {
   return evaluate_elevation(unit_dir, params, macro_rel, nullptr);
+}
+
+Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
+                                         Real macro_rel, ParamCache* cache) const {
+  return evaluate_elevation(unit_dir, params, macro_rel, nullptr, cache);
 }
 
 TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_dir) const {
@@ -390,7 +405,7 @@ std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid,
       params.carving = canonical.carving;
       const Real surface_r =
           field.planet().radius_m +
-          field.elevation_from_params(dir, params, canonical.macro_rel);
+          field.elevation_from_params(dir, params, canonical.macro_rel, &param_cache);
 
       for (int gz = lo; gz <= hi; ++gz) {
         const Real fz(static_cast<double>(gz) / ChunkGrid::kVoxels);

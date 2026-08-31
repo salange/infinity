@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/key.hpp"
+#include "gen/features.hpp"
 #include "gen/geo.hpp"
 #include "gen/names.hpp"
 #include "gen/material.hpp"
@@ -82,8 +83,14 @@ class TerrainField {
   struct ParamCache {
     std::unordered_map<std::uint64_t, CanonicalParams> params;
     MacroField::Cache macro;
+    FeatureField::Cache features;
   };
   CanonicalParams canonical_params(const FaceUV& face_uv, ParamCache* cache = nullptr) const;
+
+  // elevation_from_params with the chunk cache (memoizes feature-cell
+  // contents in addition to the param lattice; identical arithmetic).
+  det::Real elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
+                                  det::Real macro_rel, ParamCache* cache) const;
 
   // 3D detail term at a planet-local position (meters).
   det::Real detail_m(const Dir3& position_m) const;
@@ -101,14 +108,17 @@ class TerrainField {
   const PlanetParams& planet() const { return planet_; }
   const ProvinceField& provinces() const { return provinces_; }
   const MaterialField& material() const { return material_; }
+  const FeatureField& features() const { return features_; }
 
  private:
   PlanetParams planet_;
   ProvinceField provinces_;
   MacroField macro_;
   MaterialField material_;
+  FeatureField features_;
   det::Real evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
-                               det::Real macro_rel, Dir3* slope_out) const;
+                               det::Real macro_rel, Dir3* slope_out,
+                               ParamCache* cache = nullptr) const;
 
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;

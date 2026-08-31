@@ -66,7 +66,19 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
   const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
 
-  const Vec3 unit = sim::normalize(Vec3{1.0, -0.3, 0.25});
+  // Landing is only allowed over LAND since the water clamp (T0015): scan
+  // deterministic directions for solid ground above the solved sea level.
+  const double water_r = planet.radius_m.to_double() + planet.sea_level_m.to_double();
+  Vec3 unit = sim::normalize(Vec3{1.0, -0.3, 0.25});
+  for (int i = 0; i < 64; ++i) {
+    const Vec3 probe = sim::normalize(
+        Vec3{std::cos(i * 0.618), std::sin(i * 0.618) * 0.8, std::sin(i * 0.253)});
+    if (ground_r(field, probe) > water_r + 50.0) {
+      unit = probe;
+      break;
+    }
+  }
+  REQUIRE(ground_r(field, unit) > water_r);
   const gen::EffectiveField eff(field);
   Player player(eff, unit * (ground_r(field, unit) + 120.0));
 
@@ -80,7 +92,8 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
   }
   REQUIRE(player.mode() == PlayerMode::OnFoot);
   {
-    const double expected = ground_r(field, player.position()) + Player::kEyeHeight;
+    const double expected =
+        std::max(ground_r(field, player.position()), water_r) + Player::kEyeHeight;
     CHECK(sim::length(player.position()) == doctest::Approx(expected).epsilon(1e-6));
   }
 
@@ -92,7 +105,8 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
     input.run = true;
     input.mouse_dx = 3.0;  // wander
     player.update(input);
-    const double expected = ground_r(field, player.position()) + Player::kEyeHeight;
+    const double expected =
+        std::max(ground_r(field, player.position()), water_r) + Player::kEyeHeight;
     REQUIRE(sim::length(player.position()) == doctest::Approx(expected).epsilon(1e-6));
   }
 
@@ -156,4 +170,37 @@ TEST_CASE("player: throttle never reverses") {
     REQUIRE(player.speed() >= 0.0);
   }
   CHECK(player.speed() == 0.0);
+}
+
+TEST_CASE("player: flight cannot dive below the water surface") {
+  const gen::BodyHandle body = body_for(0xBEEF);
+  const gen::PlanetParams planet =
+      gen::derive_planet_params(body, gen::PlanetType::EarthLike);
+  const gen::TerrainField field(body.entity, planet);
+  const double water_r = planet.radius_m.to_double() + planet.sea_level_m.to_double();
+
+  // Find an OCEAN radial (ground below sea) and try to dive into it.
+  Vec3 unit = sim::normalize(Vec3{-0.4, 0.9, -0.1});
+  for (int i = 0; i < 64; ++i) {
+    const Vec3 probe = sim::normalize(
+        Vec3{std::sin(i * 0.71), std::cos(i * 0.37), std::sin(i * 0.13) * 0.6});
+    if (ground_r(field, probe) < water_r - 200.0) {
+      unit = probe;
+      break;
+    }
+  }
+  REQUIRE(ground_r(field, unit) < water_r);
+  const gen::EffectiveField eff(field);
+  Player player(eff, unit * (water_r + 400.0));
+  // Aim straight down and burn.
+  player.set_attitude(Vec3{-unit.x, -unit.y, -unit.z}, player.forward());
+  for (int i = 0; i < 900; ++i) {
+    InputFrame input = tick(0.016);
+    input.forward = true;
+    player.update(input);
+    REQUIRE(sim::length(player.position()) >=
+            water_r + Player::kWaterClearance - 0.01);
+  }
+  // And landing over open water is refused.
+  CHECK(!player.can_land());
 }

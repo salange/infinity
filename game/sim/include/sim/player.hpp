@@ -85,6 +85,9 @@ class Player {
   static constexpr double kReticleMax = 0.42;  // NDC-vertical units
   // Landing window on airless worlds (no atmosphere band to gate E by).
   static constexpr double kAirlessLandingBand = 8'000.0;
+  // Water worlds: the craft can never dive — hard floor this far above
+  // the sea surface (and walking never sinks below the surface).
+  static constexpr double kWaterClearance = 2.0;
 
   Player(const gen::EffectiveField& field, Vec3 spawn_position);
 
@@ -151,6 +154,7 @@ class Player {
   void update_beams(double dt);
   void try_fire(const InputFrame& input);
   double ground_radius(const Vec3& dir) const;
+  double water_radius() const;
   void clamp_to_ground_flight();
   NearestBody nearest_or_anchor() const;
 

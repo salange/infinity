@@ -85,6 +85,12 @@ int default_landable_slot(const StarSystemParams& system);
 PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
                                     const BodyHandle& body);
 
+// Surface-generator parameters for a MOON (T0016: moons are landable
+// bodies like planets): radius/gravity/surface type from moons/v1, no
+// atmosphere; cosmetic draws from the moon's own params key.
+PlanetParams planet_params_for_moon(const StarSystemParams& system, int slot,
+                                    int moon_index, const BodyHandle& body);
+
 // Procedural display name for a body, pure function of its entity key
 // (map-mode info card; design/map-mode.md section 3).
 std::string body_display_name(const core::Key& entity_key);

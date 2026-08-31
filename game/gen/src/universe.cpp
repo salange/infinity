@@ -82,6 +82,24 @@ NodeSpec leaf_spec(const core::Key&, const core::tree::Node*) {
   return NodeSpec{};  // params drawn by the layer code from the node keys
 }
 
+// Planets/moons: a Body owns a moons axis (moons are full bodies with
+// their own layer keys — landable like planets, T0016). Adding the axis
+// is extension-safe: axis keys hang under childrenKey, the body's own
+// entity/params keys are untouched.
+NodeSpec body_spec(const core::Key&, const core::tree::Node*) {
+  NodeSpec spec;
+  AxisDesc moons;
+  moons.name = name::MoonsAxis;
+  moons.child_kind = kind::Body;
+  moons.topo = Topology::SlotTable;
+  // Occupancy is enforced by the caller against moons/v1's drawn count.
+  moons.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
+    return cell.x >= 0 && cell.x < 16;
+  };
+  spec.axes = {moons};
+  return spec;
+}
+
 }  // namespace
 
 GeneratorRegistry make_registry() {
@@ -90,7 +108,7 @@ GeneratorRegistry make_registry() {
   registry.register_kind(kind::Cluster, cluster_spec);
   registry.register_kind(kind::Galaxy, galaxy_spec);
   registry.register_kind(kind::System, system_spec);
-  registry.register_kind(kind::Body, leaf_spec);
+  registry.register_kind(kind::Body, body_spec);
   registry.register_kind(kind::Star, leaf_spec);
   registry.register_kind(kind::Belt, leaf_spec);
   registry.register_kind(kind::Barycenter, leaf_spec);
@@ -128,6 +146,15 @@ BodyHandle body_for_slot(const core::Seed128& seed, int slot) {
   const auto tree = make_tree(seed);
   const auto address =
       default_system_address().child(Step{name::PlanetsAxis, Cell::slot(slot)});
+  const auto node = tree->get(address);
+  return BodyHandle{node->key(), node->params_key()};
+}
+
+BodyHandle body_for_moon(const core::Seed128& seed, int slot, int moon_index) {
+  const auto tree = make_tree(seed);
+  const auto address = default_system_address()
+                           .child(Step{name::PlanetsAxis, Cell::slot(slot)})
+                           .child(Step{name::MoonsAxis, Cell::slot(moon_index)});
   const auto node = tree->get(address);
   return BodyHandle{node->key(), node->params_key()};
 }

@@ -478,6 +478,24 @@ PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
   return params;
 }
 
+PlanetParams planet_params_for_moon(const StarSystemParams& system, int slot,
+                                    int moon_index, const BodyHandle& body) {
+  const SystemMoon& moon =
+      system.planets[static_cast<std::size_t>(slot)].moons[static_cast<std::size_t>(
+          moon_index)];
+  PlanetParams params =
+      derive_planet_params(body, static_cast<PlanetType>(moon.phys.surface_type));
+  const Real sea_quantile = params.sea_level_m / params.macro_amplitude_m;
+  params.radius_m = moon.phys.radius_m;
+  params.core_radius_m = params.radius_m * Real(0.7);
+  params.gravity = moon.phys.g_surface;
+  params.atmosphere_height_m = Real(0.0);  // moons are airless in v1
+  params.macro_amplitude_m =
+      params.radius_m * macro_amplitude_fraction(params.macro_pattern);
+  params.sea_level_m = sea_quantile * params.macro_amplitude_m;
+  return params;
+}
+
 
 namespace {
 

@@ -33,6 +33,11 @@ class TerrainField {
   // per-column value; tests freeze it for differencing).
   det::Real elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
                                   det::Real macro_rel) const;
+  // The PRE-EROSION composition (macro + attenuated province fBm) — the
+  // term whose analytic gradient is exact. Testing/diagnostic hook for
+  // the WP0 derivative contract; gameplay uses elevation_from_params.
+  det::Real elevation_base_from_params(const Dir3& unit_dir, const BlendedParams& params,
+                                       det::Real macro_rel) const;
 
   const MacroField& macro() const { return macro_; }
 
@@ -102,6 +107,9 @@ class TerrainField {
   ProvinceField provinces_;
   MacroField macro_;
   MaterialField material_;
+  det::Real evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
+                               det::Real macro_rel, Dir3* slope_out) const;
+
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;
   Dir3 detail_axis_{det::Real(0.0), det::Real(0.0), det::Real(1.0)};

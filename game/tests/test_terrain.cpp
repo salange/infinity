@@ -184,6 +184,8 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
     const Real macro_rel = canonical.macro_rel;
     CHECK(std::abs(result.elevation_m.to_double() -
                    field.elevation_from_params(dir, params, macro_rel).to_double()) < 1e-9);
+    // The exact-derivative contract applies to the PRE-EROSION base term
+    // (WP2 erosion corrections are approximated in the exposed slope).
 
     // Two tangent directions.
     gen::Dir3 t1 = unit(-dir.y.to_double(), dir.x.to_double(), 0.0);
@@ -206,9 +208,9 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
                     dir.y.to_double() + sign * eps * t.y.to_double(),
                     dir.z.to_double() + sign * eps * t.z.to_double());
       };
-      const double h_hi = field.elevation_from_params(offset(1.0), params, macro_rel).to_double();
-      const double h_mid = field.elevation_from_params(dir, params, macro_rel).to_double();
-      const double h_lo = field.elevation_from_params(offset(-1.0), params, macro_rel).to_double();
+      const double h_hi = field.elevation_base_from_params(offset(1.0), params, macro_rel).to_double();
+      const double h_mid = field.elevation_base_from_params(dir, params, macro_rel).to_double();
+      const double h_lo = field.elevation_base_from_params(offset(-1.0), params, macro_rel).to_double();
       const double forward = (h_hi - h_mid) / (eps * radius);
       const double backward = (h_mid - h_lo) / (eps * radius);
       if (std::abs(forward - backward) > 1e-2 * (1.0 + std::abs(forward))) {

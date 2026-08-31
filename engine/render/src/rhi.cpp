@@ -259,7 +259,7 @@ fn star_surface(n_in: vec3<f32>, tint: vec3<f32>, view_dir: vec3<f32>, phase: f3
   // Chromosphere flash at the very limb.
   let rim = pow(1.0 - mu, 5.5);
   c += mix(tint, vec3<f32>(1.0, 0.42, 0.22), 0.6) * rim * 1.5;
-  return aces(c * 1.7);
+  return c * 1.7;
 }
 
 // Corona billboard (additive, opos.xy in [-1,1]): blinding rim just
@@ -298,7 +298,7 @@ fn corona(opos: vec2<f32>, tint: vec3<f32>, phase: f32, intensity: f32,
   c += mix(tint, vec3<f32>(1.0), 0.55) * cross * exp(-r * 2.6) * spike * 1.3;
   // Slow, subtle flicker (kept small — visible pulsing reads as a bug).
   let flicker = 0.97 + 0.03 * vnoise(vec3<f32>(time * 0.25, phase * 91.0, 0.0));
-  return aces(c * flicker * intensity) * window;
+  return c * flicker * intensity * window;
 }
 
 // Analytic sky dome (tier-1 gradient atmosphere, sources note
@@ -333,9 +333,9 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
             pow(clamp(cos_vs, 0.0, 1.0), 220.0) * 1.6;
   var c = sky * day + frame.sun_color.rgb * mie * (0.25 + 0.75 * day);
   // Night floor: faint cold airglow instead of dead black.
-  c += tint * 0.02 * (1.0 - day);
-  let space = vec3<f32>(0.013, 0.015, 0.028);
-  return mix(space, aces(c), density);
+  c += tint * 0.004 * (1.0 - day);
+  let space = vec3<f32>(0.00004, 0.00005, 0.0001);
+  return mix(space, c, density);
 }
 
 @fragment
@@ -387,9 +387,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // path — breaks up flat biome fills at texture resolution.
     let mo = 0.6 * vnoise(dir * 220.0) + 0.4 * vnoise(dir * 47.0);
     let base6 = alb * (0.84 + 0.24 * mo);
-    var c6 = base6 * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
+    var c6 = base6 * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
     c6 += base6 * max(dot(n, -light), 0.0) * vec3<f32>(0.05, 0.07, 0.12);
-    return vec4<f32>(aces(c6), 1.0);
+    return vec4<f32>(c6, 1.0);
   }
   if (mode == 1u) {
     let c = star_surface(in.opos, u.color.rgb, normalize(u.aux.xyz), u.aux.w,
@@ -447,9 +447,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let shift = frame.material.x;
     base = base * (vec3<f32>(1.0) + shift * vec3<f32>(0.10, 0.02, -0.08));
   }
-  var color = base * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
+  var color = base * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
   let fill = max(dot(n, -light), 0.0);
-  color += base * fill * vec3<f32>(0.05, 0.07, 0.12);
+  color += base * fill * vec3<f32>(0.012, 0.017, 0.03);
   // Submerged terrain shades toward deep water by depth (atmo.a carries
   // the sea radius). This keeps the streamed seabed consistent with the
   // opaque ocean impostor — the ocean no longer flips color when chunks
@@ -459,7 +459,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let depth = frame.atmo.a - frag_r;
     if (depth > 0.0) {
       let absorb = depth / (depth + 30.0);
-      let water = vec3<f32>(0.06, 0.20, 0.35) * frame.sun_color.rgb * (0.2 + 0.8 * ndl);
+      let water = vec3<f32>(0.06, 0.20, 0.35) * frame.sun_color.rgb * (0.02 + 0.98 * ndl);
       color = mix(color, water, absorb * 0.92);
     }
   }
@@ -470,14 +470,108 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // opos + aux is the fragment's camera-relative position.
     let view = normalize(in.opos + u.aux.xyz);
     let fresnel = pow(1.0 - abs(dot(n, view)), 3.0);
-    color = mix(color, vec3<f32>(0.05, 0.16, 0.30) * frame.sun_color.rgb, fresnel * 0.7);
+    // The Fresnel term reflects the SKY: it must go dark with the sun
+    // (a sunless constant made the night ocean glow under HDR exposure).
+    color = mix(color,
+                vec3<f32>(0.05, 0.16, 0.30) * frame.sun_color.rgb * (0.03 + 0.97 * wrap),
+                fresnel * 0.7);
     let refl = reflect(light * -1.0, n);
     let spec = pow(max(dot(refl, view * -1.0), 0.0), 90.0);
     color += frame.sun_color.rgb * spec * (0.9 * ndl + 0.05);
     let alpha_w = mix(u.color.a, 0.96, fresnel);
-    return vec4<f32>(aces(color), alpha_w);
+    return vec4<f32>(color, alpha_w);
   }
-  return vec4<f32>(aces(color), 1.0);
+  return vec4<f32>(color, 1.0);
+}
+)";
+
+
+// T0018 WP1: the post chain. The scene renders LINEAR HDR into an
+// RGBA16F target; this shader owns the single tonemap point. Passes:
+// luminance reduction (auto-exposure input), bright extract, separable
+// blur (bloom), and the composite: exposure -> Purkinje rod
+// desaturation -> bloom add -> ACES. params.a = (exposure, scotopic,
+// bloom_amount, threshold); params.b = (texel_x, texel_y, dir_x, dir_y).
+constexpr const char* kPostShader = R"(
+struct PostParams {
+  a: vec4<f32>,
+  b: vec4<f32>,
+};
+@group(0) @binding(0) var src_a: texture_2d<f32>;
+@group(0) @binding(1) var src_b: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> pp: PostParams;
+
+struct FSIn {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> FSIn {
+  var out: FSIn;
+  let x = f32(i32(vi & 1u) * 4 - 1);
+  let y = f32(i32(vi >> 1u) * 4 - 1);
+  out.pos = vec4<f32>(x, y, 0.0, 1.0);
+  out.uv = vec2<f32>(x, -y) * 0.5 + 0.5;
+  return out;
+}
+
+fn aces_post(x: vec3<f32>) -> vec3<f32> {
+  let mapped = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+  return clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Log-average luminance of an 8x8 neighbourhood per output pixel (the
+// 32x32 target then holds a well-sampled reduction of the whole frame).
+@fragment
+fn fs_lum(in: FSIn) -> @location(0) vec4<f32> {
+  var log_sum = 0.0;
+  for (var iy = 0; iy < 8; iy++) {
+    for (var ix = 0; ix < 8; ix++) {
+      let offset = (vec2<f32>(f32(ix), f32(iy)) - 3.5) * pp.b.xy;
+      let c = textureSampleLevel(src_a, samp, in.uv + offset, 0.0).rgb;
+      let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+      log_sum += log(lum + 1.0e-6);
+    }
+  }
+  return vec4<f32>(exp(log_sum / 64.0), 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_bright(in: FSIn) -> @location(0) vec4<f32> {
+  let c = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb * pp.a.x;
+  let bright = max(c - vec3<f32>(pp.a.w), vec3<f32>(0.0));
+  return vec4<f32>(bright, 1.0);
+}
+
+@fragment
+fn fs_blur(in: FSIn) -> @location(0) vec4<f32> {
+  let step_uv = pp.b.zw * pp.b.xy;
+  var c = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb * 0.227027;
+  let w = array<f32, 4>(0.194594, 0.121621, 0.054054, 0.016216);
+  for (var i = 1; i <= 4; i++) {
+    let offset = step_uv * f32(i) * 1.5;
+    c += textureSampleLevel(src_a, samp, in.uv + offset, 0.0).rgb * w[i - 1];
+    c += textureSampleLevel(src_a, samp, in.uv - offset, 0.0).rgb * w[i - 1];
+  }
+  return vec4<f32>(c, 1.0);
+}
+
+@fragment
+fn fs_composite(in: FSIn) -> @location(0) vec4<f32> {
+  let hdr = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb;
+  let bloom = textureSampleLevel(src_b, samp, in.uv, 0.0).rgb;
+  var c = hdr * pp.a.x + bloom * pp.a.z;
+  // Purkinje shift: under scotopic adaptation the rods see luminance
+  // only, slightly blue-weighted; cones (colour) hold on only where the
+  // EXPOSED brightness is high — bright stars keep their tint, the
+  // Milky Way goes grey.
+  let rod_lum = dot(c, vec3<f32>(0.15, 0.55, 0.65));
+  let rod = rod_lum * vec3<f32>(0.82, 0.95, 1.16);
+  let cone_keep = smoothstep(0.06, 0.5, dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)));
+  c = mix(c, rod, pp.a.y * (1.0 - cone_keep));
+  return vec4<f32>(aces_post(c), 1.0);
 }
 )";
 
@@ -587,6 +681,110 @@ struct Rhi::Impl {
   };
   WGPUBindGroupLayout tex_layout = nullptr;
   WGPUSampler planet_sampler = nullptr;
+
+  // --- T0018 WP1: HDR post chain ---------------------------------------
+  static constexpr WGPUTextureFormat kHdrFormat = WGPUTextureFormat_RGBA16Float;
+  static constexpr std::uint32_t kLumSize = 32;
+  WGPURenderPipeline overlay_pipeline = nullptr;        // UI after tonemap
+  WGPURenderPipeline overlay_pipeline_blend = nullptr;
+  WGPURenderPipeline overlay_pipeline_add = nullptr;
+  WGPUBindGroupLayout post_layout = nullptr;
+  WGPUSampler post_sampler = nullptr;
+  WGPUBuffer post_uniforms = nullptr;                   // 8 x 256-byte slots
+  WGPURenderPipeline lum_pipeline = nullptr;
+  WGPURenderPipeline bright_pipeline = nullptr;
+  WGPURenderPipeline blur_pipeline = nullptr;
+  WGPURenderPipeline composite_pipeline = nullptr;
+  WGPUTexture lum_texture = nullptr;
+  WGPUTextureView lum_view = nullptr;
+  WGPUBuffer lum_readback = nullptr;
+  bool lum_map_inflight = false;
+  bool lum_map_ready = false;
+  // Eye state: smoothed exposure with asymmetric time constants (glare
+  // fast, dark adaptation slow) and the scotopic (rod) fraction.
+  float exposure = 1.0f;
+  float scotopic = 0.0f;
+  float avg_luminance = 0.25f;
+  float exposure_last_time = -1.0f;
+
+  struct PostSet {
+    WGPUTexture hdr = nullptr;
+    WGPUTextureView hdr_view = nullptr;
+    WGPUTexture bloom[2] = {nullptr, nullptr};
+    WGPUTextureView bloom_view[2] = {nullptr, nullptr};
+    // grp_hdr_only: t0 = t1 = hdr (bright/lum — must not reference the
+    // bloom target it writes); grp_hdr: t0 = hdr, t1 = bloom[0]
+    // (composite); grp_b0/b1: the blur legs.
+    WGPUBindGroup grp_hdr_only = nullptr;
+    WGPUBindGroup grp_hdr = nullptr;
+    WGPUBindGroup grp_b0 = nullptr;
+    WGPUBindGroup grp_b1 = nullptr;
+    std::uint32_t w = 0;
+    std::uint32_t h = 0;
+  };
+  PostSet post_main;
+  PostSet post_rec;
+
+  void release_post_set(PostSet& set) {
+    if (set.grp_hdr_only != nullptr) wgpuBindGroupRelease(set.grp_hdr_only);
+    if (set.grp_hdr != nullptr) wgpuBindGroupRelease(set.grp_hdr);
+    if (set.grp_b0 != nullptr) wgpuBindGroupRelease(set.grp_b0);
+    if (set.grp_b1 != nullptr) wgpuBindGroupRelease(set.grp_b1);
+    for (int i = 0; i < 2; ++i) {
+      if (set.bloom_view[i] != nullptr) wgpuTextureViewRelease(set.bloom_view[i]);
+      if (set.bloom[i] != nullptr) wgpuTextureRelease(set.bloom[i]);
+    }
+    if (set.hdr_view != nullptr) wgpuTextureViewRelease(set.hdr_view);
+    if (set.hdr != nullptr) wgpuTextureRelease(set.hdr);
+    set = PostSet{};
+  }
+
+  WGPUBindGroup make_post_group(WGPUTextureView a, WGPUTextureView b) {
+    WGPUBindGroupEntry entries[4] = {};
+    entries[0].binding = 0;
+    entries[0].textureView = a;
+    entries[1].binding = 1;
+    entries[1].textureView = b;
+    entries[2].binding = 2;
+    entries[2].sampler = post_sampler;
+    entries[3].binding = 3;
+    entries[3].buffer = post_uniforms;
+    entries[3].size = 32;  // two vec4s
+    WGPUBindGroupDescriptor desc{};
+    desc.layout = post_layout;
+    desc.entryCount = 4;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroup(device, &desc);
+  }
+
+  void ensure_post_set(PostSet& set, std::uint32_t w, std::uint32_t h) {
+    if (set.hdr != nullptr && set.w == w && set.h == h) {
+      return;
+    }
+    release_post_set(set);
+    set.w = w;
+    set.h = h;
+    WGPUTextureDescriptor desc{};
+    desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
+    desc.dimension = WGPUTextureDimension_2D;
+    desc.mipLevelCount = 1;
+    desc.sampleCount = 1;
+    desc.format = kHdrFormat;
+    desc.label = sv("post-hdr");
+    desc.size = WGPUExtent3D{w, h, 1};
+    set.hdr = wgpuDeviceCreateTexture(device, &desc);
+    set.hdr_view = wgpuTextureCreateView(set.hdr, nullptr);
+    desc.label = sv("post-bloom");
+    desc.size = WGPUExtent3D{w / 2 > 0 ? w / 2 : 1, h / 2 > 0 ? h / 2 : 1, 1};
+    for (int i = 0; i < 2; ++i) {
+      set.bloom[i] = wgpuDeviceCreateTexture(device, &desc);
+      set.bloom_view[i] = wgpuTextureCreateView(set.bloom[i], nullptr);
+    }
+    set.grp_hdr_only = make_post_group(set.hdr_view, set.hdr_view);
+    set.grp_hdr = make_post_group(set.hdr_view, set.bloom_view[0]);
+    set.grp_b0 = make_post_group(set.bloom_view[0], set.bloom_view[0]);
+    set.grp_b1 = make_post_group(set.bloom_view[1], set.bloom_view[1]);
+  }
   PlanetTexEntry default_tex;
   std::unordered_map<std::uint32_t, PlanetTexEntry> planet_textures;
   std::uint32_t next_planet_tex_id = 1;
@@ -868,7 +1066,7 @@ struct Rhi::Impl {
     depth_state.stencilWriteMask = 0xFFFFFFFF;
 
     WGPUColorTargetState color_target{};
-    color_target.format = format;
+    color_target.format = kHdrFormat;  // scene renders LINEAR HDR (T0018)
     color_target.writeMask = WGPUColorWriteMask_All;
     WGPUFragmentState fragment{};
     fragment.module = module;
@@ -918,8 +1116,129 @@ struct Rhi::Impl {
     pipeline_desc.label = sv("mesh-add");
     mesh_pipeline_add = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
 
+    // Overlay variants (T0018): same shader, SURFACE format, drawn after
+    // the tonemap so UI ignores exposure; depth-tested against the scene
+    // but never writing depth.
+    color_target.format = format;
+    color_target.blend = nullptr;
+    depth_state.depthWriteEnabled = WGPUOptionalBool_False;
+    pipeline_desc.label = sv("overlay");
+    overlay_pipeline = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+    color_target.blend = &blend;
+    pipeline_desc.label = sv("overlay-blend");
+    overlay_pipeline_blend = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+    color_target.blend = &additive;
+    pipeline_desc.label = sv("overlay-add");
+    overlay_pipeline_add = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+
     wgpuPipelineLayoutRelease(pipeline_layout);
     wgpuShaderModuleRelease(module);
+
+    // --- post chain (T0018 WP1) -----------------------------------------
+    {
+      WGPUShaderSourceWGSL post_wgsl{};
+      post_wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+      post_wgsl.code = sv(kPostShader);
+      WGPUShaderModuleDescriptor post_module_desc{};
+      post_module_desc.nextInChain = &post_wgsl.chain;
+      WGPUShaderModule post_module = wgpuDeviceCreateShaderModule(device, &post_module_desc);
+
+      WGPUBindGroupLayoutEntry entries[4] = {};
+      entries[0].binding = 0;
+      entries[0].visibility = WGPUShaderStage_Fragment;
+      entries[0].texture.sampleType = WGPUTextureSampleType_Float;
+      entries[0].texture.viewDimension = WGPUTextureViewDimension_2D;
+      entries[1].binding = 1;
+      entries[1].visibility = WGPUShaderStage_Fragment;
+      entries[1].texture.sampleType = WGPUTextureSampleType_Float;
+      entries[1].texture.viewDimension = WGPUTextureViewDimension_2D;
+      entries[2].binding = 2;
+      entries[2].visibility = WGPUShaderStage_Fragment;
+      entries[2].sampler.type = WGPUSamplerBindingType_Filtering;
+      entries[3].binding = 3;
+      entries[3].visibility = WGPUShaderStage_Fragment;
+      entries[3].buffer.type = WGPUBufferBindingType_Uniform;
+      entries[3].buffer.hasDynamicOffset = 1U;
+      entries[3].buffer.minBindingSize = 32;
+      WGPUBindGroupLayoutDescriptor layout_info{};
+      layout_info.entryCount = 4;
+      layout_info.entries = entries;
+      post_layout = wgpuDeviceCreateBindGroupLayout(device, &layout_info);
+
+      WGPUSamplerDescriptor samp_desc{};
+      samp_desc.label = sv("post-sampler");
+      samp_desc.addressModeU = WGPUAddressMode_ClampToEdge;
+      samp_desc.addressModeV = WGPUAddressMode_ClampToEdge;
+      samp_desc.addressModeW = WGPUAddressMode_ClampToEdge;
+      samp_desc.magFilter = WGPUFilterMode_Linear;
+      samp_desc.minFilter = WGPUFilterMode_Linear;
+      samp_desc.mipmapFilter = WGPUMipmapFilterMode_Nearest;
+      samp_desc.lodMaxClamp = 32.0f;
+      samp_desc.maxAnisotropy = 1;
+      post_sampler = wgpuDeviceCreateSampler(device, &samp_desc);
+
+      WGPUBufferDescriptor uniform_info{};
+      uniform_info.label = sv("post-uniforms");
+      uniform_info.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+      uniform_info.size = 256 * 8;
+      post_uniforms = wgpuDeviceCreateBuffer(device, &uniform_info);
+
+      WGPUPipelineLayoutDescriptor post_pl_desc{};
+      post_pl_desc.bindGroupLayoutCount = 1;
+      post_pl_desc.bindGroupLayouts = &post_layout;
+      WGPUPipelineLayout post_pl = wgpuDeviceCreatePipelineLayout(device, &post_pl_desc);
+
+      WGPUColorTargetState post_target{};
+      post_target.writeMask = WGPUColorWriteMask_All;
+      WGPUFragmentState post_frag{};
+      post_frag.module = post_module;
+      post_frag.targetCount = 1;
+      post_frag.targets = &post_target;
+      WGPURenderPipelineDescriptor post_desc{};
+      post_desc.layout = post_pl;
+      post_desc.vertex.module = post_module;
+      post_desc.vertex.entryPoint = sv("vs_fullscreen");
+      post_desc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+      post_desc.primitive.frontFace = WGPUFrontFace_CCW;
+      post_desc.primitive.cullMode = WGPUCullMode_None;
+      post_desc.multisample.count = 1;
+      post_desc.multisample.mask = 0xFFFFFFFF;
+      post_desc.fragment = &post_frag;
+
+      post_target.format = WGPUTextureFormat_RGBA32Float;
+      post_frag.entryPoint = sv("fs_lum");
+      post_desc.label = sv("post-lum");
+      lum_pipeline = wgpuDeviceCreateRenderPipeline(device, &post_desc);
+      post_target.format = kHdrFormat;
+      post_frag.entryPoint = sv("fs_bright");
+      post_desc.label = sv("post-bright");
+      bright_pipeline = wgpuDeviceCreateRenderPipeline(device, &post_desc);
+      post_frag.entryPoint = sv("fs_blur");
+      post_desc.label = sv("post-blur");
+      blur_pipeline = wgpuDeviceCreateRenderPipeline(device, &post_desc);
+      post_target.format = format;
+      post_frag.entryPoint = sv("fs_composite");
+      post_desc.label = sv("post-composite");
+      composite_pipeline = wgpuDeviceCreateRenderPipeline(device, &post_desc);
+      wgpuPipelineLayoutRelease(post_pl);
+      wgpuShaderModuleRelease(post_module);
+
+      WGPUTextureDescriptor lum_desc{};
+      lum_desc.label = sv("post-luminance");
+      lum_desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
+      lum_desc.dimension = WGPUTextureDimension_2D;
+      lum_desc.size = WGPUExtent3D{kLumSize, kLumSize, 1};
+      lum_desc.format = WGPUTextureFormat_RGBA32Float;
+      lum_desc.mipLevelCount = 1;
+      lum_desc.sampleCount = 1;
+      lum_texture = wgpuDeviceCreateTexture(device, &lum_desc);
+      lum_view = wgpuTextureCreateView(lum_texture, nullptr);
+      WGPUBufferDescriptor read_desc{};
+      read_desc.label = sv("post-lum-readback");
+      read_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+      read_desc.size = static_cast<std::uint64_t>(kLumSize) * kLumSize * 16;
+      lum_readback = wgpuDeviceCreateBuffer(device, &read_desc);
+    }
 
     WGPUBufferDescriptor uniform_desc{};
     uniform_desc.label = sv("uniforms");
@@ -987,6 +1306,21 @@ struct Rhi::Impl {
       release_planet_tex(entry);
     }
     release_planet_tex(default_tex);
+    release_post_set(post_main);
+    release_post_set(post_rec);
+    if (lum_readback != nullptr) wgpuBufferRelease(lum_readback);
+    if (lum_view != nullptr) wgpuTextureViewRelease(lum_view);
+    if (lum_texture != nullptr) wgpuTextureRelease(lum_texture);
+    if (post_uniforms != nullptr) wgpuBufferRelease(post_uniforms);
+    if (post_sampler != nullptr) wgpuSamplerRelease(post_sampler);
+    if (post_layout != nullptr) wgpuBindGroupLayoutRelease(post_layout);
+    if (lum_pipeline != nullptr) wgpuRenderPipelineRelease(lum_pipeline);
+    if (bright_pipeline != nullptr) wgpuRenderPipelineRelease(bright_pipeline);
+    if (blur_pipeline != nullptr) wgpuRenderPipelineRelease(blur_pipeline);
+    if (composite_pipeline != nullptr) wgpuRenderPipelineRelease(composite_pipeline);
+    if (overlay_pipeline != nullptr) wgpuRenderPipelineRelease(overlay_pipeline);
+    if (overlay_pipeline_blend != nullptr) wgpuRenderPipelineRelease(overlay_pipeline_blend);
+    if (overlay_pipeline_add != nullptr) wgpuRenderPipelineRelease(overlay_pipeline_add);
     if (planet_sampler != nullptr) wgpuSamplerRelease(planet_sampler);
     if (tex_layout != nullptr) wgpuBindGroupLayoutRelease(tex_layout);
     if (rec_buffer != nullptr) wgpuBufferRelease(rec_buffer);
@@ -1256,67 +1590,307 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     }
   }
 
-  enum class Pass { Opaque, Blend, Additive };
-  const auto record_scene = [&](WGPURenderPassEncoder pass) {
-    const auto draw_items = [&](Pass which) {
-      for (std::size_t i = 0; i < count; ++i) {
-        const Pass item_pass = items[i].mode == 2 || items[i].mode == 3
-                                   ? Pass::Additive
-                               : items[i].translucent ? Pass::Blend
-                                                      : Pass::Opaque;
-        if (item_pass != which) {
-          continue;
-        }
-        const auto it = impl_->meshes.find(items[i].mesh);
-        if (it == impl_->meshes.end() || it->second.vertex_count == 0) {
-          continue;
-        }
-        const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
-        WGPUBindGroup tex_group = impl_->default_tex.group;
-        if (items[i].planet_texture != 0) {
-          const auto tex_it = impl_->planet_textures.find(items[i].planet_texture);
-          if (tex_it != impl_->planet_textures.end()) {
-            tex_group = tex_it->second.group;
-          }
-        }
-        wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_group, 0, nullptr);
-        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
-        wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
+  // --- eye adaptation (T0018 WP1) ---------------------------------------
+  // Consume last frame's luminance readback (async, 1-2 frame latency),
+  // then follow the exposure target with asymmetric time constants:
+  // glare adapts in a blink, dark adaptation opens over seconds.
+  wgpuDevicePoll(impl_->device, 0U, nullptr);
+  if (impl_->lum_map_ready) {
+    impl_->lum_map_ready = false;
+    impl_->lum_map_inflight = false;
+    const std::uint64_t lum_bytes =
+        static_cast<std::uint64_t>(Impl::kLumSize) * Impl::kLumSize * 16;
+    const auto* data = static_cast<const float*>(
+        wgpuBufferGetConstMappedRange(impl_->lum_readback, 0, lum_bytes));
+    if (data != nullptr) {
+      double sum = 0.0;
+      for (std::uint32_t i = 0; i < Impl::kLumSize * Impl::kLumSize; ++i) {
+        sum += static_cast<double>(data[i * 4]);
       }
-    };
+      impl_->avg_luminance =
+          static_cast<float>(sum / (Impl::kLumSize * Impl::kLumSize));
+    }
+    wgpuBufferUnmap(impl_->lum_readback);
+  }
+  {
+    float dt = frame.time_s - impl_->exposure_last_time;
+    if (impl_->exposure_last_time < 0.0f || dt < 0.0f || dt > 0.5f) {
+      dt = 1.0f / 60.0f;
+    }
+    impl_->exposure_last_time = frame.time_s;
+    const float avg = impl_->avg_luminance > 2.0e-5f ? impl_->avg_luminance : 2.0e-5f;
+    float target = 0.22f / avg;
+    // The rod gain ceiling: low enough that a starless night stays DIM
+    // instead of normalizing to mid-grey; bright stars (T0018 WP2) will
+    // still punch through at this gain.
+    target = target < 0.15f ? 0.15f : (target > 80.0f ? 80.0f : target);
+    const float tau = target < impl_->exposure ? 0.35f : 5.0f;
+    impl_->exposure += (target - impl_->exposure) * (1.0f - std::exp(-dt / tau));
+    // Scotopic fraction: rods take over as the adapted scene dims (scene
+    // units: day averages ~0.3, night ~5e-3, starlit space < 1e-4).
+    const float log_avg = std::log10(avg + 1.0e-9f);
+    float scotopic = (std::log10(0.03f) - log_avg) / 1.2f;
+    impl_->scotopic = scotopic < 0.0f ? 0.0f : (scotopic > 1.0f ? 1.0f : scotopic);
+  }
+
+  impl_->ensure_post_set(impl_->post_main, impl_->width, impl_->height);
+  impl_->ensure_post_set(impl_->post_rec, Impl::kRecW, Impl::kRecH);
+
+  // Post uniforms: slots 0-3 main, 4-7 recorder (bright/composite, blurH,
+  // blurV, luminance). a = (exposure, scotopic, bloom, threshold),
+  // b = (texel_x, texel_y, dir_x, dir_y).
+  const auto write_post_slots = [&](std::uint32_t base, const Impl::PostSet& set) {
+    const float tx = 1.0f / static_cast<float>(set.w);
+    const float ty = 1.0f / static_cast<float>(set.h);
+    const float btx = 2.0f / static_cast<float>(set.w);
+    const float bty = 2.0f / static_cast<float>(set.h);
+    const float a[4] = {impl_->exposure, impl_->scotopic, 0.55f, 1.05f};
+    float block[8] = {a[0], a[1], a[2], a[3], tx, ty, 0.0f, 0.0f};
+    wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, base * 256, block,
+                         sizeof(block));
+    float blur_h[8] = {a[0], a[1], a[2], a[3], btx, bty, 1.0f, 0.0f};
+    wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, (base + 1) * 256, blur_h,
+                         sizeof(blur_h));
+    float blur_v[8] = {a[0], a[1], a[2], a[3], btx, bty, 0.0f, 1.0f};
+    wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, (base + 2) * 256, blur_v,
+                         sizeof(blur_v));
+    float lum[8] = {a[0], a[1], a[2], a[3], tx, ty, 0.0f, 0.0f};
+    wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, (base + 3) * 256, lum,
+                         sizeof(lum));
+  };
+  write_post_slots(0, impl_->post_main);
+  write_post_slots(4, impl_->post_rec);
+
+  enum class Pass { Opaque, Blend, Additive };
+  const auto draw_bucket = [&](WGPURenderPassEncoder pass, Pass which, bool overlay) {
+    for (std::size_t i = 0; i < count; ++i) {
+      if (items[i].overlay != overlay) {
+        continue;
+      }
+      const Pass item_pass = items[i].mode == 2 || items[i].mode == 3
+                                 ? Pass::Additive
+                             : items[i].translucent ? Pass::Blend
+                                                    : Pass::Opaque;
+      if (item_pass != which) {
+        continue;
+      }
+      const auto it = impl_->meshes.find(items[i].mesh);
+      if (it == impl_->meshes.end() || it->second.vertex_count == 0) {
+        continue;
+      }
+      const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+      WGPUBindGroup tex_group = impl_->default_tex.group;
+      if (items[i].planet_texture != 0) {
+        const auto tex_it = impl_->planet_textures.find(items[i].planet_texture);
+        if (tex_it != impl_->planet_textures.end()) {
+          tex_group = tex_it->second.group;
+        }
+      }
+      wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_group, 0, nullptr);
+      wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+      wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
+    }
+  };
+  const auto record_scene = [&](WGPURenderPassEncoder pass) {
     wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
-    draw_items(Pass::Opaque);
+    draw_bucket(pass, Pass::Opaque, false);
     wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_blend);
-    draw_items(Pass::Blend);
+    draw_bucket(pass, Pass::Blend, false);
     wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_add);
-    draw_items(Pass::Additive);
+    draw_bucket(pass, Pass::Additive, false);
+  };
+  const auto record_overlay = [&](WGPURenderPassEncoder pass) {
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->overlay_pipeline);
+    draw_bucket(pass, Pass::Opaque, true);
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->overlay_pipeline_blend);
+    draw_bucket(pass, Pass::Blend, true);
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->overlay_pipeline_add);
+    draw_bucket(pass, Pass::Additive, true);
   };
 
-  if (have_surface) {
-    WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, nullptr);
+  // One full frame: scene -> HDR, bloom, composite+tonemap -> out, then
+  // the LDR overlay pass sharing the scene depth. slot_base picks the
+  // uniform block set; do_lum additionally reduces luminance (main only).
+  const auto render_full = [&](Impl::PostSet& set, WGPUTextureView depth,
+                               WGPUTextureView out_view, std::uint32_t slot_base,
+                               bool do_lum) {
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
-    attachment.view = view;
-    WGPURenderPassDescriptor pass_desc{};
-    pass_desc.colorAttachmentCount = 1;
-    pass_desc.colorAttachments = &attachment;
-    pass_desc.depthStencilAttachment = &depth_attachment;
-    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
-    record_scene(pass);
-    wgpuRenderPassEncoderEnd(pass);
-    wgpuRenderPassEncoderRelease(pass);
-
+    // Scene into HDR.
+    {
+      WGPURenderPassColorAttachment color = attachment;
+      color.view = set.hdr_view;
+      WGPURenderPassDepthStencilAttachment depth_att = depth_attachment;
+      depth_att.view = depth;
+      WGPURenderPassDescriptor desc{};
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color;
+      desc.depthStencilAttachment = &depth_att;
+      WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+      record_scene(pass);
+      wgpuRenderPassEncoderEnd(pass);
+      wgpuRenderPassEncoderRelease(pass);
+    }
+    const auto fullscreen = [&](WGPURenderPipeline pipeline, WGPUBindGroup group,
+                                std::uint32_t slot, WGPUTextureView target) {
+      WGPURenderPassColorAttachment color{};
+      color.view = target;
+      color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+      color.loadOp = WGPULoadOp_Clear;
+      color.storeOp = WGPUStoreOp_Store;
+      color.clearValue = WGPUColor{0.0, 0.0, 0.0, 1.0};
+      WGPURenderPassDescriptor desc{};
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color;
+      WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+      wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+      const std::uint32_t dyn = slot * 256;
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, group, 1, &dyn);
+      wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+      wgpuRenderPassEncoderEnd(pass);
+      wgpuRenderPassEncoderRelease(pass);
+    };
+    fullscreen(impl_->bright_pipeline, set.grp_hdr_only, slot_base + 0,
+               set.bloom_view[0]);
+    fullscreen(impl_->blur_pipeline, set.grp_b0, slot_base + 1, set.bloom_view[1]);
+    fullscreen(impl_->blur_pipeline, set.grp_b1, slot_base + 2, set.bloom_view[0]);
+    if (do_lum) {
+      fullscreen(impl_->lum_pipeline, set.grp_hdr_only, slot_base + 3, impl_->lum_view);
+    }
+    fullscreen(impl_->composite_pipeline, set.grp_hdr, slot_base + 0, out_view);
+    // Overlay (UI) after the tonemap, depth-tested against the scene.
+    {
+      WGPURenderPassColorAttachment color{};
+      color.view = out_view;
+      color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+      color.loadOp = WGPULoadOp_Load;
+      color.storeOp = WGPUStoreOp_Store;
+      WGPURenderPassDepthStencilAttachment depth_att{};
+      depth_att.view = depth;
+      depth_att.depthLoadOp = WGPULoadOp_Load;
+      depth_att.depthStoreOp = WGPUStoreOp_Store;
+      WGPURenderPassDescriptor desc{};
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color;
+      desc.depthStencilAttachment = &depth_att;
+      WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+      record_overlay(pass);
+      wgpuRenderPassEncoderEnd(pass);
+      wgpuRenderPassEncoderRelease(pass);
+    }
+    if (do_lum && !impl_->lum_map_inflight) {
+      WGPUTexelCopyTextureInfo src{};
+      src.texture = impl_->lum_texture;
+      WGPUTexelCopyBufferInfo dst{};
+      dst.buffer = impl_->lum_readback;
+      dst.layout.bytesPerRow = Impl::kLumSize * 16;
+      dst.layout.rowsPerImage = Impl::kLumSize;
+      const WGPUExtent3D extent{Impl::kLumSize, Impl::kLumSize, 1};
+      wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+    }
     WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
     wgpuCommandEncoderRelease(encoder);
     wgpuQueueSubmit(impl_->queue, 1, &commands);
     wgpuCommandBufferRelease(commands);
-    wgpuTextureViewRelease(view);
+    if (do_lum && !impl_->lum_map_inflight) {
+      impl_->lum_map_inflight = true;
+      WGPUBufferMapCallbackInfo map_info{};
+      map_info.mode = WGPUCallbackMode_AllowProcessEvents;
+      map_info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1,
+                             void* u2) {
+        auto* self = static_cast<Impl*>(u1);
+        (void)u2;
+        self->lum_map_ready = status == WGPUMapAsyncStatus_Success;
+        if (!self->lum_map_ready) {
+          self->lum_map_inflight = false;
+        }
+      };
+      map_info.userdata1 = impl_.get();
+      map_info.userdata2 = nullptr;
+      wgpuBufferMapAsync(impl_->lum_readback, WGPUMapMode_Read, 0,
+                         static_cast<std::uint64_t>(Impl::kLumSize) * Impl::kLumSize * 16,
+                         map_info);
+    }
+  };
 
+  if (have_surface) {
+    WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, nullptr);
+    render_full(impl_->post_main, impl_->depth_view, view, 0, true);
+    wgpuTextureViewRelease(view);
     wgpuSurfacePresent(impl_->surface);
     wgpuTextureRelease(surface_texture.texture);
+  } else {
+    // Headless (hidden window): the eye still adapts — render the scene
+    // into the HDR target and run the luminance reduction, skipping the
+    // bloom/composite that would need a presentable target.
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
+    {
+      WGPURenderPassColorAttachment color = attachment;
+      color.view = impl_->post_main.hdr_view;
+      WGPURenderPassDepthStencilAttachment depth_att = depth_attachment;
+      WGPURenderPassDescriptor desc{};
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color;
+      desc.depthStencilAttachment = &depth_att;
+      WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+      record_scene(pass);
+      wgpuRenderPassEncoderEnd(pass);
+      wgpuRenderPassEncoderRelease(pass);
+    }
+    {
+      WGPURenderPassColorAttachment color{};
+      color.view = impl_->lum_view;
+      color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+      color.loadOp = WGPULoadOp_Clear;
+      color.storeOp = WGPUStoreOp_Store;
+      color.clearValue = WGPUColor{0.0, 0.0, 0.0, 1.0};
+      WGPURenderPassDescriptor desc{};
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color;
+      WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+      wgpuRenderPassEncoderSetPipeline(pass, impl_->lum_pipeline);
+      const std::uint32_t dyn = 3 * 256;
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->post_main.grp_hdr_only, 1, &dyn);
+      wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+      wgpuRenderPassEncoderEnd(pass);
+      wgpuRenderPassEncoderRelease(pass);
+    }
+    if (!impl_->lum_map_inflight) {
+      WGPUTexelCopyTextureInfo src{};
+      src.texture = impl_->lum_texture;
+      WGPUTexelCopyBufferInfo dst{};
+      dst.buffer = impl_->lum_readback;
+      dst.layout.bytesPerRow = Impl::kLumSize * 16;
+      dst.layout.rowsPerImage = Impl::kLumSize;
+      const WGPUExtent3D extent{Impl::kLumSize, Impl::kLumSize, 1};
+      wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+    }
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
+    wgpuCommandEncoderRelease(encoder);
+    wgpuQueueSubmit(impl_->queue, 1, &commands);
+    wgpuCommandBufferRelease(commands);
+    if (!impl_->lum_map_inflight) {
+      impl_->lum_map_inflight = true;
+      WGPUBufferMapCallbackInfo map_info{};
+      map_info.mode = WGPUCallbackMode_AllowProcessEvents;
+      map_info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1,
+                             void* u2) {
+        auto* self = static_cast<Impl*>(u1);
+        (void)u2;
+        self->lum_map_ready = status == WGPUMapAsyncStatus_Success;
+        if (!self->lum_map_ready) {
+          self->lum_map_inflight = false;
+        }
+      };
+      map_info.userdata1 = impl_.get();
+      map_info.userdata2 = nullptr;
+      wgpuBufferMapAsync(impl_->lum_readback, WGPUMapMode_Read, 0,
+                         static_cast<std::uint64_t>(Impl::kLumSize) * Impl::kLumSize * 16,
+                         map_info);
+    }
   }
 
-  // --- one-shot capture: identical scene into an offscreen target -------
+  // --- one-shot capture: identical frame into an offscreen target -------
   if (!impl_->capture_path.empty()) {
     const std::string path = impl_->capture_path;
     impl_->capture_path.clear();
@@ -1341,20 +1915,9 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     read_desc.size = static_cast<std::uint64_t>(bytes_per_row) * height;
     WGPUBuffer read_buffer = wgpuDeviceCreateBuffer(impl_->device, &read_desc);
 
-    WGPUCommandEncoder cap_encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
-    WGPURenderPassColorAttachment cap_attachment = attachment;
-    cap_attachment.view = color_view;
-    WGPURenderPassDepthStencilAttachment cap_depth = depth_attachment;  // reuse, re-cleared
-    WGPURenderPassDescriptor cap_pass_desc{};
-    cap_pass_desc.colorAttachmentCount = 1;
-    cap_pass_desc.colorAttachments = &cap_attachment;
-    cap_pass_desc.depthStencilAttachment = &cap_depth;
-    WGPURenderPassEncoder cap_pass =
-        wgpuCommandEncoderBeginRenderPass(cap_encoder, &cap_pass_desc);
-    record_scene(cap_pass);
-    wgpuRenderPassEncoderEnd(cap_pass);
-    wgpuRenderPassEncoderRelease(cap_pass);
+    render_full(impl_->post_main, impl_->depth_view, color_view, 0, false);
 
+    WGPUCommandEncoder cap_encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
     WGPUTexelCopyTextureInfo src{};
     src.texture = color_tex;
     WGPUTexelCopyBufferInfo dst{};
@@ -1401,7 +1964,9 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
           std::fwrite(row.data(), 1, row.size(), file);
         }
         std::fclose(file);
-        std::printf("capture: wrote %ux%u to %s\n", width, height, path.c_str());
+        std::printf("capture: wrote %ux%u to %s (avg_lum %.5f exposure %.2f scotopic %.2f)\n",
+                    width, height, path.c_str(), impl_->avg_luminance, impl_->exposure,
+                    impl_->scotopic);
       } else {
         std::fprintf(stderr, "capture: FAILED to open %s\n", path.c_str());
         if (file != nullptr) {
@@ -1422,27 +1987,13 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   ++impl_->frame_counter;
   const bool future_active = !impl_->rec_dir.empty() &&
                              static_cast<double>(frame.time_s) < impl_->rec_until;
-  // Time-based cadence (~30 fps) so uncapped headless runs don't hammer
-  // the readback path; the < comparison handles the 4096 s time wrap.
   const bool ring_due = frame.time_s - impl_->last_ring_time >= 0.0333f ||
                         frame.time_s < impl_->last_ring_time;
   if ((impl_->ring_enabled || future_active) && ring_due) {
     impl_->last_ring_time = frame.time_s;
     impl_->ensure_recorder_targets();
+    render_full(impl_->post_rec, impl_->rec_depth_view, impl_->rec_color_view, 4, false);
     WGPUCommandEncoder rec_encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
-    WGPURenderPassColorAttachment rec_attachment = attachment;
-    rec_attachment.view = impl_->rec_color_view;
-    WGPURenderPassDepthStencilAttachment rec_depth_att = depth_attachment;
-    rec_depth_att.view = impl_->rec_depth_view;
-    WGPURenderPassDescriptor rec_pass_desc{};
-    rec_pass_desc.colorAttachmentCount = 1;
-    rec_pass_desc.colorAttachments = &rec_attachment;
-    rec_pass_desc.depthStencilAttachment = &rec_depth_att;
-    WGPURenderPassEncoder rec_pass =
-        wgpuCommandEncoderBeginRenderPass(rec_encoder, &rec_pass_desc);
-    record_scene(rec_pass);
-    wgpuRenderPassEncoderEnd(rec_pass);
-    wgpuRenderPassEncoderRelease(rec_pass);
     WGPUTexelCopyTextureInfo rec_src{};
     rec_src.texture = impl_->rec_color;
     WGPUTexelCopyBufferInfo rec_dst{};

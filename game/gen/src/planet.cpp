@@ -24,8 +24,12 @@ std::uint32_t pick(std::uint64_t word, std::uint32_t count) {
   return static_cast<std::uint32_t>((word >> 32U) % count);
 }
 
+// Cosmetic, per-surface-type columns ONLY. Radius deliberately does not
+// live here any more (2026-08-31): it comes from radius_range_m(), the
+// single class-keyed authority both this path and the system layer share.
+// cells_lo/hi are MINIMUMS — the province grid additionally scales with
+// radius (see below).
 struct TypeTable {
-  double radius_lo_m, radius_hi_m;
   double core_frac_lo, core_frac_hi;
   double sea_offset_lo_m, sea_offset_hi_m;  // 0/0 = no sea
   double atmo_lo_m, atmo_hi_m;              // 0/0 = no atmosphere
@@ -33,20 +37,33 @@ struct TypeTable {
 };
 
 // Type changes data, never pipeline shape (spec section 5).
-// Global 1:10 scale (planetary-systems spec, supersedes the 40-100 km v0
-// ranges): Earth at 1:10 (637 km) is the EarthLike normal; variance from
-// the seed. cells_lo/hi are now MINIMUMS — the province grid additionally
-// scales with radius (see below).
 constexpr std::array<TypeTable, 4> kTypeTables = {{
     // EarthLike
-    {500'000.0, 800'000.0, 0.60, 0.75, 100.0, 500.0, 8'000.0, 15'000.0, 5, 7},
+    {0.60, 0.75, 100.0, 500.0, 8'000.0, 15'000.0, 5, 7},
     // Barren
-    {150'000.0, 400'000.0, 0.65, 0.80, 0.0, 0.0, 0.0, 0.0, 3, 5},
+    {0.65, 0.80, 0.0, 0.0, 0.0, 0.0, 3, 5},
     // Desert
-    {300'000.0, 650'000.0, 0.60, 0.78, 0.0, 0.0, 4'000.0, 8'000.0, 4, 6},
+    {0.60, 0.78, 0.0, 0.0, 4'000.0, 8'000.0, 4, 6},
     // Ice
-    {250'000.0, 550'000.0, 0.62, 0.78, 0.0, 0.0, 5'000.0, 9'000.0, 4, 6},
+    {0.62, 0.78, 0.0, 0.0, 5'000.0, 9'000.0, 4, 6},
 }};
+
+// Class radius ranges in EARTH RADII, then scaled by kEarthRadiusGame.
+// Straight 1:10 of the real ranges — the radius valley at ~1.8 R_earth
+// splits Rocky/SuperEarth from SubNeptune, and the giants are finally at
+// true scale (Jupiter = 10.97 R_earth = 6991 km at 1:10).
+constexpr double kClassRadiiEarth[5][2] = {
+    /* Rocky      */ {0.35, 1.40},
+    /* SuperEarth */ {1.40, 1.80},
+    /* SubNeptune */ {1.90, 3.50},
+    /* IceGiant   */ {3.40, 4.60},
+    /* GasGiant   */ {7.50, 12.50},
+};
+
+// Density families: mass = factor * r_rel^3 in Earth units. Calibrated so
+// the Solar System lands where it should (Neptune ~17 M_earth, Jupiter
+// ~318 M_earth, sub-Neptunes puffy at 2-15 M_earth).
+constexpr double kClassMassFactor[5] = {1.00, 1.25, 0.35, 0.30, 0.24};
 
 void append_real(std::string& out, const char* name, Real value, bool comma = true) {
   char buffer[64];
@@ -69,6 +86,42 @@ const char* to_string(PlanetType type) {
   return "?";
 }
 
+RadiusRange radius_range_m(core::PlanetClass cls) {
+  const auto index = static_cast<std::size_t>(cls);
+  return RadiusRange{kClassRadiiEarth[index][0] * kEarthRadiusGame,
+                     kClassRadiiEarth[index][1] * kEarthRadiusGame};
+}
+
+det::Real mass_earth_for(core::PlanetClass cls, det::Real radius_m) {
+  const double r_rel = radius_m.to_double() / kEarthRadiusGame;
+  return Real(kClassMassFactor[static_cast<std::size_t>(cls)] * r_rel * r_rel * r_rel);
+}
+
+det::Real surface_gravity(det::Real mass_earth, det::Real radius_m, double jitter) {
+  // g = 9.81 * M / r^2 in Earth units. Physical in REAL terms, which is
+  // exactly why it stays decoupled from the /10 game-scale mu used by the
+  // ephemerides (spec section 4: two gravity domains, by design).
+  const double r_rel = radius_m.to_double() / kEarthRadiusGame;
+  const double g = 9.81 * mass_earth.to_double() / (r_rel * r_rel) * jitter;
+  // Clamp LAST so the jitter can never push a body past the playable band
+  // (spec section 4: authored g in roughly 2-25 m/s^2).
+  return Real(std::clamp(g, 1.0, 25.0));
+}
+
+core::PlanetClass class_for_surface_type(PlanetType type, std::uint64_t word) {
+  const double roll = u01(word).to_double();
+  switch (type) {
+    case PlanetType::EarthLike: return roll < 0.60 ? core::PlanetClass::Rocky
+                                                   : core::PlanetClass::SuperEarth;
+    case PlanetType::Desert: return roll < 0.70 ? core::PlanetClass::Rocky
+                                                : core::PlanetClass::SuperEarth;
+    case PlanetType::Ice: return roll < 0.80 ? core::PlanetClass::Rocky
+                                             : core::PlanetClass::SuperEarth;
+    case PlanetType::Barren: break;
+  }
+  return core::PlanetClass::Rocky;  // airless rock/moon; giants come via the system
+}
+
 PlanetParams derive_planet_params(const core::Key& body_key,
                                   std::optional<PlanetType> forced_type) {
   const core::Key params_key = core::derive_named(body_key, name::PlanetParamsV1);
@@ -80,11 +133,18 @@ PlanetParams derive_planet_params(const core::Key& body_key,
   params.type = forced_type.value_or(static_cast<PlanetType>(pick(draw0[0], 4)));
   const TypeTable& table = kTypeTables[static_cast<std::size_t>(params.type)];
 
-  params.radius_m = uniform(draw0[1], table.radius_lo_m, table.radius_hi_m);
+  // Radius comes from the shared class table; EarthLike additionally
+  // needs enough mass to hold air, so its low end clamps to the same
+  // threshold the system layer's surface-type mapping uses.
+  const core::PlanetClass cls = class_for_surface_type(params.type, draw2[1]);
+  RadiusRange range = radius_range_m(cls);
+  if (params.type == PlanetType::EarthLike) {
+    range.lo_m = std::max(range.lo_m, kAtmosphereMinRadiusM);
+  }
+  params.radius_m = uniform(draw0[1], range.lo_m, range.hi_m);
   params.core_radius_m = params.radius_m * uniform(draw0[2], table.core_frac_lo, table.core_frac_hi);
-  // Gravity loosely follows radius (60 km reference ~ 9.8) with jitter.
-  params.gravity =
-      Real(9.81) * (params.radius_m / Real(637'000.0)) * uniform(draw0[3], 0.9, 1.1);
+  params.gravity = surface_gravity(mass_earth_for(cls, params.radius_m), params.radius_m,
+                                   uniform(draw0[3], 0.9, 1.1).to_double());
   params.sea_level_m = uniform(draw1[0], table.sea_offset_lo_m, table.sea_offset_hi_m);
   params.atmosphere_height_m = uniform(draw1[1], table.atmo_lo_m, table.atmo_hi_m);
   params.sky_palette = static_cast<std::uint32_t>(draw1[2] >> 40U);

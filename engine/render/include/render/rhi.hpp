@@ -38,16 +38,39 @@ class Rhi {
     std::uint32_t mesh{0};
     // Column-major model-view-projection (camera-relative; f32-safe).
     float mvp[16]{};
-    // rgb + mode: a == 0 => lit terrain material (rgb ignored);
+    // mode 0: rgb + a == 0 => lit terrain material (rgb ignored);
     // a > 0 => unlit solid color with that alpha (opaque pipeline ignores
     // alpha; the translucent pipeline blends it).
+    // mode 1 (star photosphere): rgb = blackbody tint.
+    // mode 2 (corona billboard, additive pass): rgb = glow tint.
     float color[4]{0.0f, 0.0f, 0.0f, 0.0f};
-    // Drawn in a second, alpha-blended, no-depth-write pass.
+    // Mode-specific extras (see the shader block comment):
+    // star: aux.xyz camera->star-center unit dir, aux.w phase seed;
+    // extra.x spot amount / glow intensity, extra.y ray sharpness.
+    // extra.w is reserved (carries the mode to the shader).
+    float aux[4]{};
+    float extra[4]{};
+    // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow.
+    std::uint32_t mode{0};
+    // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
   };
 
-  // Clears, draws the items with basic directional lighting, presents.
-  bool render_frame(float r, float g, float b, const DrawItem* items, std::size_t item_count);
+  // Per-frame globals: sky clear color, directional sun light (unit
+  // vector, in the same frame as the mesh normals — pointing FROM the
+  // surface TOWARD the sun), light tint, and a time in seconds that
+  // drives the animated star shaders.
+  struct FrameParams {
+    float sky[3]{0.0f, 0.0f, 0.0f};
+    float sun_dir[3]{0.45f, 0.75f, 0.5f};
+    float sun_color[3]{1.0f, 1.0f, 1.0f};
+    float time_s{0.0f};
+  };
+
+  // Clears, draws the items (sun-lit terrain, unlit overlays, star
+  // surfaces, additive glows), presents.
+  bool render_frame(const FrameParams& frame, const DrawItem* items,
+                    std::size_t item_count);
 
   // Human-readable adapter description ("<name> (<backend>)").
   const std::string& adapter_info() const;

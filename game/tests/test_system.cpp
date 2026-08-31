@@ -37,9 +37,15 @@ TEST_CASE("system: deterministic and structurally sane") {
       REQUIRE(planet.orbit.a_m.to_double() > prev_a);
       prev_a = planet.orbit.a_m.to_double();
       REQUIRE(planet.orbit.e.to_double() < 0.95);
-      // 1:10 radius rule: 120-800 km bodies.
-      REQUIRE(planet.phys.radius_m.to_double() >= 120'000.0);
-      REQUIRE(planet.phys.radius_m.to_double() <= 800'000.0);
+      // 1:10 radius rule: the body sits inside ITS OWN class's range from
+      // the single shared table (gen/planet.hpp), giants included —
+      // Rocky ~223-892 km through GasGiant ~4778-7964 km.
+      const gen::RadiusRange range = gen::radius_range_m(planet.phys.cls);
+      REQUIRE(planet.phys.radius_m.to_double() >= range.lo_m);
+      REQUIRE(planet.phys.radius_m.to_double() <= range.hi_m);
+      // Surface gravity stays in the playable band (spec section 4).
+      REQUIRE(planet.phys.g_surface.to_double() >= 1.0);
+      REQUIRE(planet.phys.g_surface.to_double() <= 25.0);
       // Moons live inside a third of the Hill sphere by construction.
       for (const auto& moon : planet.moons) {
         REQUIRE(moon.orbit.mu_parent == planet.phys.mu);
@@ -73,6 +79,52 @@ TEST_CASE("system: Hill spacing keeps neighbors >= 10 mutual Hill radii") {
       prev = &planet;
     }
   }
+}
+
+TEST_CASE("system: default-seed contract (seed 83)") {
+  // Contract (2026-08-31): the app's DEFAULT seed must yield a system
+  // with >= 5 planets, at least one of them EarthLike with >= 1 moon.
+  // If a generation change trips this test, scan for a new qualifying
+  // seed (infinity-cli dump-system) and update BOTH the app default
+  // (game/app/src/main.cpp) and this test. Seed text is HEX: "83" = 0x83.
+  const gen::StarSystemParams system = system_for(0x83);
+  int occupied = 0;
+  bool earthlike_with_moon = false;
+  for (const auto& planet : system.planets) {
+    if (!planet.occupied) continue;
+    ++occupied;
+    if (planet.surface_type == gen::PlanetType::EarthLike && !planet.moons.empty()) {
+      earthlike_with_moon = true;
+    }
+  }
+  CHECK(occupied >= 5);
+  CHECK(earthlike_with_moon);
+}
+
+TEST_CASE("system: every planet is landable; companions orbit far out") {
+  int with_companions = 0;
+  for (std::uint64_t seed = 1; seed <= 40; ++seed) {
+    const gen::StarSystemParams system = system_for(seed);
+    CAPTURE(seed);
+    double outermost = 0.0;
+    for (const auto& planet : system.planets) {
+      if (!planet.occupied) continue;
+      REQUIRE(planet.landable);  // uniform-planet rule
+      outermost = std::max(outermost, planet.orbit.a_m.to_double());
+    }
+    REQUIRE(system.companions.size() <= 2);
+    with_companions += system.companions.empty() ? 0 : 1;
+    for (const auto& companion : system.companions) {
+      // Wide S-type orbits: far beyond the outer planet, so the planet
+      // architecture is untouched by the multistar layer.
+      REQUIRE(companion.orbit.a_m.to_double() > outermost * 2.0);
+      REQUIRE(companion.orbit.mu_parent.to_double() > 0.0);
+      REQUIRE(companion.phys.temperature_k.to_double() > 1000.0);
+    }
+  }
+  // ~1/3 of systems should be multiples; loose band for 40 samples.
+  CHECK(with_companions >= 4);
+  CHECK(with_companions <= 25);
 }
 
 TEST_CASE("system: forever-state — ephemeris returns, never drifts") {

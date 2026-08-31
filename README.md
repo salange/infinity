@@ -20,7 +20,9 @@ ctest --test-dir build
 Targets:
 
 - `app/infinity` — windowed app (wgpu-native: Vulkan on Linux/Windows,
-  Metal on macOS). `--frames N` renders N frames and exits (smoke testing).
+  Metal on macOS). Starts fullscreen on the primary monitor; `--windowed`
+  keeps a 1280x720 window. `--frames N` renders N frames and exits
+  (smoke testing).
 - `cli/infinity-cli` — headless tool (generation, hashing, determinism
   checks). Never links window or GPU libraries.
 - `tests/infinity_tests` — unit tests (doctest, via ctest).

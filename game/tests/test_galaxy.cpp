@@ -292,3 +292,37 @@ TEST_CASE("deep sky: nebulae in arms, globulars in the halo (WP4)") {
     CHECK(again.center_m.x.to_double() == again2.center_m.x.to_double());
   }
 }
+
+TEST_CASE("cluster and universe levels are thin but real (WP5)") {
+  const auto seed = core::parse_seed("83");
+  const auto tree = gen::make_tree(*seed);
+  const auto cluster_node = tree->get(core::tree::Address{}.child(
+      core::tree::Step{gen::name::ClustersAxis, core::tree::Cell::grid(0, 0, 0)}));
+  const std::uint32_t count = gen::galaxy_count_in_cluster(cluster_node->key());
+  CHECK(count >= 10);
+  CHECK(count <= 1000);
+  // Galaxy 0 anchors the cluster origin — the playable galaxy did not move.
+  const auto home = gen::galaxy_position_in_cluster(cluster_node->key(), 0);
+  CHECK(home.x.to_double() == 0.0);
+  CHECK(home.z.to_double() == 0.0);
+  // Neighbours scatter within the cluster cube, deterministically.
+  for (std::uint32_t i = 1; i < count && i < 24; ++i) {
+    const auto pos = gen::galaxy_position_in_cluster(cluster_node->key(), i);
+    CHECK(std::abs(pos.x.to_double()) <= gen::kClusterSizeM * 0.5);
+    CHECK(std::abs(pos.y.to_double()) <= gen::kClusterSizeM * 0.5);
+    CHECK(std::abs(pos.z.to_double()) <= gen::kClusterSizeM * 0.5);
+    const auto again = gen::galaxy_position_in_cluster(cluster_node->key(), i);
+    CHECK(pos.x.to_double() == again.x.to_double());
+  }
+  // External galaxies render from params alone: any neighbour's key
+  // yields a valid morphology draw (no systems ever generated).
+  const auto neighbour_key = gen::galaxy_key_in_cluster(*seed, 0, 0, 0, 1);
+  const auto params = gen::derive_galaxy_params(neighbour_key);
+  CHECK(params.diameter_ly.to_double() >= 5000.0);
+  CHECK(params.diameter_ly.to_double() <= 200000.0);
+  // And a neighbouring CLUSTER differs from ours.
+  const auto far_key = gen::galaxy_key_in_cluster(*seed, 1, 0, 0, 0);
+  const auto far_params = gen::derive_galaxy_params(far_key);
+  CHECK((far_params.diameter_ly.to_double() != params.diameter_ly.to_double() ||
+         far_params.type != params.type));
+}

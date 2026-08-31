@@ -33,7 +33,7 @@ namespace {
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
 constexpr std::uint64_t kItemUniformSize = 112;  // mvp + color + aux + extra
-constexpr std::uint64_t kFrameUniformSize = 128;  // 8 vec4s (see Frame in WGSL)
+constexpr std::uint64_t kFrameUniformSize = 144;  // 9 vec4s (see Frame in WGSL)
 
 constexpr const char* kMeshShader = R"(
 // Per-item block. aux/extra are mode-specific:
@@ -74,6 +74,7 @@ struct Frame {
   planet_up: vec4<f32>,
   atmo: vec4<f32>,
   planet_center: vec4<f32>,
+  material: vec4<f32>,  // x = per-planet palette shift (-1..1)
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<uniform> frame: Frame;
@@ -82,15 +83,38 @@ struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) opos: vec3<f32>,
+  // material/v1 (T0015 WP3): two material ids packed as mat0*256+mat1,
+  // FLAT so the pair never interpolates across a triangle; the blend
+  // fraction interpolates smoothly.
+  @location(2) @interpolate(flat) mat_pack: f32,
+  @location(3) mat_blend: f32,
 };
 
 @vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VSOut {
+fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
+           @location(2) mat_pack: f32, @location(3) mat_blend: f32) -> VSOut {
   var out: VSOut;
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = normal;
   out.opos = position;
+  out.mat_pack = mat_pack;
+  out.mat_blend = mat_blend;
   return out;
+}
+
+// material/v1 palette: albedos by material id (0 = unused sentinel).
+fn material_albedo(id: u32) -> vec3<f32> {
+  switch id {
+    case 1u: { return vec3<f32>(0.42, 0.38, 0.34); }  // Rock
+    case 2u: { return vec3<f32>(0.46, 0.44, 0.41); }  // Regolith
+    case 3u: { return vec3<f32>(0.78, 0.68, 0.47); }  // Sand
+    case 4u: { return vec3<f32>(0.28, 0.43, 0.20); }  // Grass
+    case 5u: { return vec3<f32>(0.92, 0.94, 0.97); }  // Snow
+    case 6u: { return vec3<f32>(0.70, 0.80, 0.90); }  // IceSheet
+    case 7u: { return vec3<f32>(0.34, 0.35, 0.29); }  // Seabed
+    case 8u: { return vec3<f32>(0.35, 0.32, 0.29); }  // Scree
+    default: { return vec3<f32>(0.55, 0.52, 0.45); }
+  }
 }
 
 // --- cheap deterministic 3D value noise + fbm (visual only) --------------
@@ -301,11 +325,28 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let ndl = max(dot(n, light), 0.0);
   // Soft terminator wrap so the day/night line does not alias harshly.
   let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
-  // Albedo: the default terrain material, or the item's rgb when set
-  // (lit colored surfaces, e.g. the ocean-blue sea-level impostor).
+  // Albedo: material palette when the vertex carries materials, else the
+  // default terrain material or the item's rgb override (e.g. the
+  // ocean-blue sea-level impostor).
   var base = vec3<f32>(0.55, 0.52, 0.45);
   if (u.color.r + u.color.g + u.color.b > 0.001) {
     base = u.color.rgb;
+  }
+  if (in.mat_pack >= 255.5) {
+    let pack = u32(in.mat_pack + 0.5);
+    let m0 = pack >> 8u;
+    let m1 = pack & 255u;
+    base = mix(material_albedo(m0), material_albedo(m1), clamp(in.mat_blend, 0.0, 1.0));
+    // Two-scale procedural modulation in PLANET-LOCAL space (stable under
+    // camera motion; 3D noise needs no projection — the triplanar idea
+    // without textures). Fine scale ~3 m, coarse ~45 m.
+    let world = in.opos + u.aux.xyz - frame.planet_center.xyz;
+    let coarse = vnoise(world * 0.022);
+    let fine = vnoise(world * 0.34);
+    base = base * (0.82 + 0.24 * coarse + 0.12 * fine);
+    // Per-planet palette shift: a subtle hue rotation.
+    let shift = frame.material.x;
+    base = base * (vec3<f32>(1.0) + shift * vec3<f32>(0.10, 0.02, -0.08));
   }
   var color = base * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
   let fill = max(dot(n, -light), 0.0);
@@ -592,17 +633,23 @@ struct Rhi::Impl {
     WGPUPipelineLayout pipeline_layout =
         wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
 
-    WGPUVertexAttribute attributes[2] = {};
+    WGPUVertexAttribute attributes[4] = {};
     attributes[0].format = WGPUVertexFormat_Float32x3;
     attributes[0].offset = 0;
     attributes[0].shaderLocation = 0;
     attributes[1].format = WGPUVertexFormat_Float32x3;
     attributes[1].offset = 12;
     attributes[1].shaderLocation = 1;
+    attributes[2].format = WGPUVertexFormat_Float32;  // mat_pack
+    attributes[2].offset = 24;
+    attributes[2].shaderLocation = 2;
+    attributes[3].format = WGPUVertexFormat_Float32;  // material blend
+    attributes[3].offset = 28;
+    attributes[3].shaderLocation = 3;
     WGPUVertexBufferLayout vertex_layout{};
-    vertex_layout.arrayStride = 24;
+    vertex_layout.arrayStride = 32;
     vertex_layout.stepMode = WGPUVertexStepMode_Vertex;
-    vertex_layout.attributeCount = 2;
+    vertex_layout.attributeCount = 4;
     vertex_layout.attributes = attributes;
 
     WGPUDepthStencilState depth_state{};
@@ -853,6 +900,19 @@ void Rhi::resize(std::uint32_t width, std::uint32_t height) {
 }
 
 std::uint32_t Rhi::create_mesh(const float* vertices, std::size_t float_count) {
+  // Legacy 6-float soup: expand to the 8-float terrain layout with
+  // mat_pack = 0 (the shader's flat base-albedo path).
+  const std::size_t count = float_count / 6;
+  std::vector<float> expanded(count * 8);
+  for (std::size_t v = 0; v < count; ++v) {
+    std::memcpy(expanded.data() + v * 8, vertices + v * 6, 6 * sizeof(float));
+    expanded[v * 8 + 6] = 0.0f;
+    expanded[v * 8 + 7] = 0.0f;
+  }
+  return create_mesh_mat(expanded.data(), expanded.size());
+}
+
+std::uint32_t Rhi::create_mesh_mat(const float* vertices, std::size_t float_count) {
   WGPUBufferDescriptor desc{};
   desc.label = sv("chunk-mesh");
   desc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
@@ -860,7 +920,7 @@ std::uint32_t Rhi::create_mesh(const float* vertices, std::size_t float_count) {
   WGPUBuffer buffer = wgpuDeviceCreateBuffer(impl_->device, &desc);
   wgpuQueueWriteBuffer(impl_->queue, buffer, 0, vertices, desc.size);
   const std::uint32_t id = impl_->next_mesh_id++;
-  impl_->meshes.emplace(id, MeshEntry{buffer, static_cast<std::uint32_t>(float_count / 6)});
+  impl_->meshes.emplace(id, MeshEntry{buffer, static_cast<std::uint32_t>(float_count / 8)});
   return id;
 }
 
@@ -877,7 +937,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   impl_->ensure_mesh_pipeline();
 
   {
-    float frame_block[32] = {
+    float frame_block[36] = {
         frame.sun_dir[0],    frame.sun_dir[1],    frame.sun_dir[2],    0.0f,
         frame.sun_color[0],  frame.sun_color[1],  frame.sun_color[2],  frame.time_s,
         frame.cam_right[0],  frame.cam_right[1],  frame.cam_right[2],  frame.tan_half_x,
@@ -887,6 +947,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         frame.atmo_tint[0],  frame.atmo_tint[1],  frame.atmo_tint[2],  frame.sea_radius_m,
         frame.planet_center[0], frame.planet_center[1], frame.planet_center[2],
         frame.normal_blend,
+        frame.palette_shift, 0.0f, 0.0f, 0.0f,
     };
     wgpuQueueWriteBuffer(impl_->queue, impl_->frame_buffer, 0, frame_block,
                          sizeof(frame_block));

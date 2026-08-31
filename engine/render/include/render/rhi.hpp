@@ -32,6 +32,12 @@ class Rhi {
   // Uploads an interleaved [px py pz nx ny nz] f32 triangle soup; returns
   // a handle. Meshes are static in v0 (re-upload = new mesh).
   std::uint32_t create_mesh(const float* vertices, std::size_t float_count);
+  // Terrain path (T0015 WP3): interleaved
+  // [px py pz nx ny nz mat_pack blend] — mat_pack = mat0 * 256 + mat1
+  // (material ids), blend = fraction of mat1. create_mesh() uploads
+  // legacy 6-float soups and expands them with mat_pack = 0 (flat base
+  // albedo path).
+  std::uint32_t create_mesh_mat(const float* vertices, std::size_t float_count);
   void destroy_mesh(std::uint32_t mesh);
 
   struct DrawItem {
@@ -90,6 +96,8 @@ class Rhi {
     // terrain below it shades toward deep-water blue by depth, so the
     // seabed, the ocean impostor and the translucent shell agree.
     float sea_radius_m{0.0f};
+    // Per-planet palette variation applied to material albedos (-1..1).
+    float palette_shift{0.0f};
   };
 
   // Clears, draws the items (sun-lit terrain, unlit overlays, star

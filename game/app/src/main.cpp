@@ -626,8 +626,8 @@ int main(int argc, char** argv) {
                      std::cos(phi) * std::sin(theta) * r, std::sin(phi) * r};
       };
       std::vector<float> vertices;
-      vertices.reserve(static_cast<std::size_t>(kSlices) * kStacks * 36);
-      const auto point = [&](int slice, int stack, float out[6]) {
+      vertices.reserve(static_cast<std::size_t>(kSlices) * kStacks * 48);
+      const auto point = [&](int slice, int stack, float out[8]) {
         const double phi = pi * stack / kStacks - pi * 0.5;
         const double theta = 2.0 * pi * slice / kSlices;
         const double nx = std::cos(phi) * std::cos(theta);
@@ -656,21 +656,28 @@ int main(int argc, char** argv) {
         out[3] = static_cast<float>(normal.x);
         out[4] = static_cast<float>(normal.y);
         out[5] = static_cast<float>(normal.z);
+        // Classify at the TRUE surface radius (the mesh is sunk 300 m).
+        const double true_r = r + 300.0;
+        const auto vm = anchor->field->material().classify(
+            nx * true_r, ny * true_r, nz * true_r, normal.x, normal.y, normal.z);
+        out[6] = static_cast<float>(static_cast<int>(vm.mat0) * 256 +
+                                    static_cast<int>(vm.mat1));
+        out[7] = vm.blend;
       };
       for (int stack = 0; stack < kStacks; ++stack) {
         for (int slice = 0; slice < kSlices; ++slice) {
-          float p00[6], p10[6], p01[6], p11[6];
+          float p00[8], p10[8], p01[8], p11[8];
           point(slice, stack, p00);
           point(slice + 1, stack, p10);
           point(slice, stack + 1, p01);
           point(slice + 1, stack + 1, p11);
           const float* quad[6] = {p00, p10, p11, p00, p11, p01};
           for (const float* v : quad) {
-            vertices.insert(vertices.end(), v, v + 6);
+            vertices.insert(vertices.end(), v, v + 8);
           }
         }
       }
-      land_mesh = rhi->create_mesh(vertices.data(), vertices.size());
+      land_mesh = rhi->create_mesh_mat(vertices.data(), vertices.size());
     }
   };
   rebuild_sea();
@@ -838,6 +845,7 @@ int main(int argc, char** argv) {
   std::unordered_map<inf::core::ChunkAddr, std::shared_ptr<const inf::world::ChunkData>,
                      AddrHash>
       pending_ready;
+  std::vector<float> mat_scratch;
   std::vector<inf::render::Rhi::DrawItem> items;
 
   long frame = 0;
@@ -1266,9 +1274,25 @@ int main(int argc, char** argv) {
         loaded.erase(old);
       }
       if (!data->mesh.vertices.empty()) {
+        // material/v1 (T0015 WP3): classify each vertex (planet-local
+        // position + normal) and upload the 8-float terrain layout.
+        const auto& mesh_vertices = data->mesh.vertices;
+        const std::size_t vertex_count = mesh_vertices.size() / 6;
+        mat_scratch.resize(vertex_count * 8);
+        const auto& material = anchor->field->material();
+        for (std::size_t v = 0; v < vertex_count; ++v) {
+          const float* in_v = mesh_vertices.data() + v * 6;
+          float* out_v = mat_scratch.data() + v * 8;
+          std::memcpy(out_v, in_v, 6 * sizeof(float));
+          const auto vm = material.classify(
+              data->mesh.origin[0] + in_v[0], data->mesh.origin[1] + in_v[1],
+              data->mesh.origin[2] + in_v[2], in_v[3], in_v[4], in_v[5]);
+          out_v[6] = static_cast<float>(static_cast<int>(vm.mat0) * 256 +
+                                        static_cast<int>(vm.mat1));
+          out_v[7] = vm.blend;
+        }
         LoadedChunk chunk;
-        chunk.mesh_id =
-            rhi->create_mesh(data->mesh.vertices.data(), data->mesh.vertices.size());
+        chunk.mesh_id = rhi->create_mesh_mat(mat_scratch.data(), mat_scratch.size());
         chunk.origin =
             RVec3{data->mesh.origin[0], data->mesh.origin[1], data->mesh.origin[2]};
         loaded[addr] = chunk;
@@ -2216,6 +2240,8 @@ int main(int argc, char** argv) {
       frame_params.altitude_frac = static_cast<float>(std::clamp(dome_alt_frac, 0.0, 9.0));
       set3(frame_params.planet_center, RVec3{0.0, 0.0, 0.0} - camera_pos);
       frame_params.sea_radius_m = static_cast<float>(sea_radius);
+      frame_params.palette_shift = static_cast<float>(
+          static_cast<double>(anchor->planet.palette_id % 201U) / 100.0 - 1.0);
       // Blend terrain normals toward the sphere radial from ~0.25 radii
       // of altitude up (full sphere shading from one radius out).
       frame_params.normal_blend = static_cast<float>(

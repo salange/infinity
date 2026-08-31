@@ -14,6 +14,7 @@ add_library(game_gen STATIC
   src/drainage.cpp
   src/features.cpp
   src/galaxy.cpp
+  src/galaxy_octree.cpp
   src/macro.cpp
   src/planet_texture.cpp
   src/material.cpp

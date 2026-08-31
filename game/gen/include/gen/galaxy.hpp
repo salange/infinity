@@ -82,10 +82,22 @@ class GalaxyDensity {
   det::Real dust(const Dir3& p_m) const;
   ColorTemp population(const Dir3& p_m) const;
 
+  // The model's own analytic z-integral of the DISC terms (thin + thick,
+  // arm/clump factor included) over [z0, z1] at a plane position —
+  // Msun/m^2. The octree integrates columns with this instead of
+  // sampling z, because a coarse cell spans many scale heights and
+  // midpoint quadrature misses the thin disc entirely.
+  det::Real disc_column_mass(det::Real x_m, det::Real y_m, det::Real z0_m,
+                             det::Real z1_m) const;
+  // The pointwise non-disc terms (bulge + bar + halo).
+  det::Real spheroid(const Dir3& p_m) const;
+
   const GalaxyParams& params() const { return params_; }
   det::Real radius_m() const { return radius_m_; }
 
  private:
+  double disc_plane_factor(double x, double y, double z_for_clumps) const;
+
   GalaxyParams params_;
   det::Real radius_m_;
   // Precomputed reciprocals/amplitudes (all metres / per-metre).

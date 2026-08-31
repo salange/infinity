@@ -4,6 +4,7 @@
 
 #include "core/seed.hpp"
 #include "gen/galaxy.hpp"
+#include "gen/galaxy_octree.hpp"
 #include "gen/names.hpp"
 #include "gen/universe.hpp"
 
@@ -139,5 +140,81 @@ TEST_CASE("galaxy: density model morphology (WP2)") {
         density.population(gen::Dir3{Real(radius * 0.8), Real(0.0), Real(0.0)});
     CHECK(center.temperature_k.to_double() < outer.temperature_k.to_double());
     CHECK(center.metallicity.to_double() > outer.metallicity.to_double());
+  }
+}
+
+TEST_CASE("galaxy octree: counts, determinism, magnitude-limited API (WP3)") {
+  const core::Key key = home_galaxy_key();
+  const auto params = gen::derive_galaxy_params(key);
+  const gen::GalaxyOctree octree(key, params);
+
+  SUBCASE("cell counts integrate to the density model's galaxy total") {
+    const int level = 4;
+    double total = 0.0;
+    for (int x = 0; x < (1 << level); ++x) {
+      for (int y = 0; y < (1 << level); ++y) {
+        for (int z = 0; z < (1 << level); ++z) {
+          total += octree.expected_systems({x, y, z, level}).to_double();
+        }
+      }
+    }
+    const double expected = params.total_mass_suns.to_double() /
+                            gen::GalaxyOctree::kMeanSystemMassSuns;
+    CHECK(total > expected * 0.5);
+    CHECK(total < expected * 2.0);
+  }
+
+  SUBCASE("home leaf is valid and the neighbourhood is deterministic") {
+    const gen::Dir3 home = gen::home_system_position_m(params);
+    const auto leaf = octree.leaf_at(home);
+    CHECK(octree.is_leaf(leaf));
+    CHECK(leaf.level > 0);
+    std::vector<gen::GalaxyOctree::CellId> found_a;
+    std::vector<gen::GalaxyOctree::CellId> found_b;
+    const Real range(20.0 * gen::kLightYearM);
+    octree.systems_in_ball(home, range, 512, &found_a);
+    const gen::GalaxyOctree octree_b(key, params);  // independent instance
+    octree_b.systems_in_ball(home, range, 512, &found_b);
+    REQUIRE(found_a.size() == found_b.size());
+    CHECK(!found_a.empty());
+    for (std::size_t i = 0; i < found_a.size(); ++i) {
+      CHECK(found_a[i].x == found_b[i].x);
+      CHECK(found_a[i].level == found_b[i].level);
+      CHECK(octree.occupied(found_a[i]));
+      CHECK(octree.is_leaf(found_a[i]));
+    }
+  }
+
+  SUBCASE("luminous_count is closed-form on any cell — even the root") {
+    // The ROOT holds the entire galaxy (~1e8-1e9 systems); a count that
+    // instantiated stars could never return. It must answer instantly
+    // and scale with the quantised luminosity fraction.
+    const gen::GalaxyOctree::CellId root{0, 0, 0, 0};
+    const auto bright = octree.luminous_count(root, Real(-8.0));
+    const auto medium = octree.luminous_count(root, Real(0.0));
+    const auto faint = octree.luminous_count(root, Real(8.0));
+    CHECK(bright < medium);
+    CHECK(medium < faint);
+    const double lambda = octree.expected_systems(root).to_double();
+    const double expected_medium =
+        lambda * gen::GalaxyOctree::luminous_fraction(Real(0.0)).to_double();
+    // Poisson around the closed-form expectation.
+    CHECK(medium > expected_medium * 0.8 - 10.0);
+    CHECK(medium < expected_medium * 1.2 + 10.0);
+  }
+
+  SUBCASE("luminous_star samples the truncated bright tail only") {
+    const gen::GalaxyOctree::CellId root{0, 0, 0, 0};
+    const Real limit(2.0);
+    const auto count = octree.luminous_count(root, limit);
+    REQUIRE(count > 0);
+    for (std::uint32_t i = 0; i < 16 && i < count; ++i) {
+      const auto star = octree.luminous_star(root, limit, i);
+      CHECK(star.abs_mag.to_double() <= 2.26);  // quantised limit + epsilon
+      CHECK(star.temperature_k.to_double() >= 2600.0);
+      CHECK(star.temperature_k.to_double() <= 40000.0);
+      // Position inside the cell.
+      CHECK(std::abs(star.position_m.x.to_double()) <= octree.root_size_m() * 0.5);
+    }
   }
 }

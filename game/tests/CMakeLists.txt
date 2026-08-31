@@ -1,5 +1,6 @@
 add_executable(game_tests
   main.cpp
+  test_galaxy.cpp
   test_names.cpp
   test_planet.cpp
   test_provinces.cpp

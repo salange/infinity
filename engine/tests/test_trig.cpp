@@ -49,3 +49,30 @@ TEST_CASE("det trig: bit-stable fingerprint") {
   CHECK(acc == doctest::Approx(acc));  // placeholder tightened below
   (void)acc;
 }
+
+TEST_CASE("trig: fast approximations track the reference kernels (T0017)") {
+  using inf::det::Real;
+  // fast_exp: < 3e-5 relative over the useful density range.
+  for (int i = -600; i <= 200; ++i) {
+    const double x = i * 0.1;
+    const double approx = inf::det::fast_exp(Real(x)).to_double();
+    const double exact = std::exp(x);
+    CHECK(std::abs(approx - exact) <= exact * 3.0e-5 + 1e-300);
+  }
+  CHECK(inf::det::fast_exp(Real(-800.0)).to_double() == 0.0);
+  // fast_log: < 1e-9 relative.
+  for (int i = 1; i <= 400; ++i) {
+    const double x = i * 0.37;
+    const double approx = inf::det::fast_log(Real(x)).to_double();
+    const double exact = std::log(x);
+    CHECK(std::abs(approx - exact) <= std::abs(exact) * 1.0e-9 + 1.0e-12);
+  }
+  // fast_sin_cos: kernel-grade on moderate arguments.
+  for (int i = -300; i <= 300; ++i) {
+    const double x = i * 0.11;
+    Real s(0.0), c(0.0);
+    inf::det::fast_sin_cos(Real(x), &s, &c);
+    CHECK(std::abs(s.to_double() - std::sin(x)) < 1.0e-9);
+    CHECK(std::abs(c.to_double() - std::cos(x)) < 1.0e-9);
+  }
+}

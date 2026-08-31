@@ -217,6 +217,111 @@ GalaxyDensity::GalaxyDensity(const GalaxyParams& params) : params_(params) {
   clump_lattice_ = det::mix64(0x9A1AC5ULL ^ mass_bits);
 }
 
+namespace {
+inline double tanh_from_exp(double a) {
+  // tanh(a) = (1 - e^-2a) / (1 + e^-2a), a >= 0 assumed by callers.
+  const double e = det::fast_exp(Real(-2.0 * a)).to_double();
+  return (1.0 - e) / (1.0 + e);
+}
+}  // namespace
+
+// Planar factor of the disc at (x, y): exp radial falloff times the arm
+// (or clump) modulation — the z-independent part shared by stars() and
+// disc_column_mass().
+double GalaxyDensity::disc_plane_factor(double x, double y, double z_for_clumps) const {
+  const double radius_plane = std::sqrt(x * x + y * y);
+  double factor = det::fast_exp(Real(-radius_plane * inv_disc_length_)).to_double();
+  if (arm_amp_ > 0.0 && radius_plane > 1.0) {
+    const double inv_r = 1.0 / radius_plane;
+    const double cos1 = x * inv_r;
+    const double sin1 = y * inv_r;
+    double cm = cos1;
+    double sm = sin1;
+    for (int i = 1; i < params_.arm_count; ++i) {
+      const double c_next = cm * cos1 - sm * sin1;
+      sm = sm * cos1 + cm * sin1;
+      cm = c_next;
+    }
+    const double ln_r = det::fast_log(Real(radius_plane * inv_arm_r0_)).to_double();
+    double sb;
+    double cb;
+    wave_sin_cos(arm_b_ * ln_r * 0.15915494309189535, &sb, &cb);
+    const double phase_cos = cm * cb + sm * sb;
+    const double rg = radius_m_.to_double();
+    double envelope = (radius_plane - bulge_r0_) / (0.6 * bulge_r0_);
+    envelope = envelope < 0.0 ? 0.0 : (envelope > 1.0 ? 1.0 : envelope);
+    double outer = (rg - radius_plane) / (0.35 * rg);
+    outer = outer < 0.0 ? 0.0 : (outer > 1.0 ? 1.0 : outer);
+    factor *= 1.0 + arm_amp_ * envelope * outer * phase_cos;
+  }
+  if (clump_amp_ >= 0.5) {
+    const double freq = 6.0 / radius_m_.to_double();
+    const Real noise = world::gradient_noise3(clump_lattice_, Real(x * freq),
+                                              Real(y * freq), Real(z_for_clumps * freq));
+    double clump_factor = 1.0 + clump_amp_ * noise.to_double();
+    if (clump_factor < 0.05) {
+      clump_factor = 0.05;
+    }
+    factor *= clump_factor;
+  }
+  return factor;
+}
+
+det::Real GalaxyDensity::disc_column_mass(det::Real x_m, det::Real y_m, det::Real z0_m,
+                                          det::Real z1_m) const {
+  if (rho_disc_ <= 0.0) {
+    return Real(0.0);
+  }
+  const double factor = disc_plane_factor(x_m.to_double(), y_m.to_double(), 0.0);
+  // Integral of sech^2(z / 2h) over [z0, z1] = 2h (tanh(z1/2h) - tanh(z0/2h)),
+  // done via signed tanh built from one exponential each.
+  const auto signed_tanh = [](double a) {
+    return a < 0.0 ? -tanh_from_exp(-a) : tanh_from_exp(a);
+  };
+  const double z0 = z0_m.to_double();
+  const double z1 = z1_m.to_double();
+  const double h_thin = 1.0 / inv_thin_height_;
+  const double h_thick = 1.0 / inv_thick_height_;
+  const double thin = rho_disc_ * 2.0 * h_thin *
+                      (signed_tanh(0.5 * z1 * inv_thin_height_) -
+                       signed_tanh(0.5 * z0 * inv_thin_height_));
+  const double thick = rho_thick_ * 2.0 * h_thick *
+                       (signed_tanh(0.5 * z1 * inv_thick_height_) -
+                        signed_tanh(0.5 * z0 * inv_thick_height_));
+  return Real(factor * (thin + thick));
+}
+
+det::Real GalaxyDensity::spheroid(const Dir3& p_m) const {
+  const double x = p_m.x.to_double();
+  const double y = p_m.y.to_double();
+  const double z = p_m.z.to_double();
+  const double abs_z = z < 0.0 ? -z : z;
+  const double r2_plane = x * x + y * y;
+  double density = 0.0;
+  const double zb = abs_z * ellip_inv_c_;
+  const double r_bulge_sq = r2_plane + zb * zb;
+  const double q_sq = r_bulge_sq * inv_bulge_core_ * inv_bulge_core_;
+  if (q_sq < 28.0) {
+    // Cored r^-1 profile: floor q so quadrature points at the exact
+    // centre stay finite (the singularity is integrable, samples on it
+    // are not).
+    double q = std::sqrt(q_sq);
+    q = q < 0.05 ? 0.05 : q;
+    density += rho_bulge_ * (1.0 / q) * det::fast_exp(Real(-q_sq)).to_double();
+    density += rho_bulge_ * 2.0e-4 / (q_sq * q * std::sqrt(q) + 1.0);
+  }
+  if (bar_amp_ > 0.0) {
+    const double bx = x / bar_len_m_;
+    const double by = y / (0.35 * bar_len_m_);
+    const double bz = z / (0.25 * bar_len_m_);
+    const double arg = bx * bx + by * by + bz * bz;
+    if (arg < 28.0) {
+      density += bar_amp_ * det::fast_exp(Real(-arg)).to_double();
+    }
+  }
+  return Real(density);
+}
+
 det::Real GalaxyDensity::stars(const Dir3& p_m) const {
   const double x = p_m.x.to_double();
   const double y = p_m.y.to_double();
@@ -226,10 +331,9 @@ det::Real GalaxyDensity::stars(const Dir3& p_m) const {
   double density = 0.0;
 
   if (rho_disc_ > 0.0) {
-    const double radius_plane = std::sqrt(r2_plane);
-    const double radial = det::fast_exp(Real(-radius_plane * inv_disc_length_)).to_double();
     // One exponential feeds both discs: e_thin = e_thick^k (k = 3 or 4,
-    // enforced at parameter time).
+    // enforced at parameter time); the planar factor (radial falloff,
+    // arms, clumps) is shared with disc_column_mass.
     const double e_thick = det::fast_exp(Real(-abs_z * inv_thick_height_)).to_double();
     double e_thin = e_thick * e_thick * e_thick;
     if (thick_ratio_ == 4) {
@@ -237,46 +341,9 @@ det::Real GalaxyDensity::stars(const Dir3& p_m) const {
     }
     const double thin_plus = 1.0 + e_thin;
     const double thick_plus = 1.0 + e_thick;
-    double disc = rho_disc_ * radial * 4.0 * e_thin / (thin_plus * thin_plus) +
-                  rho_thick_ * radial * 4.0 * e_thick / (thick_plus * thick_plus);
-    if (arm_amp_ > 0.0 && radius_plane > 1.0) {
-      // 1 + A*cos(m*phi - b*ln(R/R0)): cos(m*phi) by Chebyshev recurrence
-      // from (x/R, y/R) — no atan2 in the hot path.
-      const double inv_r = 1.0 / radius_plane;
-      const double cos1 = x * inv_r;
-      const double sin1 = y * inv_r;
-      double cm = cos1;
-      double sm = sin1;
-      for (int i = 1; i < params_.arm_count; ++i) {
-        const double c_next = cm * cos1 - sm * sin1;
-        sm = sm * cos1 + cm * sin1;
-        cm = c_next;
-      }
-      const double ln_r = det::fast_log(Real(radius_plane * inv_arm_r0_)).to_double();
-      double sb;
-      double cb;
-      wave_sin_cos(arm_b_ * ln_r * 0.15915494309189535, &sb, &cb);
-      const double phase_cos = cm * cb + sm * sb;
-      // Radial envelope: arms fade into the bulge and off the disc edge.
-      const double rg = radius_m_.to_double();
-      double envelope = (radius_plane - bulge_r0_) / (0.6 * bulge_r0_);
-      envelope = envelope < 0.0 ? 0.0 : (envelope > 1.0 ? 1.0 : envelope);
-      double outer = (rg - radius_plane) / (0.35 * rg);
-      outer = outer < 0.0 ? 0.0 : (outer > 1.0 ? 1.0 : outer);
-      disc *= 1.0 + arm_amp_ * envelope * outer * phase_cos;
-    }
-    if (clump_amp_ >= 0.5) {
-      // Irregulars: lumpy modulation instead of coherent structure.
-      const double freq = 6.0 / radius_m_.to_double();
-      const Real noise = world::gradient_noise3(clump_lattice_, Real(x * freq),
-                                                Real(y * freq), Real(z * freq));
-      double factor = 1.0 + clump_amp_ * noise.to_double();
-      if (factor < 0.05) {
-        factor = 0.05;
-      }
-      disc *= factor;
-    }
-    density += disc;
+    const double vertical = rho_disc_ * 4.0 * e_thin / (thin_plus * thin_plus) +
+                            rho_thick_ * 4.0 * e_thick / (thick_plus * thick_plus);
+    density += vertical * disc_plane_factor(x, y, z);
   }
 
   // Bulge / elliptical body (z stretched by the ellipticity axis ratio).
@@ -284,7 +351,8 @@ det::Real GalaxyDensity::stars(const Dir3& p_m) const {
   const double r_bulge_sq = r2_plane + zb * zb;
   const double q_sq = r_bulge_sq * inv_bulge_core_ * inv_bulge_core_;
   if (q_sq < 28.0) {  // beyond ~5.3 core radii the Gaussian is < 1e-12
-    const double q = std::sqrt(q_sq) + 1.0e-9;
+    double q = std::sqrt(q_sq);
+    q = q < 0.05 ? 0.05 : q;  // cored profile — see spheroid()
     density += rho_bulge_ * (1.0 / q) * det::fast_exp(Real(-q_sq)).to_double();
     // Faint halo (globular placement): ~r^-3.5 with an inner cutoff.
     density += rho_bulge_ * 2.0e-4 / (q_sq * q * std::sqrt(q) + 1.0);

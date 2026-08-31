@@ -41,12 +41,20 @@ NodeSpec galaxy_spec(const core::Key&, const core::tree::Node*) {
   AxisDesc systems;
   systems.name = name::SystemsAxis;
   systems.child_kind = kind::System;
-  // Octree per the design; interface-stubbed as an indexed list until the
-  // galaxy population layer exists (T0011).
+  // Real octree cells (T0017 WP3): (x, y, z, level) with the level in
+  // cell.w, level 0 the root cube. Cell (0,0,0,0) stays the DEFAULT
+  // (home) system — its key predates the octree and must not move. True
+  // occupancy is GalaxyOctree's density-driven draw; like the planet
+  // slots, the axis only bounds the coordinate space and callers hold
+  // the occupancy contract.
   systems.topo = Topology::Octree;
-  systems.count = [](const core::tree::Node&, const core::Key&) { return std::uint64_t{1}; };
   systems.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
-    return cell.x == 0 && cell.y == 0 && cell.z == 0 && cell.w == 0;
+    if (cell.w < 0 || cell.w > 18) {
+      return false;
+    }
+    const std::int64_t extent = std::int64_t{1} << cell.w;
+    return cell.x >= 0 && cell.x < extent && cell.y >= 0 && cell.y < extent &&
+           cell.z >= 0 && cell.z < extent;
   };
   spec.axes = {systems};
   return spec;

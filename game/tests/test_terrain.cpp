@@ -278,3 +278,76 @@ TEST_CASE("terrain: measured land fraction tracks the solved sea level (WP1)") {
     CHECK(std::abs(land / total - planet.land_fraction.to_double()) < 0.06);
   }
 }
+
+TEST_CASE("features: craters are bounded, continuous and free for EarthLike (WP5)") {
+  const gen::BodyHandle body = body_for(0x83);
+
+  SUBCASE("EarthLike hosts no features and pays no cost") {
+    const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::EarthLike);
+    const gen::TerrainField field(body.entity, planet);
+    CHECK(!field.features().enabled());
+    CHECK(field.features()
+              .height_offset_m(gen::Dir3{Real(1.0), Real(0.0), Real(0.0)})
+              .to_double() == 0.0);
+  }
+
+  SUBCASE("Barren craters respect the stencil invariant and the count cap") {
+    const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::Barren);
+    const gen::TerrainField field(body.entity, planet);
+    const gen::FeatureField& features = field.features();
+    REQUIRE(features.enabled());
+    const double n = features.cells_per_face();
+    int total = 0;
+    for (std::uint32_t ci = 0; ci < features.cells_per_face(); ci += 3) {
+      for (std::uint32_t cj = 0; cj < features.cells_per_face(); cj += 3) {
+        const auto cell = features.cell_craters(gen::CellId{2, ci, cj});
+        REQUIRE(cell.count <= gen::FeatureField::kMaxPerCell);
+        for (int i = 0; i < cell.count; ++i) {
+          // 2.5x the bowl (the ejecta reach) must stay inside the probe
+          // stencil's guaranteed coverage of 1.0 cell chords.
+          CHECK(cell.craters[i].bowl_chord.to_double() * 2.5 <= 1.0 * 2.0 / n);
+          CHECK(cell.craters[i].depth_m.to_double() > 0.0);
+          ++total;
+        }
+      }
+    }
+    CHECK(total > 0);  // an airless world is not pristine
+  }
+
+  SUBCASE("crater profile is continuous and cache-independent") {
+    const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::Barren);
+    const gen::TerrainField field(body.entity, planet);
+    const gen::FeatureField& features = field.features();
+    // Find some crater and walk a transect across it (the transect crosses
+    // feature-cell boundaries: rims must not tear at seams).
+    for (std::uint32_t ci = 0; ci < features.cells_per_face(); ++ci) {
+      const auto cell = features.cell_craters(gen::CellId{0, ci, ci});
+      if (cell.count == 0) continue;
+      const auto& crater = cell.craters[0];
+      gen::Dir3 t1{}, t2{};
+      gen::tangent_basis(crater.center, &t1, &t2);
+      const double reach = crater.bowl_chord.to_double() * 3.0;
+      const double step_m = reach * planet.radius_m.to_double() / 100.0;
+      gen::FeatureField::Cache cache;
+      double prev = 0.0;
+      for (int s = -100; s <= 100; ++s) {
+        const Real o(reach * s / 100.0);
+        const gen::Dir3 p = gen::normalize(gen::Dir3{crater.center.x + t1.x * o,
+                                                     crater.center.y + t1.y * o,
+                                                     crater.center.z + t1.z * o});
+        const double cached = features.height_offset_m(p, &cache).to_double();
+        const double uncached = features.height_offset_m(p).to_double();
+        CHECK(cached == uncached);  // bit-identical with or without memo
+        if (s > -100) {
+          // C0: between samples the offset moves at most a bounded slope
+          // (bowl wall ~depth per 0.2 bowl radii) — no seam tears.
+          CHECK(std::abs(cached - prev) <
+                crater.depth_m.to_double() * 0.12 + step_m * 2.0);
+        }
+        prev = cached;
+      }
+      return;
+    }
+    FAIL("no crater found on the face-0 diagonal");
+  }
+}

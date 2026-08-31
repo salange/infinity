@@ -30,6 +30,7 @@ inline constexpr core::NameId BeltsV1{0x067c9da641973dd1ULL};         // "belts/
 inline constexpr core::NameId MultistarV1{0x505708ce7508c26bULL};     // "multistar/v1"
 inline constexpr core::NameId MacroV1{0x44fd8a3c80c8f6b1ULL};         // "macro/v1"
 inline constexpr core::NameId TerrainV2{0x48d3cb3103db7f17ULL};       // "terrain/v2"
+inline constexpr core::NameId FeaturesV1{0x3dbb2eed252570fbULL};      // "features/v1"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -50,6 +51,7 @@ inline constexpr core::KindId Cluster{11};
 inline constexpr core::KindId Star{12};
 inline constexpr core::KindId Belt{13};
 inline constexpr core::KindId Barycenter{14};
+inline constexpr core::KindId Feature{15};
 }  // namespace kind
 
 namespace channel {
@@ -84,6 +86,7 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"multistar/v1", name::MultistarV1},
     {"macro/v1", name::MacroV1},
     {"terrain/v2", name::TerrainV2},
+    {"features/v1", name::FeaturesV1},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

@@ -256,8 +256,8 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
   anchor->keys = inf::gen::body_for_slot(seed, slot);
   anchor->planet =
       forced.has_value()
-          ? inf::gen::derive_planet_params(anchor->keys.params, forced)
-          : inf::gen::planet_params_for_slot(system, slot, anchor->keys.params);
+          ? inf::gen::derive_planet_params(anchor->keys, forced)
+          : inf::gen::planet_params_for_slot(system, slot, anchor->keys);
   anchor->radius = anchor->planet.radius_m.to_double();
 
   anchor->diff_path = diff_override != nullptr

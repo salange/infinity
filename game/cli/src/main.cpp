@@ -30,6 +30,10 @@ int print_usage() {
       "                       print planet params + province table as JSON\n"
       "  province-map --seed <hex128> [--type <T>] [--out <prefix>]\n"
       "                       write equirect province/relief PNGs\n"
+      "  terrain-map --seed <hex128> [--type <T>] [--out <prefix>]\n"
+      "                       write an equirect land/ocean elevation PNG\n"
+      "  macro-stats [--seeds N]\n"
+      "                       land-fraction + pattern report across seeds\n"
       "  (types: EarthLike|Barren|Desert|Ice)\n");
   return 2;
 }
@@ -128,7 +132,18 @@ int main(int argc, char** argv) {
     return inf::cli::cmd_dump_system(*seed, start_ns, span_ns, steps);
   }
 
-  if (std::strcmp(argv[1], "dump-planet") == 0 || std::strcmp(argv[1], "province-map") == 0) {
+  if (std::strcmp(argv[1], "macro-stats") == 0) {
+    int seeds = 100;
+    for (int i = 2; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--seeds") == 0 && i + 1 < argc) {
+        seeds = std::atoi(argv[++i]);
+      }
+    }
+    return inf::cli::cmd_macro_stats(seeds);
+  }
+
+  if (std::strcmp(argv[1], "dump-planet") == 0 || std::strcmp(argv[1], "province-map") == 0 ||
+      std::strcmp(argv[1], "terrain-map") == 0) {
     const char* seed_text = nullptr;
     const char* type_text = nullptr;
     const char* out_prefix = "planet";
@@ -152,6 +167,9 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "dump-planet") == 0) {
       return inf::cli::cmd_dump_planet(*seed, type_text);
+    }
+    if (std::strcmp(argv[1], "terrain-map") == 0) {
+      return inf::cli::cmd_terrain_map(*seed, type_text, out_prefix);
     }
     return inf::cli::cmd_province_map(*seed, type_text, out_prefix);
   }

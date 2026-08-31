@@ -10,6 +10,7 @@ endif()
 configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/gen/version.hpp @ONLY)
 
 add_library(game_gen STATIC
+  src/macro.cpp
   src/planet.cpp
   src/provinces.cpp
   src/terrain.cpp

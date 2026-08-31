@@ -34,7 +34,7 @@ std::string hash_edits_report() {
   std::string report = "# effective-density goldens (M7 scripted edit sequence)\n";
   const core::Seed128 seed{0, 7};
   const BodyHandle body = default_body(seed);
-  const PlanetParams planet = derive_planet_params(body.params, PlanetType::Barren);
+  const PlanetParams planet = derive_planet_params(body, PlanetType::Barren);
   const TerrainField field(body.entity, planet);
 
   // Fixed unit direction (normalized in doubles — reproducible bits).

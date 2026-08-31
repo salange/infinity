@@ -99,7 +99,7 @@ double coverage_error(const std::vector<Segment>& a, const std::vector<Segment>&
 
 TEST_CASE("transvoxel: fine/coarse seam traces coincide (crack-free)") {
   const gen::BodyHandle body = body_for(0xBEEF);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::TerrainField field(body.entity, planet);
 
   // Shared boundary: face 0, plane u = 0. Fine column (lod 8, i = 127)

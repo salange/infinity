@@ -12,8 +12,11 @@ namespace inf::gen {
 using det::Real;
 
 TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet)
-    : planet_(planet), provinces_(body_key, planet) {
-  const core::Key terrain_key = core::derive_named(body_key, name::TerrainV1);
+    : planet_(planet), provinces_(body_key, planet), macro_(body_key) {
+  // terrain/v2 (T0015 WP1): the layer name is bumped because the output
+  // now composes macro/v1 — per the seeding spec's versioning rule, a
+  // behaviour change is a NEW name, never a silent redefinition.
+  const core::Key terrain_key = core::derive_named(body_key, name::TerrainV2);
   elevation_lattice_ = core::lattice_key(terrain_key, channel::Lattice);
   detail_lattice_ = det::mix64(elevation_lattice_ ^ 0xD3A11E77E44A1EB5ULL);
 }
@@ -25,7 +28,7 @@ Real TerrainField::elevation_m(const Dir3& unit_dir) const {
   params.base_elevation_m = canonical.base_elevation_m;
   params.ruggedness = canonical.ruggedness;
   params.carving = canonical.carving;
-  return elevation_from_params(unit_dir, params);
+  return elevation_from_params(unit_dir, params, canonical.macro_rel);
 }
 
 TerrainField::CanonicalParams TerrainField::param_lattice_value(std::uint8_t face,
@@ -37,7 +40,7 @@ TerrainField::CanonicalParams TerrainField::param_lattice_value(std::uint8_t fac
   const Dir3 dir = face_uv_to_dir(FaceUV{face, u, v});
   const BlendedParams blended = provinces_.sample(dir);
   return CanonicalParams{blended.relief_amplitude_m, blended.base_elevation_m,
-                         blended.ruggedness, blended.carving};
+                         blended.ruggedness, blended.carving, Real(0.0)};
 }
 
 TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_uv,
@@ -48,12 +51,12 @@ TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_
     }
     const std::uint64_t key = (static_cast<std::uint64_t>(face_uv.face) << 40U) |
                               (static_cast<std::uint64_t>(ci) << 20U) | cj;
-    const auto it = cache->find(key);
-    if (it != cache->end()) {
+    const auto it = cache->params.find(key);
+    if (it != cache->params.end()) {
       return it->second;
     }
     const CanonicalParams value = param_lattice_value(face_uv.face, ci, cj);
-    cache->emplace(key, value);
+    cache->params.emplace(key, value);
     return value;
   };
   const auto cells = static_cast<double>(kParamLatticeCells);
@@ -83,7 +86,9 @@ TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_
   return CanonicalParams{bilerp(&CanonicalParams::relief_amplitude_m),
                          bilerp(&CanonicalParams::base_elevation_m),
                          bilerp(&CanonicalParams::ruggedness),
-                         bilerp(&CanonicalParams::carving)};
+                         bilerp(&CanonicalParams::carving),
+                         macro_.canonical_value(face_uv, cache != nullptr ? &cache->macro
+                                                                          : nullptr)};
 }
 
 namespace {
@@ -115,12 +120,27 @@ NoiseControls noise_controls(const BlendedParams& params, std::uint32_t cells_pe
 
 Real TerrainField::elevation_from_params(const Dir3& unit_dir,
                                          const BlendedParams& params) const {
+  return elevation_from_params(unit_dir, params,
+                               macro_.canonical_value(dir_to_face_uv(unit_dir)));
+}
+
+Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
+                                         Real macro_rel) const {
   const NoiseControls controls = noise_controls(params, provinces_.cells_per_face());
   const Real noise = warped_fbm3(elevation_lattice_, unit_dir.x * controls.frequency,
                                  unit_dir.y * controls.frequency,
                                  unit_dir.z * controls.frequency, controls.fbm,
                                  controls.warp);
-  return params.base_elevation_m + noise * params.relief_amplitude_m;
+  // Composition (brief section 4.5): macro carries the continents; the
+  // province fBm rides on top, ATTENUATED in ocean basins (abyssal
+  // plains are smooth) and at full strength from the shelf upward.
+  const Real macro_m = macro_rel * planet_.macro_amplitude_m;
+  const Real above_sea = macro_m - planet_.sea_level_m;
+  const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
+  const Real smooth = t * t * (Real(3.0) - (t + t));
+  const Real attenuation = Real(0.15) + Real(0.85) * smooth;
+  return macro_m +
+         attenuation * (params.base_elevation_m + noise * params.relief_amplitude_m);
 }
 
 TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_dir) const {
@@ -136,12 +156,25 @@ TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_d
       elevation_lattice_, unit_dir.x * controls.frequency, unit_dir.y * controls.frequency,
       unit_dir.z * controls.frequency, controls.fbm, controls.warp);
 
+  // Compose exactly like elevation_from_params with macro/params frozen —
+  // the gradient covers the noise term (macro and the province fields
+  // vary on multi-km scales and are treated as locally constant).
+  const Real macro_m = canonical.macro_rel * planet_.macro_amplitude_m;
+  const Real above_sea = macro_m - planet_.sea_level_m;
+  const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
+  const Real smooth = t * t * (Real(3.0) - (t + t));
+  const Real attenuation = Real(0.15) + Real(0.85) * smooth;
+
   ElevationD out;
-  out.elevation_m = params.base_elevation_m + noise.value * params.relief_amplitude_m;
-  // d h/d dir picks up the noise-domain frequency and the amplitude; the
-  // tangent projection removes the radial component, and dividing by the
-  // radius converts "per unit direction" into metres per metre walked.
-  const Real k = params.relief_amplitude_m * controls.frequency / planet_.radius_m;
+  out.elevation_m =
+      macro_m +
+      attenuation * (params.base_elevation_m + noise.value * params.relief_amplitude_m);
+  // d h/d dir picks up the noise-domain frequency, the amplitude, and the
+  // basin attenuation; the tangent projection removes the radial
+  // component, and dividing by the radius converts "per unit direction"
+  // into metres per metre walked.
+  const Real k =
+      attenuation * params.relief_amplitude_m * controls.frequency / planet_.radius_m;
   const Dir3 gradient{noise.dx * k, noise.dy * k, noise.dz * k};
   const Real radial = dot(gradient, unit_dir);
   out.slope = Dir3{gradient.x - unit_dir.x * radial, gradient.y - unit_dir.y * radial,
@@ -232,7 +265,9 @@ std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid,
       params.base_elevation_m = canonical.base_elevation_m;
       params.ruggedness = canonical.ruggedness;
       params.carving = canonical.carving;
-      const Real surface_r = field.planet().radius_m + field.elevation_from_params(dir, params);
+      const Real surface_r =
+          field.planet().radius_m +
+          field.elevation_from_params(dir, params, canonical.macro_rel);
 
       for (int gz = lo; gz <= hi; ++gz) {
         const Real fz(static_cast<double>(gz) / ChunkGrid::kVoxels);

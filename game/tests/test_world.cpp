@@ -52,7 +52,7 @@ std::map<std::string, std::uint64_t> load_all(world::ChunkManager& manager, doub
 
 TEST_CASE("chunk manager: output independent of worker count") {
   const gen::BodyHandle body = body_for(99);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const double radius = planet.radius_m.to_double();
 
   world::ChunkManagerConfig config_a;
@@ -76,7 +76,7 @@ TEST_CASE("chunk manager: output independent of worker count") {
 
 TEST_CASE("chunk manager: closer camera yields finer chunks; eviction respects budget") {
   const gen::BodyHandle body = body_for(7);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::Barren);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::Barren);
   const double radius = planet.radius_m.to_double();
 
   world::ChunkManagerConfig config;
@@ -107,7 +107,7 @@ TEST_CASE("chunk manager: closer camera yields finer chunks; eviction respects b
 
 TEST_CASE("chunk manager: scene hash is a pure function") {
   const gen::BodyHandle body = body_for(3);
-  const gen::PlanetParams planet = gen::derive_planet_params(body.params, gen::PlanetType::Ice);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, gen::PlanetType::Ice);
   world::ChunkManagerConfig config;
   config.worker_count = 2;
   const gen::TerrainField field(body.entity, planet);

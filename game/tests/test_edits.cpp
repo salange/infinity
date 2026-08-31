@@ -39,7 +39,7 @@ struct Ground {
 
   explicit Ground(std::uint64_t lo)
       : body(gen::default_body(core::Seed128{0, lo})),
-        planet(gen::derive_planet_params(body.params, gen::PlanetType::Barren)),
+        planet(gen::derive_planet_params(body, gen::PlanetType::Barren)),
         field(body.entity, planet) {
     const double raw[3] = {0.45, 0.65, 0.61};
     const double len = std::sqrt(raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]);

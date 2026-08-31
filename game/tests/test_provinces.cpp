@@ -28,7 +28,7 @@ gen::Dir3 lerp_dir(const gen::Dir3& a, const gen::Dir3& b, double t) {
 TEST_CASE("provinces: cell params deterministic and within archetype ranges") {
   const gen::BodyHandle body = body_for(11);
   const gen::PlanetParams planet =
-      gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+      gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::ProvinceField field(body.entity, planet);
 
   for (const gen::CellId& cell : field.all_cells()) {
@@ -48,7 +48,7 @@ TEST_CASE("provinces: cell params deterministic and within archetype ranges") {
 TEST_CASE("provinces: blended field is continuous across cube edges and corners") {
   const gen::BodyHandle body = body_for(23);
   const gen::PlanetParams planet =
-      gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+      gen::derive_planet_params(body, gen::PlanetType::EarthLike);
   const gen::ProvinceField field(body.entity, planet);
 
   // Paths crossing all 12 cube edges + through 2 corners. Each path is a
@@ -99,7 +99,7 @@ TEST_CASE("provinces: EarthLike shows >=3 distinct archetypes (100 seeds)") {
   for (std::uint64_t seed = 0; seed < 100; ++seed) {
     const gen::BodyHandle body = body_for(seed);
     const gen::PlanetParams planet =
-        gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+        gen::derive_planet_params(body, gen::PlanetType::EarthLike);
     const gen::ProvinceField field(body.entity, planet);
     std::set<gen::Archetype> archetypes;
     for (const gen::CellId& cell : field.all_cells()) {
@@ -116,7 +116,7 @@ TEST_CASE("provinces: type tables produce type-correct archetypes") {
   const gen::BodyHandle body = body_for(5);
   for (std::uint32_t type_index = 0; type_index < 4; ++type_index) {
     const auto type = static_cast<gen::PlanetType>(type_index);
-    const gen::PlanetParams planet = gen::derive_planet_params(body.params, type);
+    const gen::PlanetParams planet = gen::derive_planet_params(body, type);
     const gen::ProvinceField field(body.entity, planet);
     for (const gen::CellId& cell : field.all_cells()) {
       const auto value = static_cast<std::uint8_t>(field.cell_params(cell).archetype);

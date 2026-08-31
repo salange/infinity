@@ -7,6 +7,7 @@
 #include "core/key.hpp"
 #include "core/time/world_time.hpp"
 #include "gen/planet.hpp"
+#include "gen/universe.hpp"
 
 namespace inf::gen {
 
@@ -82,7 +83,7 @@ int default_landable_slot(const StarSystemParams& system);
 // atmosphere come from the system layer; the remaining cosmetic draws
 // come from the planet node's params key (two-seed rule).
 PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
-                                    const core::Key& planet_params_key);
+                                    const BodyHandle& body);
 
 // Procedural display name for a body, pure function of its entity key
 // (map-mode info card; design/map-mode.md section 3).

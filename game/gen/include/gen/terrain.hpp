@@ -25,8 +25,15 @@ class TerrainField {
   // Blends province parameters and shapes fBm by them.
   det::Real elevation_m(const Dir3& unit_dir) const;
 
-  // Elevation with explicit (pre-blended) province parameters.
+  // Elevation with explicit (pre-blended) province parameters; the
+  // canonical macro value is fetched internally.
   det::Real elevation_from_params(const Dir3& unit_dir, const BlendedParams& params) const;
+  // Same with a FROZEN macro value (chunk sampling passes the canonical
+  // per-column value; tests freeze it for differencing).
+  det::Real elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
+                                  det::Real macro_rel) const;
+
+  const MacroField& macro() const { return macro_; }
 
   // Elevation plus the SURFACE-TANGENT gradient (terrain-stack v2 WP0):
   // the 3D noise gradient projected onto the tangent plane at unit_dir
@@ -54,15 +61,22 @@ class TerrainField {
     det::Real base_elevation_m;
     det::Real ruggedness;
     det::Real carving;
+    // Canonical macro/v1 value (dimensionless, own lod-7 lattice).
+    det::Real macro_rel;
   };
 
   // True blended sample at one lattice corner (ci, cj in [0, cells]).
+  // Province scalars only — macro rides its own (finer) lattice.
   CanonicalParams param_lattice_value(std::uint8_t face, std::uint32_t ci,
                                       std::uint32_t cj) const;
-  // Bilinear canonical parameters at a face-uv position. The optional
-  // cache memoizes lattice-corner samples (per-chunk sampling); the
-  // arithmetic is identical with or without it.
-  using ParamCache = std::unordered_map<std::uint64_t, CanonicalParams>;
+  // Bilinear canonical parameters at a face-uv position (province lattice
+  // + the macro lattice). The optional cache memoizes lattice-corner
+  // samples (per-chunk sampling); the arithmetic is identical with or
+  // without it.
+  struct ParamCache {
+    std::unordered_map<std::uint64_t, CanonicalParams> params;
+    MacroField::Cache macro;
+  };
   CanonicalParams canonical_params(const FaceUV& face_uv, ParamCache* cache = nullptr) const;
 
   // 3D detail term at a planet-local position (meters).
@@ -84,6 +98,7 @@ class TerrainField {
  private:
   PlanetParams planet_;
   ProvinceField provinces_;
+  MacroField macro_;
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;
 };

@@ -378,7 +378,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let tv = normalize(av - dir * dot(av, dir));
     var n = normalize(dir - tu * ((hx1 - hx0) * u.extra.y) -
                       tv * ((hy1 - hy0) * u.extra.y));
-    let light = normalize(frame.sun_dir.xyz);
+    // Per-item light: aux.xyz = body->star unit direction (a sibling
+    // planet is NOT lit from the anchor's sun direction).
+    let light = normalize(u.aux.xyz);
     let ndl = max(dot(n, light), 0.0);
     let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
     // Two-scale modulation in the planet-local frame, like the terrain

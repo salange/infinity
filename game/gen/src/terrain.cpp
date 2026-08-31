@@ -15,7 +15,7 @@ using det::Real;
 TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet)
     : planet_(planet), provinces_(body_key, planet), macro_(body_key),
       material_(body_key, planet), features_(body_key, planet),
-      caves_(body_key, planet) {
+      caves_(body_key, planet), drainage_(body_key, planet) {
   // terrain/v2 (T0015 WP1): the layer name is bumped because the output
   // now composes macro/v1 — per the seeding spec's versioning rule, a
   // behaviour change is a NEW name, never a silent redefinition.
@@ -246,6 +246,13 @@ Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams&
     const Real groove = (Real(0.5) + Real(0.5) * wave);
     const Real cut = groove * groove * groove;
     height = height - cut * window * params.carving * Real(26.0);
+  }
+
+  // --- drainage/v1 (T0015 WP6): valley carve toward the river network.
+  // Direction-only, like everything above; the carve clamps itself so a
+  // valley floor never dips below ~3 m over the sea.
+  if (drainage_.enabled()) {
+    height = height - drainage_.carve_m(unit_dir, height - planet_.sea_level_m);
   }
 
   // --- features/v1 (T0015 WP5): bounded surface entities, craters first.

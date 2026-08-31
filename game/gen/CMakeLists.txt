@@ -11,6 +11,7 @@ configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/gen/version.
 
 add_library(game_gen STATIC
   src/caves.cpp
+  src/drainage.cpp
   src/features.cpp
   src/macro.cpp
   src/material.cpp

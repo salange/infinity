@@ -32,6 +32,7 @@ inline constexpr core::NameId MacroV1{0x44fd8a3c80c8f6b1ULL};         // "macro/
 inline constexpr core::NameId TerrainV2{0x48d3cb3103db7f17ULL};       // "terrain/v2"
 inline constexpr core::NameId FeaturesV1{0x3dbb2eed252570fbULL};      // "features/v1"
 inline constexpr core::NameId CavesV1{0x637ade26b9efa0daULL};         // "caves/v1"
+inline constexpr core::NameId DrainageV1{0x6bdc9ecba8d08bebULL};      // "drainage/v1"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -90,6 +91,7 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"terrain/v2", name::TerrainV2},
     {"features/v1", name::FeaturesV1},
     {"caves/v1", name::CavesV1},
+    {"drainage/v1", name::DrainageV1},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

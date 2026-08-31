@@ -6,7 +6,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -22,6 +24,7 @@
 #include "core/time/world_clock.hpp"
 #include "gen/planet.hpp"
 #include "gen/system.hpp"
+#include "gen/planet_texture.hpp"
 #include "gen/terrain.hpp"
 #include "gen/terrain_sampler.hpp"
 #include "gen/universe.hpp"
@@ -713,6 +716,7 @@ int main(int argc, char** argv) {
   double script_wait = 0.0;
   bool script_thrust = false;
   bool script_land = false;
+  bool script_map = false;  // scripted M press (map captures)
 
   // --- map mode state (T0013, design/map-mode.md) -----------------------
   enum class MapPhase { Off, Entering, On, Exiting };
@@ -844,9 +848,108 @@ int main(int argc, char** argv) {
   std::vector<float> mat_scratch;
   std::vector<inf::render::Rhi::DrawItem> items;
 
+  // --- far-view planet textures (T0016) --------------------------------
+  // A background worker bakes one (height, albedo) cube-map pair per
+  // system body from the live generators; the main loop uploads finished
+  // bakes and swaps the flat draw_ball spheres for displaced, textured
+  // impostors. Pure cosmetic cache of a pure function: nothing here may
+  // ever feed collision or gameplay, and nothing is persisted.
+  struct BodyTexture {
+    std::uint32_t handle{0};
+    float amp_over_radius{0.0f};
+    float slope_scale{0.0f};
+  };
+  const auto body_tex_key = [](int slot, int moon) {
+    return static_cast<std::uint32_t>(moon < 0 ? slot : 0x1000 + slot * 32 + moon);
+  };
+  std::unordered_map<std::uint32_t, BodyTexture> body_textures;
+  struct BakeResult {
+    std::uint32_t key{0};
+    double radius_m{0.0};
+    inf::gen::PlanetTexture texture;
+  };
+  std::mutex bake_mutex;
+  std::vector<BakeResult> bake_done;
+  std::atomic<bool> bake_quit{false};
+  std::thread bake_thread([&bake_mutex, &bake_done, &bake_quit, &body_tex_key,
+                           seed_copy = *seed, system_copy = system]() {
+    struct Job {
+      int slot;
+      int moon;  // -1 = the planet itself
+      std::uint32_t size;
+    };
+    std::vector<Job> jobs;
+    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+      const auto& entry = system_copy.planets[static_cast<std::size_t>(slot)];
+      if (!entry.occupied) {
+        continue;
+      }
+      // Giants get a coarse map only: their parameter lattice is ~200 km
+      // per cell, so extra texels buy nothing yet (T0015 section 13).
+      const bool giant = entry.phys.radius_m.to_double() > 2.0e6;
+      jobs.push_back({slot, -1, giant ? 128U : 256U});
+    }
+    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+      const auto& entry = system_copy.planets[static_cast<std::size_t>(slot)];
+      for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
+        jobs.push_back({slot, static_cast<int>(mi), 192U});
+      }
+    }
+    for (const Job& job : jobs) {
+      if (bake_quit.load()) {
+        return;
+      }
+      BakeResult result;
+      result.key = body_tex_key(job.slot, job.moon);
+      if (job.moon < 0) {
+        const inf::gen::BodyHandle body = inf::gen::body_for_slot(seed_copy, job.slot);
+        const inf::gen::PlanetParams planet =
+            inf::gen::planet_params_for_slot(system_copy, job.slot, body);
+        const inf::gen::TerrainField field(body.entity, planet);
+        result.radius_m = planet.radius_m.to_double();
+        result.texture = inf::gen::bake_planet_texture(field, job.size);
+      } else {
+        const inf::gen::BodyHandle body =
+            inf::gen::body_for_moon(seed_copy, job.slot, job.moon);
+        const inf::gen::PlanetParams planet =
+            inf::gen::planet_params_for_moon(system_copy, job.slot, job.moon, body);
+        const inf::gen::TerrainField field(body.entity, planet);
+        result.radius_m = planet.radius_m.to_double();
+        result.texture = inf::gen::bake_planet_texture(field, job.size);
+      }
+      const std::lock_guard<std::mutex> lock(bake_mutex);
+      bake_done.push_back(std::move(result));
+    }
+  });
+  const auto upload_finished_bakes = [&] {
+    std::vector<BakeResult> ready;
+    {
+      const std::lock_guard<std::mutex> lock(bake_mutex);
+      ready.swap(bake_done);
+    }
+    for (BakeResult& result : ready) {
+      const std::uint32_t handle =
+          rhi->create_planet_texture(result.texture.face_size);
+      for (std::uint32_t face = 0; face < 6; ++face) {
+        rhi->update_planet_face(handle, face,
+                                result.texture.faces[face].height_half.data(),
+                                result.texture.faces[face].rgba.data());
+      }
+      BodyTexture entry;
+      entry.handle = handle;
+      entry.amp_over_radius = static_cast<float>(
+          static_cast<double>(result.texture.height_amp_m) / result.radius_m);
+      entry.slope_scale = static_cast<float>(
+          static_cast<double>(result.texture.height_amp_m) *
+          static_cast<double>(result.texture.face_size) / (3.1415926 * result.radius_m));
+      body_textures[result.key] = entry;
+    }
+  };
+
   long frame = 0;
   while (glfwWindowShouldClose(window) == GLFW_FALSE) {
     glfwPollEvents();
+    upload_finished_bakes();
     // Quit (design/map-mode.md section 5): Cmd+Q/Cmd+W on macOS, Ctrl+Q
     // elsewhere — never bare W. The diff overlay flushes on the normal
     // shutdown path below.
@@ -1158,8 +1261,21 @@ int main(int argc, char** argv) {
             aim_at(inf::sim::normalize(moon.pos - player.position()));
           }
         }
+      } else if (cmd.op == "posmoonsun" && cmd.args.size() >= 3) {
+        // Like posmoon, but on the moon's SUNWARD side (day-side
+        // captures; moons move too fast for precomputed positions).
+        for (const MoonInstance& moon : moons_local) {
+          if (moon.slot == static_cast<int>(arg_d(0)) &&
+              moon.index == static_cast<int>(arg_d(1))) {
+            const SVec3 to_sun = inf::sim::normalize(star_local - moon.pos);
+            player.set_position(moon.pos + to_sun * (moon.radius + arg_d(2)));
+            aim_at(inf::sim::normalize(moon.pos - player.position()));
+          }
+        }
       } else if (cmd.op == "land") {
         script_land = true;
+      } else if (cmd.op == "map") {
+        script_map = true;
       } else if (cmd.op == "aim" && !cmd.args.empty()) {
         if (cmd.args[0] == "sun") {
           aim_at(inf::sim::normalize(star_local - player.position()));
@@ -1196,7 +1312,9 @@ int main(int argc, char** argv) {
 
     // --- map mode: enter / exit triggers ---------------------------------
     const bool m_down = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
-    const bool m_pressed = (m_down && !m_was_down) || (map_demo && frame == 100);
+    const bool m_pressed =
+        (m_down && !m_was_down) || (map_demo && frame == 100) || script_map;
+    script_map = false;
     const bool map_exit_scripted = map_demo && frame == 550;
     m_was_down = m_down;
     if (m_pressed && map_phase == MapPhase::Off) {
@@ -1499,7 +1617,7 @@ int main(int argc, char** argv) {
     if (map_phase == MapPhase::Off) {
       const double px_world = 2.0 * std::tan(kFovY * 0.5) / state.height;
       const auto draw_ball = [&](const SVec3& pos, double true_radius, double min_px,
-                                 float r, float g, float b) {
+                                 float r, float g, float b, std::uint32_t tex_key) {
         const double dist = inf::sim::length(pos - cam_pos_local);
         if (dist < true_radius * 1.05) {
           return;  // camera inside/at the body (the anchor renders as terrain)
@@ -1510,12 +1628,29 @@ int main(int argc, char** argv) {
             to_render(pos) - camera_pos);
         const Mat4 mvp = inf::render::mul(view_projection, model);
         inf::render::Rhi::DrawItem item;
-        item.mesh = body_mesh;
         std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
-        item.color[0] = r;
-        item.color[1] = g;
-        item.color[2] = b;
-        item.color[3] = 1.0f;
+        // Textured, displaced impostor once this body's bake landed
+        // (T0016); flat color ball until then.
+        const auto tex_it = body_textures.find(tex_key);
+        if (tex_it != body_textures.end()) {
+          item.mesh = impostor_mesh;
+          item.mode = 6;
+          item.planet_texture = tex_it->second.handle;
+          item.extra[0] = tex_it->second.amp_over_radius;
+          item.extra[1] = tex_it->second.slope_scale;
+          // The body's own sun direction (planet-local == system axes).
+          const SVec3 to_sun = inf::sim::normalize(
+              (stars_local.empty() ? SVec3{0.0, 0.0, 1.0e12} : stars_local[0].pos) - pos);
+          item.aux[0] = static_cast<float>(to_sun.x);
+          item.aux[1] = static_cast<float>(to_sun.y);
+          item.aux[2] = static_cast<float>(to_sun.z);
+        } else {
+          item.mesh = body_mesh;
+          item.color[0] = r;
+          item.color[1] = g;
+          item.color[2] = b;
+          item.color[3] = 1.0f;
+        }
         items.push_back(item);
       };
       for (const StarInstance& star : stars_local) {
@@ -1529,7 +1664,8 @@ int main(int argc, char** argv) {
         float color[3];
         slot_color(slot, color);
         draw_ball(planet_local[static_cast<std::size_t>(slot)],
-                  entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2]);
+                  entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2],
+                  body_tex_key(slot, -1));
       }
       // The static land impostor is ALWAYS drawn (map off): from orbit it
       // IS the planet (chunks hidden); nearer in it sits 300 m under the
@@ -1586,7 +1722,8 @@ int main(int argc, char** argv) {
       }
       for (const MoonInstance& moon : moons_local) {
         if (!moon.is_anchor) {
-          draw_ball(moon.pos, moon.radius, 2.0, 0.62f, 0.62f, 0.66f);
+          draw_ball(moon.pos, moon.radius, 2.0, 0.62f, 0.62f, 0.66f,
+                    body_tex_key(moon.slot, moon.index));
         }
       }
 
@@ -1967,8 +2104,25 @@ int main(int argc, char** argv) {
         item.color[1] = color[1];
         item.color[2] = color[2];
         item.color[3] = 1.0f;
+        // Map bodies share the far-view texture cache (T0016) — the same
+        // displaced impostor, just at the map's clamped size.
+        if (const auto tex_it = body_textures.find(body_tex_key(slot, -1));
+            tex_it != body_textures.end()) {
+          item.mesh = impostor_mesh;
+          item.mode = 6;
+          item.planet_texture = tex_it->second.handle;
+          item.color[3] = 0.0f;
+          item.extra[0] = tex_it->second.amp_over_radius;
+          item.extra[1] = tex_it->second.slope_scale;
+          const SVec3 to_sun = inf::sim::normalize(
+              (stars_local.empty() ? SVec3{0.0, 0.0, 1.0e12} : stars_local[0].pos) - pos);
+          item.aux[0] = static_cast<float>(to_sun.x);
+          item.aux[1] = static_cast<float>(to_sun.y);
+          item.aux[2] = static_cast<float>(to_sun.z);
+        }
         items.push_back(item);
-        for (const auto& moon : entry.moons) {
+        for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
+          const auto& moon = entry.moons[mi];
           const auto mv = inf::core::Ephemeris::evaluate(moon.orbit, now);
           const SVec3 mpos = pos + SVec3{mv.x.to_double(), mv.y.to_double(),
                                          mv.z.to_double()};
@@ -1986,6 +2140,22 @@ int main(int argc, char** argv) {
           mitem.color[1] = 0.62f;
           mitem.color[2] = 0.66f;
           mitem.color[3] = 1.0f;
+          if (const auto tex_it =
+                  body_textures.find(body_tex_key(slot, static_cast<int>(mi)));
+              tex_it != body_textures.end()) {
+            mitem.mesh = impostor_mesh;
+            mitem.mode = 6;
+            mitem.planet_texture = tex_it->second.handle;
+            mitem.color[3] = 0.0f;
+            mitem.extra[0] = tex_it->second.amp_over_radius;
+            mitem.extra[1] = tex_it->second.slope_scale;
+            const SVec3 to_sun = inf::sim::normalize(
+                (stars_local.empty() ? SVec3{0.0, 0.0, 1.0e12} : stars_local[0].pos) -
+                mpos);
+            mitem.aux[0] = static_cast<float>(to_sun.x);
+            mitem.aux[1] = static_cast<float>(to_sun.y);
+            mitem.aux[2] = static_cast<float>(to_sun.z);
+          }
           items.push_back(mitem);
         }
       }
@@ -2300,6 +2470,10 @@ int main(int argc, char** argv) {
     if (arc_meshes[static_cast<std::size_t>(slot)] != 0) {
       rhi->destroy_mesh(arc_meshes[static_cast<std::size_t>(slot)]);
     }
+  }
+  bake_quit.store(true);
+  if (bake_thread.joinable()) {
+    bake_thread.join();
   }
   }  // end HUD scope
 

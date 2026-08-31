@@ -310,8 +310,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   var color = base * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
   let fill = max(dot(n, -light), 0.0);
   color += base * fill * vec3<f32>(0.05, 0.07, 0.12);
-  let alpha = select(1.0, u.color.a, mode == 5u);
-  return vec4<f32>(aces(color), alpha);
+  if (mode == 5u) {
+    // Water: Fresnel-driven opacity (grazing water is opaque and dark
+    // blue — a constant alpha made shallow seas read as bare ground) and
+    // a sun glint. aux carries the camera-relative translation, so
+    // opos + aux is the fragment's camera-relative position.
+    let view = normalize(in.opos + u.aux.xyz);
+    let fresnel = pow(1.0 - abs(dot(n, view)), 3.0);
+    color = mix(color, vec3<f32>(0.05, 0.16, 0.30) * frame.sun_color.rgb, fresnel * 0.7);
+    let refl = reflect(light * -1.0, n);
+    let spec = pow(max(dot(refl, view * -1.0), 0.0), 90.0);
+    color += frame.sun_color.rgb * spec * (0.9 * ndl + 0.05);
+    let alpha_w = mix(u.color.a, 0.96, fresnel);
+    return vec4<f32>(aces(color), alpha_w);
+  }
+  return vec4<f32>(aces(color), 1.0);
 }
 )";
 

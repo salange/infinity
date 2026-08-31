@@ -151,3 +151,81 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
   CHECK(std::memcmp(mesh.vertices.data(), mesh2.vertices.data(),
                     mesh.vertices.size() * sizeof(float)) == 0);
 }
+
+TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
+  const gen::BodyHandle body = body_for(0x7E11);
+  const gen::PlanetParams planet =
+      gen::derive_planet_params(body.params, gen::PlanetType::EarthLike);
+  const gen::TerrainField field(body.entity, planet);
+  const double radius = planet.radius_m.to_double();
+
+  auto unit = [](double x, double y, double z) {
+    const double len = std::sqrt(x * x + y * y + z * z);
+    return gen::Dir3{Real(x / len), Real(y / len), Real(z / len)};
+  };
+
+  int checked = 0;
+  for (int i = 0; i < 200; ++i) {
+    // Deterministic pseudo-random directions.
+    const double a = 0.618 * i + 0.1;
+    const double b = 0.414 * i + 0.7;
+    const gen::Dir3 dir = unit(std::cos(a) * std::cos(b), std::sin(a) * std::cos(b),
+                               std::sin(b));
+    const auto result = field.elevation_and_gradient(dir);
+
+    // The gradient covers the noise term with locally-constant params:
+    // difference elevation_from_params with the params frozen at dir.
+    const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir));
+    gen::BlendedParams params{};
+    params.relief_amplitude_m = canonical.relief_amplitude_m;
+    params.base_elevation_m = canonical.base_elevation_m;
+    params.ruggedness = canonical.ruggedness;
+    params.carving = canonical.carving;
+    CHECK(std::abs(result.elevation_m.to_double() -
+                   field.elevation_from_params(dir, params).to_double()) < 1e-9);
+
+    // Two tangent directions.
+    gen::Dir3 t1 = unit(-dir.y.to_double(), dir.x.to_double(), 0.0);
+    if (std::abs(dir.z.to_double()) > 0.98) {
+      t1 = unit(1.0, 0.0, 0.0);
+    }
+    const double eps = 1e-6;
+    for (int axis = 0; axis < 2; ++axis) {
+      gen::Dir3 t = t1;
+      if (axis == 1) {
+        // t2 = dir x t1
+        t = unit(dir.y.to_double() * t1.z.to_double() - dir.z.to_double() * t1.y.to_double(),
+                 dir.z.to_double() * t1.x.to_double() - dir.x.to_double() * t1.z.to_double(),
+                 dir.x.to_double() * t1.y.to_double() - dir.y.to_double() * t1.x.to_double());
+      }
+      auto offset = [&](double sign) {
+        return unit(dir.x.to_double() + sign * eps * t.x.to_double(),
+                    dir.y.to_double() + sign * eps * t.y.to_double(),
+                    dir.z.to_double() + sign * eps * t.z.to_double());
+      };
+      const double h_hi = field.elevation_from_params(offset(1.0), params).to_double();
+      const double h_mid = field.elevation_from_params(dir, params).to_double();
+      const double h_lo = field.elevation_from_params(offset(-1.0), params).to_double();
+      const double forward = (h_hi - h_mid) / (eps * radius);
+      const double backward = (h_mid - h_lo) / (eps * radius);
+      if (std::abs(forward - backward) > 1e-2 * (1.0 + std::abs(forward))) {
+        continue;  // ridge-blend crease: not differentiable
+      }
+      const double numeric = (h_hi - h_lo) / (2.0 * eps * radius);
+      const double analytic = result.slope.x.to_double() * t.x.to_double() +
+                              result.slope.y.to_double() * t.y.to_double() +
+                              result.slope.z.to_double() * t.z.to_double();
+      CAPTURE(i);
+      CAPTURE(axis);
+      REQUIRE(std::abs(analytic - numeric) <
+              2e-3 * (1.0 > std::abs(numeric) ? 1.0 : std::abs(numeric)));
+      ++checked;
+    }
+    // Slope must be tangent: no radial component.
+    const double radial = result.slope.x.to_double() * dir.x.to_double() +
+                          result.slope.y.to_double() * dir.y.to_double() +
+                          result.slope.z.to_double() * dir.z.to_double();
+    CHECK(std::abs(radial) < 1e-9);
+  }
+  CHECK(checked > 300);
+}

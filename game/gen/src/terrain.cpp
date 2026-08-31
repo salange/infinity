@@ -86,24 +86,67 @@ TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_
                          bilerp(&CanonicalParams::carving)};
 }
 
-Real TerrainField::elevation_from_params(const Dir3& unit_dir,
-                                         const BlendedParams& params) const {
+namespace {
+
+// One place derives the noise controls from the blended province params —
+// the value and derivative paths must never drift apart.
+struct NoiseControls {
+  FbmParams fbm;
+  Real frequency;
+  Real warp;
+};
+
+NoiseControls noise_controls(const BlendedParams& params, std::uint32_t cells_per_face) {
+  NoiseControls controls;
   // Noise domain: unit direction scaled so one lattice cell spans roughly
   // one-third of a province cell (features live inside provinces).
-  const Real frequency(3.0 * static_cast<double>(provinces_.cells_per_face()));
-
-  FbmParams fbm;
-  fbm.octaves = 6;
+  controls.frequency = Real(3.0 * static_cast<double>(cells_per_face));
+  controls.fbm.octaves = 6;
   // Ruggedness drives per-octave persistence and crest sharpness;
   // carving drives domain warp (coastline/valley wander — Murray's trick).
-  fbm.gain = Real(0.4) + params.ruggedness * Real(0.25);
-  fbm.sharpness = params.ruggedness * Real(0.7);
-  fbm.octave0_damp = Real(0.5);
-  const Real warp = params.carving * Real(0.8);
+  controls.fbm.gain = Real(0.4) + params.ruggedness * Real(0.25);
+  controls.fbm.sharpness = params.ruggedness * Real(0.7);
+  controls.fbm.octave0_damp = Real(0.5);
+  controls.warp = params.carving * Real(0.8);
+  return controls;
+}
 
-  const Real noise = warped_fbm3(elevation_lattice_, unit_dir.x * frequency,
-                                 unit_dir.y * frequency, unit_dir.z * frequency, fbm, warp);
+}  // namespace
+
+Real TerrainField::elevation_from_params(const Dir3& unit_dir,
+                                         const BlendedParams& params) const {
+  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face());
+  const Real noise = warped_fbm3(elevation_lattice_, unit_dir.x * controls.frequency,
+                                 unit_dir.y * controls.frequency,
+                                 unit_dir.z * controls.frequency, controls.fbm,
+                                 controls.warp);
   return params.base_elevation_m + noise * params.relief_amplitude_m;
+}
+
+TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_dir) const {
+  const CanonicalParams canonical = canonical_params(dir_to_face_uv(unit_dir));
+  BlendedParams params{};
+  params.relief_amplitude_m = canonical.relief_amplitude_m;
+  params.base_elevation_m = canonical.base_elevation_m;
+  params.ruggedness = canonical.ruggedness;
+  params.carving = canonical.carving;
+
+  const NoiseControls controls = noise_controls(params, provinces_.cells_per_face());
+  const world::NoiseD noise = world::warped_fbm3_d(
+      elevation_lattice_, unit_dir.x * controls.frequency, unit_dir.y * controls.frequency,
+      unit_dir.z * controls.frequency, controls.fbm, controls.warp);
+
+  ElevationD out;
+  out.elevation_m = params.base_elevation_m + noise.value * params.relief_amplitude_m;
+  // d h/d dir picks up the noise-domain frequency and the amplitude; the
+  // tangent projection removes the radial component, and dividing by the
+  // radius converts "per unit direction" into metres per metre walked.
+  const Real k = params.relief_amplitude_m * controls.frequency / planet_.radius_m;
+  const Dir3 gradient{noise.dx * k, noise.dy * k, noise.dz * k};
+  const Real radial = dot(gradient, unit_dir);
+  out.slope = Dir3{gradient.x - unit_dir.x * radial, gradient.y - unit_dir.y * radial,
+                   gradient.z - unit_dir.z * radial};
+  return out;
 }
 
 Real TerrainField::detail_m(const Dir3& position_m) const {

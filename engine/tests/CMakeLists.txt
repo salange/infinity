@@ -8,7 +8,8 @@ add_executable(engine_tests
   test_trig.cpp
   test_time.cpp
   test_ephemeris.cpp
-  test_tree.cpp)
+  test_tree.cpp
+  test_noise.cpp)
 target_link_libraries(engine_tests
   PRIVATE engine::core engine::world doctest::doctest engine_warnings)
 

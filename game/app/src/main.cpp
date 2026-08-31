@@ -24,6 +24,8 @@
 #include "core/time/world_clock.hpp"
 #include "gen/planet.hpp"
 #include "gen/system.hpp"
+#include "gen/galaxy.hpp"
+#include "gen/galaxy_octree.hpp"
 #include "gen/planet_texture.hpp"
 #include "gen/terrain.hpp"
 #include "gen/terrain_sampler.hpp"
@@ -252,18 +254,18 @@ struct Anchor {
 };
 
 std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* seed_text,
-                                    const inf::gen::StarSystemParams& system, int slot,
-                                    int moon,
+                                    const inf::gen::StarSystemParams& system,
+                                    const inf::gen::SystemCell& cell, int slot, int moon,
                                     std::optional<inf::gen::PlanetType> forced,
                                     const char* diff_override) {
   auto anchor = std::make_unique<Anchor>();
   anchor->slot = slot;
   anchor->moon = moon;
   if (moon >= 0) {
-    anchor->keys = inf::gen::body_for_moon(seed, slot, moon);
+    anchor->keys = inf::gen::body_for_system_moon(seed, cell, slot, moon);
     anchor->planet = inf::gen::planet_params_for_moon(system, slot, moon, anchor->keys);
   } else {
-    anchor->keys = inf::gen::body_for_slot(seed, slot);
+    anchor->keys = inf::gen::body_for_system_slot(seed, cell, slot);
     anchor->planet =
         forced.has_value()
             ? inf::gen::derive_planet_params(anchor->keys, forced)
@@ -271,10 +273,16 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
   }
   anchor->radius = anchor->planet.radius_m.to_double();
 
+  // Diffs are per-BODY: foreign systems carry their octree cell in the
+  // file name so no two systems ever share a diff.
+  const std::string cell_tag =
+      cell.is_home() ? std::string()
+                     : "-g" + std::to_string(cell.level) + "_" + std::to_string(cell.x) +
+                           "_" + std::to_string(cell.y) + "_" + std::to_string(cell.z);
   anchor->diff_path =
       diff_override != nullptr
           ? std::string(diff_override)
-          : std::string("infinity-") + seed_text + "-s" + std::to_string(slot) +
+          : std::string("infinity-") + seed_text + cell_tag + "-s" + std::to_string(slot) +
                 (moon >= 0 ? "m" + std::to_string(moon) : std::string()) + ".edits";
   anchor->edits = std::make_unique<inf::world::CsgEditStore>();
   if (anchor->edits->load(anchor->diff_path)) {
@@ -463,9 +471,30 @@ int main(int argc, char** argv) {
   // The home world comes from the generated system (T0012/T0013): the
   // first landable slot. --type still forces a standalone planet draw for
   // debugging; the system layout stays authoritative for the map.
-  const inf::gen::StarSystemParams system =
+  // T0017: `system` is mutable state — the J-jump regenerates it for the
+  // octree cell it arrives in.
+  inf::gen::SystemCell current_cell{};  // {0,0,0,0} = the home system
+  inf::gen::StarSystemParams system =
       inf::gen::generate_system(inf::gen::default_system_key(*seed));
   const int home_slot = inf::gen::default_landable_slot(system);
+
+  // Galaxy frame (T0017): the octree that owns every star system, and the
+  // current system's galactocentric position. System/planet axes are all
+  // galaxy-aligned, so the ship's forward vector IS a galactic direction.
+  const inf::gen::GalaxyParams galaxy_params =
+      inf::gen::derive_galaxy_params(inf::gen::home_galaxy_key(*seed));
+  const inf::gen::GalaxyOctree galaxy_octree(inf::gen::home_galaxy_key(*seed),
+                                             galaxy_params);
+  const auto system_galactic_pos = [&](const inf::gen::SystemCell& cell) {
+    if (cell.is_home()) {
+      const inf::gen::Dir3 home = inf::gen::home_system_position_m(galaxy_params);
+      return SVec3{home.x.to_double(), home.y.to_double(), home.z.to_double()};
+    }
+    const inf::gen::Dir3 p = galaxy_octree.system_position_m(
+        {cell.x, cell.y, cell.z, cell.level});
+    return SVec3{p.x.to_double(), p.y.to_double(), p.z.to_double()};
+  };
+  SVec3 galactic_pos = system_galactic_pos(current_cell);
 
   std::optional<inf::gen::PlanetType> forced;
   if (type_text != nullptr) {
@@ -479,7 +508,7 @@ int main(int argc, char** argv) {
   // Player-diff overlay (M7): the world files are ONLY per-body diffs —
   // the procedural planets are never stored.
   std::unique_ptr<Anchor> anchor =
-      make_anchor(*seed, seed_text, system, home_slot, -1, forced, diff_text);
+      make_anchor(*seed, seed_text, system, current_cell, home_slot, -1, forced, diff_text);
   const double spawn_r =
       spawn_altitude >= 0.0 ? anchor->radius + spawn_altitude : anchor->radius * 2.2;
   inf::sim::Player player(*anchor->effective,
@@ -716,7 +745,8 @@ int main(int argc, char** argv) {
   double script_wait = 0.0;
   bool script_thrust = false;
   bool script_land = false;
-  bool script_map = false;  // scripted M press (map captures)
+  bool script_map = false;   // scripted M press (map captures)
+  bool script_jump = false;  // scripted J select + instant confirm
 
   // --- map mode state (T0013, design/map-mode.md) -----------------------
   enum class MapPhase { Off, Entering, On, Exiting };
@@ -728,6 +758,22 @@ int main(int argc, char** argv) {
   inf::sim::Pose map_exit_start_sys;     // pose when the exit was triggered
   inf::sim::Pose map_current_sys;        // this frame's map camera, system frame
   int hovered_slot = -1;
+
+  // --- interstellar jump state (T0017 WP6) ----------------------------
+  struct JumpCandidate {
+    inf::gen::SystemCell cell;
+    SVec3 pos_gal;
+    double dist_ly{0.0};
+  };
+  std::vector<JumpCandidate> jump_candidates;
+  int jump_index = -1;           // armed selection into jump_candidates
+  SVec3 jump_sel_forward{0.0, 0.0, 0.0};
+  std::string jump_sel_name;
+  bool j_was_down = false;
+  double j_hold = 0.0;
+  double jump_timer = 0.0;       // > 0: transition running
+  bool jump_swapped = false;
+  JumpCandidate jump_target{};
 
   const SVec3 plane_normal{0.0, 0.0, 1.0};  // system invariant plane
   double outer_orbit_m = 0.0;
@@ -749,23 +795,40 @@ int main(int argc, char** argv) {
   std::array<std::vector<std::string>, inf::gen::kMaxPlanetSlots> moon_names;
   std::array<std::uint32_t, inf::gen::kMaxPlanetSlots> orbit_meshes{};
   std::array<std::uint32_t, inf::gen::kMaxPlanetSlots> arc_meshes{};
-  for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
-    const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-    if (!entry.occupied) {
-      continue;
+  // Per-system UI state; re-run after a jump regenerates `system`.
+  const auto rebuild_system_ui = [&] {
+    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+      if (orbit_meshes[static_cast<std::size_t>(slot)] != 0) {
+        rhi->destroy_mesh(orbit_meshes[static_cast<std::size_t>(slot)]);
+        orbit_meshes[static_cast<std::size_t>(slot)] = 0;
+      }
+      if (arc_meshes[static_cast<std::size_t>(slot)] != 0) {
+        rhi->destroy_mesh(arc_meshes[static_cast<std::size_t>(slot)]);
+        arc_meshes[static_cast<std::size_t>(slot)] = 0;
+      }
+      slot_names[static_cast<std::size_t>(slot)].clear();
+      moon_names[static_cast<std::size_t>(slot)].clear();
+      const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+      if (!entry.occupied) {
+        continue;
+      }
+      slot_names[static_cast<std::size_t>(slot)] = inf::gen::body_display_name(
+          inf::gen::body_for_system_slot(*seed, current_cell, slot).entity);
+      for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
+        moon_names[static_cast<std::size_t>(slot)].push_back(
+            inf::gen::body_display_name(inf::gen::body_for_system_moon(
+                                            *seed, current_cell, slot,
+                                            static_cast<int>(mi))
+                                            .entity));
+      }
+      const auto ribbon =
+          orbit_ribbon_vertices(entry.orbit, 0.0, 2.0 * 3.14159265358979323846, 256,
+                                map_px_m * 1.6);
+      orbit_meshes[static_cast<std::size_t>(slot)] =
+          rhi->create_mesh(ribbon.data(), ribbon.size());
     }
-    slot_names[static_cast<std::size_t>(slot)] =
-        inf::gen::body_display_name(inf::gen::body_for_slot(*seed, slot).entity);
-    for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
-      moon_names[static_cast<std::size_t>(slot)].push_back(inf::gen::body_display_name(
-          inf::gen::body_for_moon(*seed, slot, static_cast<int>(mi)).entity));
-    }
-    const auto ribbon =
-        orbit_ribbon_vertices(entry.orbit, 0.0, 2.0 * 3.14159265358979323846, 256,
-                              map_px_m * 1.6);
-    orbit_meshes[static_cast<std::size_t>(slot)] =
-        rhi->create_mesh(ribbon.data(), ribbon.size());
-  }
+  };
+  rebuild_system_ui();
   double arc_rebuild_timer = 0.0;
 
   const auto slot_color = [&](int slot, float out[3]) {
@@ -871,8 +934,15 @@ int main(int argc, char** argv) {
   std::mutex bake_mutex;
   std::vector<BakeResult> bake_done;
   std::atomic<bool> bake_quit{false};
-  std::thread bake_thread([&bake_mutex, &bake_done, &bake_quit, &body_tex_key,
-                           seed_copy = *seed, system_copy = system]() {
+  std::thread bake_thread;
+  // Restartable (T0017): a jump regenerates the system, so the worker is
+  // stopped, textures dropped, and a new worker started for the arrival
+  // system.
+  const auto start_bake_worker = [&](const inf::gen::StarSystemParams system_copy,
+                                     const inf::gen::SystemCell cell_copy) {
+    bake_quit.store(false);
+    bake_thread = std::thread([&bake_mutex, &bake_done, &bake_quit, &body_tex_key,
+                               seed_copy = *seed, system_copy, cell_copy]() {
     struct Job {
       int slot;
       int moon;  // -1 = the planet itself
@@ -902,7 +972,8 @@ int main(int argc, char** argv) {
       BakeResult result;
       result.key = body_tex_key(job.slot, job.moon);
       if (job.moon < 0) {
-        const inf::gen::BodyHandle body = inf::gen::body_for_slot(seed_copy, job.slot);
+        const inf::gen::BodyHandle body =
+            inf::gen::body_for_system_slot(seed_copy, cell_copy, job.slot);
         const inf::gen::PlanetParams planet =
             inf::gen::planet_params_for_slot(system_copy, job.slot, body);
         const inf::gen::TerrainField field(body.entity, planet);
@@ -910,7 +981,7 @@ int main(int argc, char** argv) {
         result.texture = inf::gen::bake_planet_texture(field, job.size);
       } else {
         const inf::gen::BodyHandle body =
-            inf::gen::body_for_moon(seed_copy, job.slot, job.moon);
+            inf::gen::body_for_system_moon(seed_copy, cell_copy, job.slot, job.moon);
         const inf::gen::PlanetParams planet =
             inf::gen::planet_params_for_moon(system_copy, job.slot, job.moon, body);
         const inf::gen::TerrainField field(body.entity, planet);
@@ -920,7 +991,17 @@ int main(int argc, char** argv) {
       const std::lock_guard<std::mutex> lock(bake_mutex);
       bake_done.push_back(std::move(result));
     }
-  });
+    });
+  };
+  const auto stop_bake_worker = [&] {
+    bake_quit.store(true);
+    if (bake_thread.joinable()) {
+      bake_thread.join();
+    }
+    const std::lock_guard<std::mutex> lock(bake_mutex);
+    bake_done.clear();
+  };
+  start_bake_worker(system, current_cell);
   const auto upload_finished_bakes = [&] {
     std::vector<BakeResult> ready;
     {
@@ -1000,6 +1081,18 @@ int main(int argc, char** argv) {
     last_mx = mx;
     last_my = my;
     e_was_down = e_down;
+    if (jump_timer > 0.0) {
+      // The jump transition suspends the pilot: one atomic frame swap in
+      // the middle, no control input on either side of it.
+      input.forward = false;
+      input.back = false;
+      input.left = false;
+      input.right = false;
+      input.fire = false;
+      input.interact_pressed = false;
+      input.mouse_dx = 0.0;
+      input.mouse_dy = 0.0;
+    }
 
     // F9: debug recording — dump the last ~3 s ring and keep recording
     // 3 s of future frames (REC icon top right while active).
@@ -1132,8 +1225,8 @@ int main(int argc, char** argv) {
         loaded.clear();
         pending_ready.clear();  // old anchor's frames are meaningless now
         const SVec3 new_pos = at - candidate.center;
-        anchor = make_anchor(*seed, seed_text, system, candidate.slot, candidate.moon,
-                             std::nullopt, nullptr);
+        anchor = make_anchor(*seed, seed_text, system, current_cell, candidate.slot,
+                             candidate.moon, std::nullopt, nullptr);
         player.rebase(*anchor->effective, new_pos);
         rebuild_sea();
         hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
@@ -1149,6 +1242,132 @@ int main(int argc, char** argv) {
                     candidate.slot, moon_suffix.c_str(),
                     inf::gen::to_string(anchor->planet.type),
                     candidate.moon >= 0 ? "moon" : "planet", anchor->radius / 1000.0);
+      }
+    }
+
+    // --- J: interstellar jump (T0017 WP6) -------------------------------
+    // Tap J: cone-search along the nose (20 ly, ~15 deg) and arm the
+    // nearest system; tap again to cycle. Turning the ship clears the
+    // selection. HOLD J (0.75 s) to jump — a stray tap must never fling
+    // anyone 20 light-years.
+    bool j_down = glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS;
+    bool jump_confirm_scripted = false;
+    if (script_jump) {
+      script_jump = false;
+      j_down = true;               // acts as a fresh J press...
+      j_was_down = false;
+      jump_confirm_scripted = true;  // ...that also confirms instantly
+    }
+    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight &&
+        jump_timer <= 0.0) {
+      const SVec3 fwd = inf::sim::normalize(player.forward());
+      if (jump_index >= 0 && inf::sim::dot(fwd, jump_sel_forward) < 0.9848) {
+        jump_index = -1;  // turned away (> ~10 deg): selection cleared
+      }
+      if (j_down && !j_was_down) {
+        if (jump_index < 0) {
+          jump_candidates.clear();
+          std::vector<inf::gen::GalaxyOctree::CellId> cells;
+          galaxy_octree.systems_in_ball(
+              inf::gen::Dir3{inf::det::Real(galactic_pos.x), inf::det::Real(galactic_pos.y),
+                             inf::det::Real(galactic_pos.z)},
+              inf::det::Real(20.0 * inf::gen::kLightYearM), 512, &cells);
+          for (const auto& cell : cells) {
+            const inf::gen::SystemCell sys_cell{cell.x, cell.y, cell.z, cell.level};
+            if (sys_cell == current_cell) {
+              continue;
+            }
+            const inf::gen::Dir3 p = galaxy_octree.system_position_m(cell);
+            const SVec3 pos{p.x.to_double(), p.y.to_double(), p.z.to_double()};
+            const SVec3 rel = pos - galactic_pos;
+            const double dist = inf::sim::length(rel);
+            if (dist < 0.01 * inf::gen::kLightYearM) {
+              continue;
+            }
+            if (inf::sim::dot(fwd, rel * (1.0 / dist)) < 0.9659) {  // cos 15 deg
+              continue;
+            }
+            jump_candidates.push_back({sys_cell, pos, dist / inf::gen::kLightYearM});
+          }
+          std::sort(jump_candidates.begin(), jump_candidates.end(),
+                    [](const JumpCandidate& a, const JumpCandidate& b) {
+                      return a.dist_ly < b.dist_ly;
+                    });
+          if (!jump_candidates.empty()) {
+            jump_index = 0;
+            jump_sel_forward = fwd;
+          }
+        } else {
+          jump_index = (jump_index + 1) % static_cast<int>(jump_candidates.size());
+        }
+        if (jump_index >= 0) {
+          jump_sel_name = inf::gen::body_display_name(inf::gen::system_key_for(
+              *seed, jump_candidates[static_cast<std::size_t>(jump_index)].cell));
+        }
+      }
+      if (j_down && jump_index >= 0) {
+        j_hold += dt;
+        if (jump_confirm_scripted) {
+          j_hold = 1.0;
+        }
+        if (j_hold >= 0.75) {
+          jump_target = jump_candidates[static_cast<std::size_t>(jump_index)];
+          jump_timer = 2.5;
+          jump_swapped = false;
+          jump_index = -1;
+          j_hold = 0.0;
+          std::printf("jump: engaging -> %s (%.2f ly)\n", jump_sel_name.c_str(),
+                      jump_target.dist_ly);
+        }
+      } else if (!j_down) {
+        j_hold = 0.0;
+      }
+    }
+    j_was_down = j_down;
+
+    if (jump_timer > 0.0) {
+      jump_timer -= dt;
+      if (!jump_swapped && jump_timer <= 1.25) {
+        // The atomic swap, mid-transition: system and body frame change
+        // together while the player is suspended (the map-mode lesson —
+        // never interpolate across a frame change).
+        jump_swapped = true;
+        save_anchor_edits(*anchor);
+        for (auto& [addr, chunk] : loaded) {
+          rhi->destroy_mesh(chunk.mesh_id);
+        }
+        loaded.clear();
+        pending_ready.clear();
+        stop_bake_worker();
+        for (auto& [tex_key, tex] : body_textures) {
+          rhi->destroy_planet_texture(tex.handle);
+        }
+        body_textures.clear();
+        current_cell = jump_target.cell;
+        system = inf::gen::generate_system(inf::gen::system_key_for(*seed, current_cell));
+        const int arrival_slot = inf::gen::default_landable_slot(system);
+        anchor = make_anchor(*seed, seed_text, system, current_cell, arrival_slot, -1,
+                             std::nullopt, nullptr);
+        galactic_pos = jump_target.pos_gal;
+        const SVec3 arrive_pos =
+            inf::sim::normalize(SVec3{1.0, 0.15, 0.3}) * (anchor->radius * 2.2);
+        player.rebase(*anchor->effective, arrive_pos);
+        {
+          const SVec3 to_planet = inf::sim::normalize(arrive_pos * -1.0);
+          SVec3 up_ref{0.0, 0.0, 1.0};
+          player.set_attitude(to_planet, up_ref);
+        }
+        rebuild_sea();
+        hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(),
+                                              anchor->planet);
+        rebuild_system_ui();
+        recompute_bodies();
+        start_bake_worker(system, current_cell);
+        std::printf("jump: arrived at %s — %s (slot %d, %s, radius %.0f km)\n",
+                    jump_sel_name.c_str(),
+                    slot_names[static_cast<std::size_t>(arrival_slot)].c_str(),
+                    arrival_slot, inf::gen::to_string(anchor->planet.type),
+                    anchor->radius / 1000.0);
       }
     }
 
@@ -1276,6 +1495,8 @@ int main(int argc, char** argv) {
         script_land = true;
       } else if (cmd.op == "map") {
         script_map = true;
+      } else if (cmd.op == "jump") {
+        script_jump = true;
       } else if (cmd.op == "aim" && !cmd.args.empty()) {
         if (cmd.args[0] == "sun") {
           aim_at(inf::sim::normalize(star_local - player.position()));
@@ -2294,6 +2515,25 @@ int main(int argc, char** argv) {
       }
     }
 
+    // An armed jump target overrides the crosshair readout — the brief's
+    // "extend TargetInfo, don't build a second widget".
+    if (jump_timer > 0.0) {
+      target.valid = true;
+      target.name = "JUMPING > " + jump_sel_name;
+      target.distance_m = jump_target.dist_ly * inf::gen::kLightYearM;
+      target.eta_s = -1.0;
+    } else if (jump_index >= 0 && map_phase == MapPhase::Off) {
+      const auto& candidate = jump_candidates[static_cast<std::size_t>(jump_index)];
+      char line[192];
+      std::snprintf(line, sizeof(line), "JUMP %d/%zu %s  %.2f ly  [hold J]",
+                    jump_index + 1, jump_candidates.size(), jump_sel_name.c_str(),
+                    candidate.dist_ly);
+      target.valid = true;
+      target.name = line;
+      target.distance_m = candidate.dist_ly * inf::gen::kLightYearM;
+      target.eta_s = -1.0;
+    }
+
     if (map_phase == MapPhase::Off) {
       const std::string& location_name =
           anchor->moon >= 0 ? moon_names[static_cast<std::size_t>(anchor->slot)]
@@ -2471,10 +2711,7 @@ int main(int argc, char** argv) {
       rhi->destroy_mesh(arc_meshes[static_cast<std::size_t>(slot)]);
     }
   }
-  bake_quit.store(true);
-  if (bake_thread.joinable()) {
-    bake_thread.join();
-  }
+  stop_bake_worker();
   }  // end HUD scope
 
   save_anchor_edits(*anchor);

@@ -48,4 +48,23 @@ BodyHandle body_for_moon(const core::Seed128& seed, int slot, int moon_index);
 PlanetParams derive_planet_params(const BodyHandle& body,
                                   std::optional<PlanetType> forced_type = std::nullopt);
 
+// --- octree system addressing (T0017 WP6) --------------------------------
+// A star system anywhere in the home galaxy is addressed by its octree
+// cell; {0,0,0,0} is the DEFAULT (home) system with its historical key.
+struct SystemCell {
+  std::int64_t x{0}, y{0}, z{0};
+  std::int32_t level{0};
+  bool is_home() const { return x == 0 && y == 0 && z == 0 && level == 0; }
+  friend bool operator==(const SystemCell&, const SystemCell&) = default;
+};
+core::tree::Address system_address_for(const SystemCell& cell);
+core::Key system_key_for(const core::Seed128& seed, const SystemCell& cell);
+BodyHandle body_for_system_slot(const core::Seed128& seed, const SystemCell& cell,
+                                int slot);
+BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cell,
+                                int slot, int moon_index);
+// The home galaxy's entity key (galaxy-params/v1 and the octree hang off
+// it).
+core::Key home_galaxy_key(const core::Seed128& seed);
+
 }  // namespace inf::gen

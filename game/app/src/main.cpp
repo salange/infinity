@@ -591,7 +591,11 @@ int main(int argc, char** argv) {
         params.base_elevation_m = canonical.base_elevation_m;
         params.ruggedness = canonical.ruggedness;
         params.carving = canonical.carving;
-        return anchor->radius +
+        // Sunk 300 m below the true surface: streamed chunks always win
+        // depth (no z-fighting), while unstreamed regions show the right
+        // continents instead of bare ocean. Invisible from orbit
+        // (0.03% of R) — it just stops the ocean->land streaming pop.
+        return anchor->radius - 300.0 +
                anchor->field->elevation_from_params(dir, params, canonical.macro_rel)
                    .to_double();
       };
@@ -791,6 +795,9 @@ int main(int argc, char** argv) {
   };
 
   std::unordered_map<inf::core::ChunkAddr, LoadedChunk, AddrHash> loaded;
+  std::unordered_map<inf::core::ChunkAddr, std::shared_ptr<const inf::world::ChunkData>,
+                     AddrHash>
+      pending_ready;
   std::vector<inf::render::Rhi::DrawItem> items;
 
   long frame = 0;
@@ -918,6 +925,7 @@ int main(int argc, char** argv) {
           rhi->destroy_mesh(chunk.mesh_id);
         }
         loaded.clear();
+        pending_ready.clear();  // old anchor's frames are meaningless now
         const SVec3 new_pos = at - planet_local[static_cast<std::size_t>(candidate)];
         anchor = make_anchor(*seed, seed_text, system, candidate, std::nullopt, nullptr);
         player.rebase(*anchor->effective, new_pos);
@@ -1130,29 +1138,40 @@ int main(int argc, char** argv) {
         anchor->manager->update(player_pos.x, player_pos.y, player_pos.z);
     for (const auto& event : events) {
       if (event.kind == inf::world::ChunkEvent::Kind::Ready) {
-        // Replace any previous mesh for this address (re-mesh on neighbor
-        // lod change delivers updated geometry under the same address).
-        const auto old = loaded.find(event.addr);
-        if (old != loaded.end()) {
-          rhi->destroy_mesh(old->second.mesh_id);
-          loaded.erase(old);
-        }
-        if (event.data->mesh.vertices.empty()) {
-          continue;
-        }
-        LoadedChunk chunk;
-        chunk.mesh_id = rhi->create_mesh(event.data->mesh.vertices.data(),
-                                         event.data->mesh.vertices.size());
-        chunk.origin = RVec3{event.data->mesh.origin[0], event.data->mesh.origin[1],
-                             event.data->mesh.origin[2]};
-        loaded[event.addr] = chunk;
+        // Staged: uploads happen a few per frame below, so a big batch
+        // (fast descent, re-anchor) dribbles in over a fraction of a
+        // second instead of slamming the whole horizon in one frame.
+        pending_ready[event.addr] = event.data;
       } else {
+        pending_ready.erase(event.addr);
         const auto it = loaded.find(event.addr);
         if (it != loaded.end()) {
           rhi->destroy_mesh(it->second.mesh_id);
           loaded.erase(it);
         }
       }
+    }
+    int uploads = 0;
+    for (auto it = pending_ready.begin(); it != pending_ready.end() && uploads < 64;) {
+      const auto& addr = it->first;
+      const auto& data = it->second;
+      // Replace any previous mesh for this address (re-mesh on neighbor
+      // lod change delivers updated geometry under the same address).
+      const auto old = loaded.find(addr);
+      if (old != loaded.end()) {
+        rhi->destroy_mesh(old->second.mesh_id);
+        loaded.erase(old);
+      }
+      if (!data->mesh.vertices.empty()) {
+        LoadedChunk chunk;
+        chunk.mesh_id =
+            rhi->create_mesh(data->mesh.vertices.data(), data->mesh.vertices.size());
+        chunk.origin =
+            RVec3{data->mesh.origin[0], data->mesh.origin[1], data->mesh.origin[2]};
+        loaded[addr] = chunk;
+      }
+      it = pending_ready.erase(it);
+      ++uploads;
     }
 
     // --- camera (map-aware) ----------------------------------------------
@@ -1385,10 +1404,11 @@ int main(int argc, char** argv) {
         draw_ball(planet_local[static_cast<std::size_t>(slot)],
                   entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2]);
       }
-      // From orbit (chunks hidden), the static land impostor carries the
-      // continents — lit with the same terrain material, so the swap to
-      // real chunks on approach is seamless in tone.
-      if (!show_surface && land_mesh != 0) {
+      // The static land impostor is ALWAYS drawn (map off): from orbit it
+      // IS the planet (chunks hidden); nearer in it sits 300 m under the
+      // real terrain as the streaming backstop, so chunks arriving late
+      // refine the picture instead of flipping ocean into land.
+      if (land_mesh != 0) {
         const RVec3 rel = to_render(SVec3{0.0, 0.0, 0.0}) - camera_pos;
         const Mat4 model = inf::render::translate(rel);
         const Mat4 mvp = inf::render::mul(view_projection, model);
@@ -1881,7 +1901,12 @@ int main(int argc, char** argv) {
       item.color[0] = 0.16f;
       item.color[1] = 0.36f;
       item.color[2] = 0.62f;
-      item.color[3] = 0.42f;
+      // Fade the shell in below ~0.3R so the show_surface crossing does
+      // not step the ocean's brightness in a single frame (the depth-
+      // tinted seabed carries the ocean color from orbit).
+      const double shell_fade =
+          std::clamp((0.30 * anchor->radius - altitude) / (0.10 * anchor->radius), 0.0, 1.0);
+      item.color[3] = static_cast<float>(0.42 * shell_fade);
       item.translucent = true;
       // Lit translucent (mode 5): the sea shades with the sun like the
       // terrain — an unlit shell used to glow bright blue through
@@ -2043,6 +2068,7 @@ int main(int argc, char** argv) {
       frame_params.tan_half_y = static_cast<float>(tan_half);
       frame_params.altitude_frac = static_cast<float>(std::clamp(dome_alt_frac, 0.0, 9.0));
       set3(frame_params.planet_center, RVec3{0.0, 0.0, 0.0} - camera_pos);
+      frame_params.sea_radius_m = static_cast<float>(sea_radius);
       // Blend terrain normals toward the sphere radial from ~0.25 radii
       // of altitude up (full sphere shading from one radius out).
       frame_params.normal_blend = static_cast<float>(

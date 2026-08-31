@@ -310,6 +310,19 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   var color = base * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
   let fill = max(dot(n, -light), 0.0);
   color += base * fill * vec3<f32>(0.05, 0.07, 0.12);
+  // Submerged terrain shades toward deep water by depth (atmo.a carries
+  // the sea radius). This keeps the streamed seabed consistent with the
+  // opaque ocean impostor — the ocean no longer flips color when chunks
+  // arrive or LOD changes.
+  if (mode == 0u && frame.atmo.a > 1.0) {
+    let frag_r = length(in.opos + u.aux.xyz - frame.planet_center.xyz);
+    let depth = frame.atmo.a - frag_r;
+    if (depth > 0.0) {
+      let absorb = depth / (depth + 30.0);
+      let water = vec3<f32>(0.06, 0.20, 0.35) * frame.sun_color.rgb * (0.2 + 0.8 * ndl);
+      color = mix(color, water, absorb * 0.92);
+    }
+  }
   if (mode == 5u) {
     // Water: Fresnel-driven opacity (grazing water is opaque and dark
     // blue — a constant alpha made shallow seas read as bare ground) and
@@ -871,7 +884,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         frame.cam_up[0],     frame.cam_up[1],     frame.cam_up[2],     frame.tan_half_y,
         frame.cam_fwd[0],    frame.cam_fwd[1],    frame.cam_fwd[2],    frame.altitude_frac,
         frame.planet_up[0],  frame.planet_up[1],  frame.planet_up[2],  0.0f,
-        frame.atmo_tint[0],  frame.atmo_tint[1],  frame.atmo_tint[2],  1.0f,
+        frame.atmo_tint[0],  frame.atmo_tint[1],  frame.atmo_tint[2],  frame.sea_radius_m,
         frame.planet_center[0], frame.planet_center[1], frame.planet_center[2],
         frame.normal_blend,
     };

@@ -86,6 +86,10 @@ class Rhi {
     // lit items must then carry their translation in DrawItem.aux).
     float planet_center[3]{0.0f, 0.0f, 0.0f};
     float normal_blend{0.0f};
+    // Sea-surface radius from the planet center (0 = no water). Lit
+    // terrain below it shades toward deep-water blue by depth, so the
+    // seabed, the ocean impostor and the translucent shell agree.
+    float sea_radius_m{0.0f};
   };
 
   // Clears, draws the items (sun-lit terrain, unlit overlays, star

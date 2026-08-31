@@ -96,7 +96,17 @@ NodeSpec body_spec(const core::Key&, const core::tree::Node*) {
   moons.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
     return cell.x >= 0 && cell.x < 16;
   };
-  spec.axes = {moons};
+  // Caves are addressable entities too (T0015 WP7): stable keys today,
+  // children (poi/resources/structures) later. Real occupancy is the
+  // caves/v1 probability test, enforced by CaveField.
+  AxisDesc caves;
+  caves.name = name::CavesV1;
+  caves.child_kind = kind::Cave;
+  caves.topo = Topology::CellGrid3D;
+  caves.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
+    return cell.x >= 0 && cell.x < 6 && cell.y >= 0 && cell.z >= 0;
+  };
+  spec.axes = {moons, caves};
   return spec;
 }
 

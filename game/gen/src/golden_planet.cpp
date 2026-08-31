@@ -2,9 +2,11 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 
 #include "core/golden.hpp"
 #include "core/key.hpp"
+#include "gen/caves.hpp"
 #include "gen/universe.hpp"
 #include "gen/planet.hpp"
 #include "gen/provinces.hpp"
@@ -77,7 +79,7 @@ std::uint64_t hash_planet_script(const core::Seed128& seed, std::uint32_t forced
 std::string hash_density_report() {
   static constexpr char kDigits[] = "0123456789abcdef";
   const core::Seed128 seed{0x243F6A8885A308D3ULL, 0x13198A2E03707344ULL};
-  std::string report = "hash-density v1\n";
+  std::string report = "hash-density v2\n";
   const BodyHandle body = test_body(seed);
   for (std::uint32_t type = 0; type < 4; ++type) {
     const PlanetParams planet = derive_planet_params(body, static_cast<PlanetType>(type));
@@ -89,17 +91,58 @@ std::string hash_density_report() {
         {2, 8, 128, 128, 0},       // coarser lod
         {0, 11, 1024, 1024, -310}, // deep interior, near/below the core
     }};
-    for (const core::ChunkAddr& addr : kAddrs) {
+    const auto emit = [&](const core::ChunkAddr& addr, const char* tag) {
       const ChunkGrid grid = ChunkGrid::from_addr(addr, planet.radius_m);
       const std::uint64_t hash = hash_chunk_density(field, grid);
-      char line[96];
-      std::snprintf(line, sizeof(line), "type=%u face=%u lod=%u i=%u j=%u shell=%d fnv=",
-                    type, addr.face, addr.lod, addr.i, addr.j, static_cast<int>(addr.shell));
+      char line[112];
+      std::snprintf(line, sizeof(line), "type=%u%s face=%u lod=%u i=%u j=%u shell=%d fnv=",
+                    type, tag, addr.face, addr.lod, addr.i, addr.j,
+                    static_cast<int>(addr.shell));
       report += line;
       for (int i = 15; i >= 0; --i) {
         report += kDigits[(hash >> (i * 4)) & 0xFU];
       }
       report += "\n";
+    };
+    for (const core::ChunkAddr& addr : kAddrs) {
+      emit(addr, "");
+    }
+    // caves/v1 (T0015 WP7): chunks centred on the first hosted cave cell
+    // of face 0, straddling its anchor depth — two clients must agree on
+    // cave geometry bit-exactly.
+    const CaveField& caves = field.caves();
+    bool found = false;
+    for (std::uint32_t ci = 0; ci < caves.cells_per_face() && !found; ++ci) {
+      for (std::uint32_t cj = 0; cj < caves.cells_per_face() && !found; ++cj) {
+        const CellId cell{0, ci, cj};
+        if (!caves.hosted(cell)) {
+          continue;
+        }
+        found = true;
+        const Dir3 dir = caves.anchor_dir(cell);
+        const FaceUV uv = dir_to_face_uv(dir);
+        constexpr std::uint8_t kLod = 12;
+        const double cells = static_cast<double>(1U << kLod);
+        const auto to_index = [&](det::Real coord) {
+          double scaled = (coord.to_double() + 1.0) * 0.5 * cells;
+          if (scaled < 0.0) scaled = 0.0;
+          if (scaled > cells - 1.0) scaled = cells - 1.0;
+          return static_cast<std::uint32_t>(scaled);
+        };
+        const double thickness = 2.0 * planet.radius_m.to_double() / cells;
+        const double elevation = field.elevation_m(dir).to_double();
+        const int mid = static_cast<int>(std::floor(elevation / thickness));
+        for (int shell = mid - 2; shell <= mid; ++shell) {
+          emit(core::ChunkAddr{uv.face, kLod, to_index(uv.u), to_index(uv.v),
+                               static_cast<std::int16_t>(shell)},
+               " cave");
+        }
+      }
+    }
+    if (!found) {
+      char line[32];
+      std::snprintf(line, sizeof(line), "type=%u cave=none\n", type);
+      report += line;
     }
   }
   return report;

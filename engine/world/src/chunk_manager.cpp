@@ -23,6 +23,11 @@ namespace {
 
 using det::Real;
 
+// Per-column shell caps: surface band (3) plus bounded room for the
+// underground intervals of shallow cave systems.
+constexpr int kMaxShellsPerColumn = 48;
+constexpr int kMaxDepthIntervals = 12;
+
 struct AddrLess {
   bool operator()(const core::ChunkAddr& a, const core::ChunkAddr& b) const {
     if (a.face != b.face) return a.face < b.face;
@@ -285,12 +290,40 @@ struct ChunkManager::Impl {
     const Dir3 center = cell_center_dir(col.face, col.lod, col.i, col.j);
     const double elevation = sampler.surface_elevation_m(center);
     const int shell_mid = static_cast<int>(std::floor(elevation / thickness));
-    for (int shell = shell_mid - 1; shell <= shell_mid + 1; ++shell) {
-      if (shell < -32768 || shell > 32767) {
-        continue;
+    // Surface band plus depth-aware extras: columns crossing underground
+    // voids request the shells covering exactly those radial intervals so
+    // caves are meshed and collidable, not just generated (T0015 WP7
+    // Blocker A). Interval-based on purpose — a blanket "N metres below
+    // the surface" range explodes cubically with lod.
+    int shells[kMaxShellsPerColumn];
+    int shell_count = 0;
+    const auto push_shell = [&](int shell) {
+      if (shell < -32768 || shell > 32767 || shell_count >= kMaxShellsPerColumn) {
+        return;
       }
+      for (int s = 0; s < shell_count; ++s) {
+        if (shells[s] == shell) {
+          return;
+        }
+      }
+      shells[shell_count++] = shell;
+    };
+    for (int shell = shell_mid - 1; shell <= shell_mid + 1; ++shell) {
+      push_shell(shell);
+    }
+    ChunkSampler::DepthInterval intervals[kMaxDepthIntervals];
+    const int interval_count =
+        sampler.underground_intervals(center, intervals, kMaxDepthIntervals);
+    for (int i = 0; i < interval_count; ++i) {
+      const int lo = static_cast<int>(std::floor(intervals[i].lo_m / thickness));
+      const int hi = static_cast<int>(std::floor(intervals[i].hi_m / thickness));
+      for (int shell = lo; shell <= hi; ++shell) {
+        push_shell(shell);
+      }
+    }
+    for (int s = 0; s < shell_count; ++s) {
       out->push_back({core::ChunkAddr{col.face, col.lod, col.i, col.j,
-                                      static_cast<std::int16_t>(shell)},
+                                      static_cast<std::int16_t>(shells[s])},
                       mask});
     }
   }

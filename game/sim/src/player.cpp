@@ -171,10 +171,19 @@ void Player::update_flight(const InputFrame& input) {
   // band, light speed outside (supersedes the 0.1c cap of spec section 9,
   // 2026-08-31; airless planets have no band). Altitude is measured
   // against the NEAREST planet — every planet slows the ship down in its
-  // vicinity the same way, anchor or not.
+  // vicinity the same way, anchor or not. On the ANCHOR it is height
+  // above the TERRAIN (and water), not the nominal sphere: with macro
+  // relief of several km, the nominal radius let the ship skim solid
+  // ground at Mach 4 and ride the hard clamp (the "sky becomes terrain"
+  // jumps in the 2026-08-31 recordings).
   const NearestBody nearest = nearest_or_anchor();
-  const double alt =
-      std::max(0.0, length(position_ - nearest.center) - nearest.radius_m);
+  double alt;
+  if (nearest.is_anchor) {
+    const double floor_r = std::max(ground_radius(normalize(position_)), water_radius());
+    alt = std::max(0.0, length(position_) - floor_r);
+  } else {
+    alt = std::max(0.0, length(position_ - nearest.center) - nearest.radius_m);
+  }
   const double zone_cap = zone() == FlightZone::Atmosphere ? kMachSix : kLightSpeed;
   const double cap = std::min(std::clamp(alt * 0.8, 40.0, kLightSpeed), zone_cap);
   const double accel = std::max(25.0, cap / 2.5);

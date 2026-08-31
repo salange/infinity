@@ -13,6 +13,7 @@ add_library(game_gen STATIC
   src/caves.cpp
   src/drainage.cpp
   src/features.cpp
+  src/galaxy.cpp
   src/macro.cpp
   src/planet_texture.cpp
   src/material.cpp

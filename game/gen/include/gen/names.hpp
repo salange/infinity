@@ -33,6 +33,11 @@ inline constexpr core::NameId TerrainV2{0x48d3cb3103db7f17ULL};       // "terrai
 inline constexpr core::NameId FeaturesV1{0x3dbb2eed252570fbULL};      // "features/v1"
 inline constexpr core::NameId CavesV1{0x637ade26b9efa0daULL};         // "caves/v1"
 inline constexpr core::NameId DrainageV1{0x6bdc9ecba8d08bebULL};      // "drainage/v1"
+inline constexpr core::NameId GalaxyParamsV1{0xc7450eb1aa86af94ULL};  // "galaxy-params/v1"
+inline constexpr core::NameId GalaxySystemsV1{0xe5c73a184da935a5ULL}; // "galaxy-systems/v1"
+inline constexpr core::NameId NebulaeV1{0x077f97eae9e3adb4ULL};       // "nebulae/v1"
+inline constexpr core::NameId StarClustersV1{0xb59ee6f1f35abb5eULL};  // "star-clusters/v1"
+inline constexpr core::NameId GalaxyLayoutV1{0xaa91de0c98bdfc07ULL};  // "galaxy-layout/v1"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -55,6 +60,8 @@ inline constexpr core::KindId Belt{13};
 inline constexpr core::KindId Barycenter{14};
 inline constexpr core::KindId Feature{15};
 inline constexpr core::KindId Cave{16};
+inline constexpr core::KindId Nebula{17};
+inline constexpr core::KindId StarCluster{18};
 }  // namespace kind
 
 namespace channel {
@@ -92,6 +99,11 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"features/v1", name::FeaturesV1},
     {"caves/v1", name::CavesV1},
     {"drainage/v1", name::DrainageV1},
+    {"galaxy-params/v1", name::GalaxyParamsV1},
+    {"galaxy-systems/v1", name::GalaxySystemsV1},
+    {"nebulae/v1", name::NebulaeV1},
+    {"star-clusters/v1", name::StarClustersV1},
+    {"galaxy-layout/v1", name::GalaxyLayoutV1},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

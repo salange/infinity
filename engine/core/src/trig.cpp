@@ -1,5 +1,9 @@
 #include "core/det/trig.hpp"
 
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
 namespace inf::det {
 
 namespace {
@@ -129,6 +133,26 @@ Real atan2(Real y, Real x) {
     angle = kPi - angle;
   }
   return Real(yd < 0.0 ? -angle : angle);
+}
+
+// --- fast deterministic approximations (T0017) ---------------------------
+
+void fast_sin_cos(Real x, Real* sine, Real* cosine) {
+  // Quadrant reduction by multiplication (exact floor), then the fdlibm
+  // kernels on [-pi/4, pi/4].
+  const double v = x.to_double();
+  const double q = v * 0.6366197723675814;  // 2/pi
+  const double kf = std::floor(q + 0.5);
+  const double r = v - kf * 1.5707963267948966;
+  const double rs = sin_kernel(r);
+  const double rc = cos_kernel(r);
+  const auto quadrant = static_cast<std::int64_t>(kf) & 3;
+  switch (quadrant) {
+    case 0: *sine = Real(rs); *cosine = Real(rc); break;
+    case 1: *sine = Real(rc); *cosine = Real(-rs); break;
+    case 2: *sine = Real(-rs); *cosine = Real(-rc); break;
+    default: *sine = Real(-rc); *cosine = Real(rs); break;
+  }
 }
 
 }  // namespace inf::det

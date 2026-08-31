@@ -616,6 +616,15 @@ int main(int argc, char** argv) {
               vertex_radius(slice % kSlices, stack);
         }
       }
+      const auto grid_pos = [&](int slice, int stack) {
+        slice = ((slice % kSlices) + kSlices) % kSlices;
+        stack = std::clamp(stack, 0, kStacks);
+        const double phi = pi * stack / kStacks - pi * 0.5;
+        const double theta = 2.0 * pi * slice / kSlices;
+        const double r = radii[static_cast<std::size_t>(stack) * (kSlices + 1) + slice];
+        return RVec3{std::cos(phi) * std::cos(theta) * r,
+                     std::cos(phi) * std::sin(theta) * r, std::sin(phi) * r};
+      };
       std::vector<float> vertices;
       vertices.reserve(static_cast<std::size_t>(kSlices) * kStacks * 36);
       const auto point = [&](int slice, int stack, float out[6]) {
@@ -628,9 +637,25 @@ int main(int argc, char** argv) {
         out[0] = static_cast<float>(nx * r);
         out[1] = static_cast<float>(ny * r);
         out[2] = static_cast<float>(nz * r);
-        out[3] = static_cast<float>(nx);
-        out[4] = static_cast<float>(ny);
-        out[5] = static_cast<float>(nz);
+        // REAL terrain normals from the height grid, not the sphere
+        // radial: with radial normals the impostor lit up at grazing sun
+        // angles where the (correctly shaded) streamed terrain stayed
+        // dark — a bright band at the horizon at night.
+        const RVec3 du = grid_pos(slice + 1, stack) - grid_pos(slice - 1, stack);
+        const RVec3 dv = grid_pos(slice, stack + 1) - grid_pos(slice, stack - 1);
+        RVec3 normal = inf::render::cross(du, dv);
+        const double len = inf::render::length(normal);
+        if (len < 1e-9) {
+          normal = RVec3{nx, ny, nz};
+        } else {
+          normal = normal * (1.0 / len);
+          if (normal.x * nx + normal.y * ny + normal.z * nz < 0.0) {
+            normal = normal * -1.0;  // outward
+          }
+        }
+        out[3] = static_cast<float>(normal.x);
+        out[4] = static_cast<float>(normal.y);
+        out[5] = static_cast<float>(normal.z);
       };
       for (int stack = 0; stack < kStacks; ++stack) {
         for (int slice = 0; slice < kSlices; ++slice) {

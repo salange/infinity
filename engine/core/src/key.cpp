@@ -34,8 +34,14 @@ Key derive_named(const Key& parent, NameId name) {
 }
 
 Key derive_child(const Key& parent, KindId kind, std::int64_t x, std::int64_t y,
-                 std::int64_t z) {
-  const std::uint64_t c0 = kTagDeriveChild | (static_cast<std::uint64_t>(kind) << 8U);
+                 std::int64_t z, std::int32_t level) {
+  // The octree level (Cell::w) rides in counter bits 48..63: level 0 is
+  // bit-identical to the historical 3-coordinate derivation, so adding it
+  // moved no existing key — while two octree cells that share x/y/z at
+  // different levels no longer collide (T0017 §5.1).
+  const std::uint64_t c0 = kTagDeriveChild | (static_cast<std::uint64_t>(kind) << 8U) |
+                           (static_cast<std::uint64_t>(static_cast<std::uint16_t>(level))
+                            << 48U);
   const det::PhiloxCounter counter{c0, as_u64(x), as_u64(y), as_u64(z)};
   return child_from(det::philox4x64_10(as_philox(parent), counter));
 }

@@ -40,8 +40,12 @@ Key derive_named(const Key& parent, NameId name);
 
 // DERIVE_CHILD (tag 0x02): spatial/indexed child key. Unused coordinates
 // stay zero by convention (e.g. a linear index goes in x).
+// level is the octree subdivision level (Cell::w); it occupies its own
+// counter bits, so level 0 derives EXACTLY the key the historical 3-coord
+// form produced — fixing the level-collision bug (T0017) without moving
+// any existing key.
 Key derive_child(const Key& parent, KindId kind, std::int64_t x, std::int64_t y = 0,
-                 std::int64_t z = 0);
+                 std::int64_t z = 0, std::int32_t level = 0);
 
 // DRAW_CHUNK (tag 0x03): 256 bits of chunk-addressed randomness.
 // sub_index is a channel-documented extra index (0 when unused).

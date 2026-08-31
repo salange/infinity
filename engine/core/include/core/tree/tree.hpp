@@ -128,7 +128,9 @@ class AxisView {
 
   // Entry key for a cell (derivable without materializing anything).
   Key entry_key(const Cell& cell) const {
-    return derive_child(axis_key_, desc_.child_kind, cell.x, cell.y, cell.z);
+    // cell.w (the octree level) participates in the derivation — without
+    // it, cells at different levels sharing x/y/z collided on one key.
+    return derive_child(axis_key_, desc_.child_kind, cell.x, cell.y, cell.z, cell.w);
   }
 
   std::optional<Address> at(const Cell& cell) const;

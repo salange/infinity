@@ -176,11 +176,7 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
     // The gradient covers the noise term with locally-constant params:
     // difference elevation_from_params with params AND macro frozen at dir.
     const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir));
-    gen::BlendedParams params{};
-    params.relief_amplitude_m = canonical.relief_amplitude_m;
-    params.base_elevation_m = canonical.base_elevation_m;
-    params.ruggedness = canonical.ruggedness;
-    params.carving = canonical.carving;
+    gen::BlendedParams params = gen::TerrainField::to_blended(canonical);
     const Real macro_rel = canonical.macro_rel;
     CHECK(std::abs(result.elevation_m.to_double() -
                    field.elevation_from_params(dir, params, macro_rel).to_double()) < 1e-9);
@@ -262,11 +258,7 @@ TEST_CASE("terrain: measured land fraction tracks the solved sea level (WP1)") {
         const gen::Dir3 dir{Real(cos_lat * std::cos(lon)), Real(cos_lat * std::sin(lon)),
                             Real(std::sin(lat))};
         const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir), &cache);
-        gen::BlendedParams params{};
-        params.relief_amplitude_m = canonical.relief_amplitude_m;
-        params.base_elevation_m = canonical.base_elevation_m;
-        params.ruggedness = canonical.ruggedness;
-        params.carving = canonical.carving;
+        gen::BlendedParams params = gen::TerrainField::to_blended(canonical);
         if (field.elevation_from_params(dir, params, canonical.macro_rel).to_double() >
             sea) {
           land += weight;

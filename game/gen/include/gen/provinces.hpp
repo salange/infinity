@@ -55,6 +55,11 @@ struct ProvinceParams {
   det::Real base_elevation_m;
   det::Real ruggedness;  // [0, 1]
   det::Real carving;     // [0, 1]
+  // T0015 WP8 landform channels — pure functions of the archetype, so
+  // adding them changed no existing draw.
+  det::Real terrace_amount;  // [0, 1] mesa/plateau step blending
+  det::Real terrace_step_m;  // vertical band height when terracing
+  det::Real dune_amount;     // [0, 1] sawtooth dune field strength
   std::uint32_t palette_shift{0};
 };
 
@@ -65,6 +70,9 @@ struct BlendedParams {
   det::Real base_elevation_m;
   det::Real ruggedness;
   det::Real carving;
+  det::Real terrace_amount;
+  det::Real terrace_step_m;
+  det::Real dune_amount;
   CellId dominant;
   Archetype dominant_archetype{Archetype::Flats};
 };

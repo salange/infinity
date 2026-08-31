@@ -595,11 +595,7 @@ int main(int argc, char** argv) {
                                  inf::det::Real(std::sin(phi))};
         const auto canonical =
             anchor->field->canonical_params(inf::gen::dir_to_face_uv(dir), &cache);
-        inf::gen::BlendedParams params{};
-        params.relief_amplitude_m = canonical.relief_amplitude_m;
-        params.base_elevation_m = canonical.base_elevation_m;
-        params.ruggedness = canonical.ruggedness;
-        params.carving = canonical.carving;
+        inf::gen::BlendedParams params = inf::gen::TerrainField::to_blended(canonical);
         // Sunk 300 m below the true surface: streamed chunks always win
         // depth (no z-fighting), while unstreamed regions show the right
         // continents instead of bare ocean. Invisible from orbit

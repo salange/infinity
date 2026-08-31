@@ -37,11 +37,7 @@ TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet
 
 Real TerrainField::elevation_m(const Dir3& unit_dir) const {
   const CanonicalParams canonical = canonical_params(dir_to_face_uv(unit_dir));
-  BlendedParams params{};
-  params.relief_amplitude_m = canonical.relief_amplitude_m;
-  params.base_elevation_m = canonical.base_elevation_m;
-  params.ruggedness = canonical.ruggedness;
-  params.carving = canonical.carving;
+  BlendedParams params = TerrainField::to_blended(canonical);
   return elevation_from_params(unit_dir, params, canonical.macro_rel);
 }
 
@@ -54,7 +50,9 @@ TerrainField::CanonicalParams TerrainField::param_lattice_value(std::uint8_t fac
   const Dir3 dir = face_uv_to_dir(FaceUV{face, u, v});
   const BlendedParams blended = provinces_.sample(dir);
   return CanonicalParams{blended.relief_amplitude_m, blended.base_elevation_m,
-                         blended.ruggedness, blended.carving, Real(0.0)};
+                         blended.ruggedness,        blended.carving,
+                         blended.terrace_amount,    blended.terrace_step_m,
+                         blended.dune_amount,       Real(0.0)};
 }
 
 TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_uv,
@@ -101,6 +99,9 @@ TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_
                          bilerp(&CanonicalParams::base_elevation_m),
                          bilerp(&CanonicalParams::ruggedness),
                          bilerp(&CanonicalParams::carving),
+                         bilerp(&CanonicalParams::terrace_amount),
+                         bilerp(&CanonicalParams::terrace_step_m),
+                         bilerp(&CanonicalParams::dune_amount),
                          macro_.canonical_value(face_uv, cache != nullptr ? &cache->macro
                                                                           : nullptr)};
 }
@@ -249,10 +250,50 @@ Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams&
   }
 
   // --- drainage/v1 (T0015 WP6): valley carve toward the river network.
-  // Direction-only, like everything above; the carve clamps itself so a
-  // valley floor never dips below ~3 m over the sea.
+  // Direction-only, like everything above. High-carving provinces
+  // (Canyon, Canyonlands) cut disproportionately deep gorges (WP8); the
+  // clamp keeps every valley floor ~3 m over the sea.
   if (drainage_.enabled()) {
-    height = height - drainage_.carve_m(unit_dir, height - planet_.sea_level_m);
+    const Real above = height - planet_.sea_level_m;
+    Real carve = drainage_.carve_m(unit_dir, above);
+    carve = det::min(carve * (Real(1.0) + params.carving * Real(1.2)),
+                     det::max(Real(0.0), above - Real(3.0)));
+    height = height - carve;
+  }
+
+  // --- terraces / mesas / plateau scarps (T0015 WP8) ------------------
+  // h' = lerp(h, banded(h), amount): flat treads over ~2/3 of each band,
+  // a C1 riser over the rest — mesas on Desert, scarp-edged plateaus on
+  // highlands, stepped canyon walls after the drainage cut. Amount and
+  // step blend continuously across province borders, so the operator
+  // fades in and out without seams.
+  if (params.terrace_amount > Real(0.001) && params.terrace_step_m > Real(1.0)) {
+    const Real step = det::max(params.terrace_step_m, Real(20.0));
+    const Real bands = height / step;
+    const Real base_band(std::floor(bands.to_double()));
+    const Real f = bands - base_band;
+    Real riser = det::clamp((f - Real(0.65)) / Real(0.35), Real(0.0), Real(1.0));
+    riser = riser * riser * (Real(3.0) - (riser + riser));
+    const Real terraced = (base_band + riser) * step;
+    const Real amount = det::clamp(params.terrace_amount, Real(0.0), Real(1.0));
+    height = height + (terraced - height) * amount;
+  }
+
+  // --- dunes (T0015 WP8) ----------------------------------------------
+  // Asymmetric sawtooth ridges across the per-body wind axis (the WP4
+  // anisotropy axis; a per-province wind is the documented upgrade):
+  // a long shallow windward slope, a short slip face near the WP2 talus
+  // angle, rows jittered by the coarse flow noise.
+  if (params.dune_amount > Real(0.001)) {
+    const Real radius = planet_.radius_m;
+    const Real along = (unit_dir.x * detail_axis_.x + unit_dir.y * detail_axis_.y +
+                        unit_dir.z * detail_axis_.z) *
+                       radius;
+    const Real cycles = along / Real(190.0) + flow.value * Real(1.3);
+    const Real t = cycles - Real(std::floor(cycles.to_double()));
+    const Real profile =
+        t < Real(0.72) ? t / Real(0.72) : (Real(1.0) - t) / Real(0.28);
+    height = height + params.dune_amount * Real(13.0) * (profile - Real(0.5));
   }
 
   // --- features/v1 (T0015 WP5): bounded surface entities, craters first.
@@ -296,11 +337,7 @@ Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedPara
 
 TerrainField::ElevationD TerrainField::elevation_and_gradient(const Dir3& unit_dir) const {
   const CanonicalParams canonical = canonical_params(dir_to_face_uv(unit_dir));
-  BlendedParams params{};
-  params.relief_amplitude_m = canonical.relief_amplitude_m;
-  params.base_elevation_m = canonical.base_elevation_m;
-  params.ruggedness = canonical.ruggedness;
-  params.carving = canonical.carving;
+  BlendedParams params = TerrainField::to_blended(canonical);
   ElevationD out;
   out.elevation_m = evaluate_elevation(unit_dir, params, canonical.macro_rel, &out.slope);
   return out;
@@ -593,11 +630,7 @@ std::vector<Real> sample_range(const TerrainField& field, const ChunkGrid& grid,
 
       const TerrainField::CanonicalParams canonical =
           field.canonical_params(face_uv, &param_cache);
-      BlendedParams params{};
-      params.relief_amplitude_m = canonical.relief_amplitude_m;
-      params.base_elevation_m = canonical.base_elevation_m;
-      params.ruggedness = canonical.ruggedness;
-      params.carving = canonical.carving;
+      BlendedParams params = TerrainField::to_blended(canonical);
       const Real surface_r =
           field.planet().radius_m +
           field.elevation_from_params(dir, params, canonical.macro_rel, &param_cache);

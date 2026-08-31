@@ -70,9 +70,26 @@ class TerrainField {
     det::Real base_elevation_m;
     det::Real ruggedness;
     det::Real carving;
+    det::Real terrace_amount;
+    det::Real terrace_step_m;
+    det::Real dune_amount;
     // Canonical macro/v1 value (dimensionless, own lod-7 lattice).
     det::Real macro_rel;
   };
+
+  // The province-parameter view of a canonical sample (macro_rel rides
+  // separately) — the one place that copies the channels.
+  static BlendedParams to_blended(const CanonicalParams& canonical) {
+    BlendedParams params{};
+    params.relief_amplitude_m = canonical.relief_amplitude_m;
+    params.base_elevation_m = canonical.base_elevation_m;
+    params.ruggedness = canonical.ruggedness;
+    params.carving = canonical.carving;
+    params.terrace_amount = canonical.terrace_amount;
+    params.terrace_step_m = canonical.terrace_step_m;
+    params.dune_amount = canonical.dune_amount;
+    return params;
+  }
 
   // True blended sample at one lattice corner (ci, cj in [0, cells]).
   // Province scalars only — macro rides its own (finer) lattice.

@@ -69,7 +69,16 @@ bool Player::can_land() const {
     return false;
   }
   const double band = body.atmosphere_m > 0.0 ? body.atmosphere_m : kAirlessLandingBand;
-  return length(position_ - body.center) - body.radius_m < band;
+  if (length(position_ - body.center) - body.radius_m >= band) {
+    return false;
+  }
+  // No landing over open water: the ground under the crosshair radial
+  // must break the sea surface.
+  const double water = water_radius();
+  if (water > 0.0 && ground_radius(normalize(position_)) <= water) {
+    return false;
+  }
+  return true;
 }
 
 double Player::altitude() const {
@@ -211,9 +220,24 @@ void Player::update_flight(const InputFrame& input) {
   }
 }
 
+double Player::water_radius() const {
+  // Only EarthLike renders a water surface; its solved sea level is the
+  // hard deck. Other types return 0 (no water clamp).
+  if (field_->planet().type != gen::PlanetType::EarthLike) {
+    return 0.0;
+  }
+  return field_->planet().radius_m.to_double() + field_->planet().sea_level_m.to_double();
+}
+
 void Player::clamp_to_ground_flight() {
   const Vec3 radial = normalize(position_);
-  const double min_r = ground_radius(radial) + kShipClearance;
+  double min_r = ground_radius(radial) + kShipClearance;
+  // No diving: the flight floor never drops below kWaterClearance above
+  // the sea surface on water worlds.
+  const double water = water_radius();
+  if (water > 0.0) {
+    min_r = std::max(min_r, water + kWaterClearance);
+  }
   const double r = length(position_);
   if (r < min_r) {
     // Stop the inward component: slide along the surface at clearance.
@@ -255,9 +279,15 @@ void Player::update_on_foot(const InputFrame& input) {
     position_ = position_ + normalize(move) * (walk_speed * dt);
   }
 
-  // Glued to the ground: eye height above the surface along the radial.
+  // Glued to the ground: eye height above the surface along the radial —
+  // never below the water surface (wading stops at the sea).
   const Vec3 new_radial = normalize(position_);
-  position_ = new_radial * (ground_radius(new_radial) + kEyeHeight);
+  double stand_r = ground_radius(new_radial);
+  const double water = water_radius();
+  if (water > 0.0) {
+    stand_r = std::max(stand_r, water);
+  }
+  position_ = new_radial * (stand_r + kEyeHeight);
 
   try_fire(input);
 

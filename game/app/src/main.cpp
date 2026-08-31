@@ -276,8 +276,13 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
 
   inf::world::ChunkManagerConfig config;
   const unsigned hardware = std::thread::hardware_concurrency();
-  config.worker_count = hardware > 4 ? (hardware - 2 > 8 ? 8 : hardware - 2) : 2;
-  config.split_factor = 1.5;
+  config.worker_count = hardware > 4 ? (hardware - 2 > 10 ? 10 : hardware - 2) : 2;
+  // Split aggressiveness + residency raised (2026-08-31): chunks refine
+  // much earlier, which pushes the coarse-LOD aliasing band (false
+  // land/water patches over the ocean) far out and brings walking-scale
+  // detail in sooner.
+  config.split_factor = 2.6;
+  config.resident_budget = 4096;
   // Deepen the quadtree until the finest chunk is ~32 m across (~1 m
   // voxels). The cap has to clear the largest bodies: a 1:10 gas giant is
   // ~7000 km, so 16 levels would leave 200 m chunks and unusably blocky
@@ -547,16 +552,87 @@ int main(int argc, char** argv) {
   // EarthLike only. Zero shading effort by design. Rebuilt per anchor.
   std::uint32_t sea_mesh = 0;
   double sea_radius = 0.0;
+  // Land impostor (T0015 follow-up): a coarse elevation-displaced sphere
+  // sampled ONCE per anchor. From orbit the chunk terrain is hidden (its
+  // coarse LOD aliases into flickering land/water patches); this static
+  // mesh carries the continents instead — same land, no churn.
+  std::uint32_t land_mesh = 0;
   const auto rebuild_sea = [&] {
     if (sea_mesh != 0) {
       rhi->destroy_mesh(sea_mesh);
       sea_mesh = 0;
     }
+    if (land_mesh != 0) {
+      rhi->destroy_mesh(land_mesh);
+      land_mesh = 0;
+    }
     sea_radius = 0.0;
     if (anchor->planet.type == inf::gen::PlanetType::EarthLike) {
-      const std::vector<float> sphere = unit_sphere_vertices(64, 32);
+      // Dense enough that the water silhouette stays round at low flight.
+      const std::vector<float> sphere = unit_sphere_vertices(192, 96);
       sea_mesh = rhi->create_mesh(sphere.data(), sphere.size());
       sea_radius = anchor->radius + anchor->planet.sea_level_m.to_double();
+    }
+    {
+      constexpr int kSlices = 160;
+      constexpr int kStacks = 80;
+      const double pi = 3.14159265358979323846;
+      inf::gen::TerrainField::ParamCache cache;
+      const auto vertex_radius = [&](int slice, int stack) {
+        const double phi = pi * stack / kStacks - pi * 0.5;
+        const double theta = 2.0 * pi * slice / kSlices;
+        const inf::gen::Dir3 dir{inf::det::Real(std::cos(phi) * std::cos(theta)),
+                                 inf::det::Real(std::cos(phi) * std::sin(theta)),
+                                 inf::det::Real(std::sin(phi))};
+        const auto canonical =
+            anchor->field->canonical_params(inf::gen::dir_to_face_uv(dir), &cache);
+        inf::gen::BlendedParams params{};
+        params.relief_amplitude_m = canonical.relief_amplitude_m;
+        params.base_elevation_m = canonical.base_elevation_m;
+        params.ruggedness = canonical.ruggedness;
+        params.carving = canonical.carving;
+        return anchor->radius +
+               anchor->field->elevation_from_params(dir, params, canonical.macro_rel)
+                   .to_double();
+      };
+      // Radius table first: every grid point sampled exactly once.
+      std::vector<double> radii(static_cast<std::size_t>(kSlices + 1) * (kStacks + 1));
+      for (int stack = 0; stack <= kStacks; ++stack) {
+        for (int slice = 0; slice <= kSlices; ++slice) {
+          radii[static_cast<std::size_t>(stack) * (kSlices + 1) + slice] =
+              vertex_radius(slice % kSlices, stack);
+        }
+      }
+      std::vector<float> vertices;
+      vertices.reserve(static_cast<std::size_t>(kSlices) * kStacks * 36);
+      const auto point = [&](int slice, int stack, float out[6]) {
+        const double phi = pi * stack / kStacks - pi * 0.5;
+        const double theta = 2.0 * pi * slice / kSlices;
+        const double nx = std::cos(phi) * std::cos(theta);
+        const double ny = std::cos(phi) * std::sin(theta);
+        const double nz = std::sin(phi);
+        const double r = radii[static_cast<std::size_t>(stack) * (kSlices + 1) + slice];
+        out[0] = static_cast<float>(nx * r);
+        out[1] = static_cast<float>(ny * r);
+        out[2] = static_cast<float>(nz * r);
+        out[3] = static_cast<float>(nx);
+        out[4] = static_cast<float>(ny);
+        out[5] = static_cast<float>(nz);
+      };
+      for (int stack = 0; stack < kStacks; ++stack) {
+        for (int slice = 0; slice < kSlices; ++slice) {
+          float p00[6], p10[6], p01[6], p11[6];
+          point(slice, stack, p00);
+          point(slice + 1, stack, p10);
+          point(slice, stack + 1, p01);
+          point(slice + 1, stack + 1, p11);
+          const float* quad[6] = {p00, p10, p11, p00, p11, p01};
+          for (const float* v : quad) {
+            vertices.insert(vertices.end(), v, v + 6);
+          }
+        }
+      }
+      land_mesh = rhi->create_mesh(vertices.data(), vertices.size());
     }
   };
   rebuild_sea();
@@ -959,6 +1035,16 @@ int main(int argc, char** argv) {
         // altitude (day-side captures).
         player.set_position(inf::sim::normalize(star_local) *
                             (anchor->radius + arg_d(0)));
+      } else if (cmd.op == "possun2" && cmd.args.size() >= 2) {
+        // Like possun, but rotated <deg> around the planet Z axis — walk
+        // the terminator to find day-side land or ocean.
+        const SVec3 sun = inf::sim::normalize(star_local);
+        const double rad = arg_d(1) * 3.14159265358979323846 / 180.0;
+        const double c = std::cos(rad);
+        const double s = std::sin(rad);
+        const SVec3 dir = inf::sim::normalize(
+            SVec3{sun.x * c - sun.y * s, sun.x * s + sun.y * c, sun.z});
+        player.set_position(dir * (anchor->radius + arg_d(0)));
       } else if (cmd.op == "aim" && !cmd.args.empty()) {
         if (cmd.args[0] == "sun") {
           aim_at(inf::sim::normalize(star_local - player.position()));
@@ -1126,10 +1212,13 @@ int main(int argc, char** argv) {
     const RVec3 cam_forward = to_render(cam_fwd_v);
     const RVec3 cam_up = to_render(cam_up_sv);
     const double altitude = inf::render::length(camera_pos) - anchor->radius;
-    // From high orbit the chunk terrain is hidden entirely: at that range
-    // its coarse LOD only produces lattice artifacts, and the lit
-    // ocean/terrain impostor carries the planet's look instead.
-    const bool show_surface = altitude < 0.7 * anchor->radius;
+    // From orbit the chunk terrain is hidden entirely: at that range its
+    // coarse LOD only produces lattice artifacts (false land/water
+    // diamonds over the ocean), and the lit ocean/terrain impostor
+    // carries the planet's look instead. Threshold tightened 0.7R ->
+    // 0.35R (2026-08-31): with the more aggressive split factor the
+    // terrain is properly refined by the time it appears.
+    const bool show_surface = altitude < 0.35 * anchor->radius;
     double farthest_star = inf::sim::length(star_local - cam_pos_local);
     for (const StarInstance& star : stars_local) {
       farthest_star = std::max(farthest_star, inf::sim::length(star.pos - cam_pos_local));
@@ -1296,6 +1385,22 @@ int main(int argc, char** argv) {
         draw_ball(planet_local[static_cast<std::size_t>(slot)],
                   entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2]);
       }
+      // From orbit (chunks hidden), the static land impostor carries the
+      // continents — lit with the same terrain material, so the swap to
+      // real chunks on approach is seamless in tone.
+      if (!show_surface && land_mesh != 0) {
+        const RVec3 rel = to_render(SVec3{0.0, 0.0, 0.0}) - camera_pos;
+        const Mat4 model = inf::render::translate(rel);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = land_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.aux[0] = static_cast<float>(rel.x);
+        item.aux[1] = static_cast<float>(rel.y);
+        item.aux[2] = static_cast<float>(rel.z);
+        items.push_back(item);
+      }
+
       // The anchor always keeps an under-the-terrain impostor sphere,
       // LIT with the same terrain material: freshly-anchored planets are
       // visible before their chunks stream in, and LOD-seam pinholes at

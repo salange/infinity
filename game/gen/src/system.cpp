@@ -148,17 +148,14 @@ PlanetClass draw_planet_class(std::uint64_t word, double a_game, double frost_li
   return PlanetClass::Rocky;
 }
 
-// Game-scale physical radius by class (1:10 global: Earth-analogue
-// ~640 km; type ranges ~150-800 km — supersedes v0's 40-100 km).
+// Game-scale physical radius by class. The ranges live in ONE place
+// (gen/planet.hpp radius_range_m) and are a straight 1:10 of the real
+// ones, giants included: Jupiter = 6991 km, Neptune = 2462 km, Earth =
+// 637 km. Superseded 2026-08-31 the old 150-800 km table, which had
+// squeezed every class into the terrestrial band.
 double draw_radius_m(std::uint64_t word, PlanetClass cls) {
-  switch (cls) {
-    case PlanetClass::Rocky: return uniform(word, 250'000.0, 700'000.0);
-    case PlanetClass::SuperEarth: return uniform(word, 600'000.0, 800'000.0);
-    case PlanetClass::SubNeptune: return uniform(word, 650'000.0, 800'000.0);
-    case PlanetClass::IceGiant: return uniform(word, 700'000.0, 800'000.0);
-    case PlanetClass::GasGiant: return uniform(word, 750'000.0, 800'000.0);
-  }
-  return 400'000.0;
+  const RadiusRange range = radius_range_m(cls);
+  return uniform(word, range.lo_m, range.hi_m);
 }
 
 PlanetType surface_type_for(PlanetClass cls, double flux_rel, double radius_m,
@@ -174,7 +171,7 @@ PlanetType surface_type_for(PlanetClass cls, double flux_rel, double radius_m,
     return PlanetType::Ice;
   }
   // Temperate band: EarthLike if big enough to hold an atmosphere.
-  if (radius_m > 420'000.0) {
+  if (radius_m > kAtmosphereMinRadiusM) {
     return PlanetType::EarthLike;
   }
   return u01d(word) < 0.5 ? PlanetType::Barren : PlanetType::Desert;
@@ -224,7 +221,6 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
   const core::Key planets_key = core::derive_named(system_entity_key, name::PlanetsV1);
   system.planets.resize(kMaxPlanetSlots);
   double a = uniform(arch_draw[1], spec.first_a_lo, spec.first_a_hi) * kAuGame;
-  bool any_landable = false;
   for (int slot = 0; slot < planet_count && slot < kMaxPlanetSlots; ++slot) {
     const auto d0 = core::draw_point(planets_key, channel::Params, slot, 0, 0);
     const auto d1 = core::draw_point(planets_key, channel::Params, slot, 1, 0);
@@ -234,15 +230,10 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
     planet.occupied = true;
     planet.phys.cls = draw_planet_class(d0[0], a, frost_line, system.archetype);
     planet.phys.radius_m = Real(draw_radius_m(d0[1], planet.phys.cls));
-    // Mass in Earth masses from radius/class (rough density families).
-    const double r_rel = planet.phys.radius_m.to_double() / 637'000.0;
-    const double mass_scale = planet.phys.cls == PlanetClass::GasGiant   ? 120.0
-                              : planet.phys.cls == PlanetClass::IceGiant ? 16.0
-                              : planet.phys.cls == PlanetClass::SubNeptune ? 6.0
-                                                                            : 1.0;
-    planet.phys.mass_earth = Real(mass_scale * r_rel * r_rel * r_rel);
+    planet.phys.mass_earth = mass_earth_for(planet.phys.cls, planet.phys.radius_m);
     planet.phys.mu = Real(3.986004418e13 * planet.phys.mass_earth.to_double());  // GM_earth/10
-    planet.phys.g_surface = Real(uniform(d0[2], 0.75, 1.25) * 9.81 * r_rel);
+    planet.phys.g_surface = surface_gravity(planet.phys.mass_earth, planet.phys.radius_m,
+                                            uniform(d0[2], 0.9, 1.1));
 
     // Hill-spacing enforcement (>= 10 mutual Hill radii; stability by
     // construction, never integrated).
@@ -301,9 +292,11 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
       planet.spin.spin_rate_rad_s = Real(det::sqrt(Real(mu_star / a3)).to_double());
     }
 
-    // Surface mapping for the surface generator.
-    planet.landable = planet.phys.cls == PlanetClass::Rocky ||
-                      planet.phys.cls == PlanetClass::SuperEarth;
+    // Surface mapping for the surface generator. EVERY planet is landable
+    // and carries a full terrain field (uniform-planet rule, 2026-08-31):
+    // giants get a Barren surface at their nominal radius — approach,
+    // speed limits, landing, and digging work the same on every body.
+    planet.landable = true;
     planet.surface_type = surface_type_for(planet.phys.cls, flux,
                                            planet.phys.radius_m.to_double(), d0[2]);
     planet.phys.surface_type = static_cast<std::uint32_t>(planet.surface_type);
@@ -316,35 +309,9 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
     system.planets[static_cast<std::size_t>(slot)] = planet;
     // Next slot's provisional semi-major axis.
     a = a * uniform(d2[3], spec.ratio_lo, spec.ratio_hi);
-    if (!planet.landable) {
-      // keep scanning
-    } else {
-      any_landable = true;
-    }
   }
-
-  // Guarantee at least one landable body (default spawn contract): if the
-  // draw produced none, re-class slot 0 as a temperate rocky world.
-  if (!any_landable) {
-    SystemPlanet& first = system.planets[0];
-    if (!first.occupied) {
-      first = SystemPlanet{};
-      first.occupied = true;
-      const auto d0 = core::draw_point(planets_key, channel::Params, 0, 0, 0);
-      first.orbit.a_m = Real(1.0 * kAuGame);
-      first.orbit.e = Real(0.02);
-      first.orbit.mu_parent = Real(mu_star);
-      first.orbit.mean_anom_0_rad = Real(u01d(d0[0]) * kTwoPi);
-      first.spin.spin_rate_rad_s = Real(kTwoPi / kEarthDayGame);
-    }
-    first.phys.cls = PlanetClass::Rocky;
-    first.phys.radius_m = Real(550'000.0);
-    first.phys.g_surface = Real(9.0);
-    first.landable = true;
-    first.surface_type = PlanetType::EarthLike;
-    first.phys.surface_type = static_cast<std::uint32_t>(PlanetType::EarthLike);
-    first.phys.atmosphere.height_m = Real(10'000.0);
-  }
+  // Every archetype draws >= 1 planet and every planet is landable, so
+  // the default-spawn contract holds by construction.
 
   // moons/v1: recursive mini-systems within the Hill sphere.
   const core::Key moons_key = core::derive_named(system_entity_key, name::MoonsV1);
@@ -375,10 +342,10 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
       SystemMoon moon;
       moon.phys.cls = PlanetClass::Rocky;
       moon.phys.radius_m = Real(uniform(mdraw[0], 120'000.0, 320'000.0));
-      const double mr = moon.phys.radius_m.to_double() / 637'000.0;
-      moon.phys.mass_earth = Real(mr * mr * mr);
+      moon.phys.mass_earth = mass_earth_for(PlanetClass::Rocky, moon.phys.radius_m);
       moon.phys.mu = Real(3.986004418e13 * moon.phys.mass_earth.to_double());
-      moon.phys.g_surface = Real(uniform(mdraw[1], 0.6, 1.1) * 9.81 * mr);
+      moon.phys.g_surface = surface_gravity(moon.phys.mass_earth, moon.phys.radius_m,
+                                            uniform(mdraw[1], 0.85, 1.05));
       moon.phys.surface_type = static_cast<std::uint32_t>(
           u01d(mdraw[2]) < 0.6 ? PlanetType::Barren : PlanetType::Ice);
       moon.orbit.a_m = Real(moon_a);
@@ -420,17 +387,59 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
   outer.thickness_m = Real(last_a * 0.05);
   system.belts.push_back(outer);
 
+  // multistar/v1: stellar multiplicity with roughly galactic frequencies
+  // (population-weighted over the M-dwarf-dominated IMF: ~2/3 single,
+  // ~1/4 binary, rest higher-order — Duchene & Kraus 2013 ballpark).
+  // Companions are WIDE S-type orbits far outside the outer planet, so
+  // this layer never perturbs planets/v1 output (extension-safe).
+  const core::Key multistar_key = core::derive_named(system_entity_key, name::MultistarV1);
+  const auto multi_draw = core::draw_point(multistar_key, channel::Params, 0, 0, 0);
+  static constexpr std::array<int, 3> kMultiplicityWeights = {66, 26, 8};
+  const int companion_count = static_cast<int>(weighted(multi_draw[0], kMultiplicityWeights));
+  double outer_extent = last_a;
+  for (const SystemBelt& belt : system.belts) {
+    outer_extent = std::max(outer_extent, belt.outer_m.to_double());
+  }
+  double companion_a = outer_extent;
+  for (int ci = 0; ci < companion_count; ++ci) {
+    const core::Key companion_key =
+        core::derive_child(multistar_key, kind::Star, ci + 1);
+    SystemStar companion;
+    companion.phys = draw_star(companion_key);
+    const auto od = core::draw_point(multistar_key, channel::Params, ci + 1, 1, 0);
+    companion_a *= uniform(od[0], 3.5, 6.0);
+    companion.orbit.a_m = Real(companion_a);
+    companion.orbit.e = Real(u01d(od[1]) * 0.35);
+    companion.orbit.i_rad = Real(u01d(od[2]) * 0.35);
+    companion.orbit.raan_rad = Real(u01d(od[3]) * kTwoPi);
+    const auto od2 = core::draw_point(multistar_key, channel::Params, ci + 1, 2, 0);
+    companion.orbit.argp_rad = Real(u01d(od2[0]) * kTwoPi);
+    companion.orbit.mean_anom_0_rad = Real(u01d(od2[1]) * kTwoPi);
+    // Two-body mu: primary + this companion (game scale).
+    companion.orbit.mu_parent =
+        Real(mu_star + kMuSunGame * companion.phys.mass_solar.to_double());
+    system.companions.push_back(companion);
+  }
+
   return system;
 }
 
 int default_landable_slot(const StarSystemParams& system) {
+  // Spawn preference: the first EarthLike world if the system has one,
+  // otherwise the first occupied slot (every planet is landable now).
   for (int slot = 0; slot < kMaxPlanetSlots; ++slot) {
     const SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
-    if (planet.occupied && planet.landable) {
+    if (planet.occupied && planet.surface_type == PlanetType::EarthLike) {
       return slot;
     }
   }
-  return 0;  // unreachable: generation guarantees a landable body
+  for (int slot = 0; slot < kMaxPlanetSlots; ++slot) {
+    const SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
+    if (planet.occupied) {
+      return slot;
+    }
+  }
+  return 0;  // unreachable: generation guarantees an occupied slot
 }
 
 PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
@@ -483,7 +492,20 @@ std::string system_to_json(const StarSystemParams& system) {
   json_real(&out, "luminosity_solar", system.star.luminosity_solar);
   json_real(&out, "temperature_k", system.star.temperature_k);
   json_real(&out, "mu", system.star.mu, false);
-  out += "},\n";
+  out += "},\n\"companions\": [";
+  for (std::size_t c = 0; c < system.companions.size(); ++c) {
+    const SystemStar& companion = system.companions[c];
+    if (c > 0) out += ", ";
+    out += "{";
+    std::snprintf(buffer, sizeof(buffer), "\"class\": \"%s\", ",
+                  kClassNames[static_cast<int>(companion.phys.cls)]);
+    out += buffer;
+    json_real(&out, "mass_solar", companion.phys.mass_solar);
+    json_real(&out, "temperature_k", companion.phys.temperature_k);
+    json_real(&out, "a_m", companion.orbit.a_m, false);
+    out += "}";
+  }
+  out += "],\n";
   std::snprintf(buffer, sizeof(buffer), "\"archetype\": \"%s\",\n",
                 to_string(system.archetype));
   out += buffer;
@@ -566,7 +588,7 @@ std::string hash_system_report() {
   // day, +1 game year, and 1000 s before the epoch.
   static constexpr std::int64_t kTimesNs[] = {0, 8'640'000'000'000LL,
                                               3'155'760'000'000'000LL, -1'000'000'000'000LL};
-  std::string report = "hash-system v1\n";
+  std::string report = "hash-system v2\n";
   static constexpr char kDigits[] = "0123456789abcdef";
   for (const core::Seed128& seed : kSeeds) {
     const auto tree = make_tree(seed);
@@ -576,6 +598,12 @@ std::string hash_system_report() {
     hash.feed(static_cast<std::uint64_t>(system.archetype));
     hash.feed(std::bit_cast<std::uint64_t>(system.star.mass_solar.to_double()));
     hash.feed(std::bit_cast<std::uint64_t>(system.frost_line_m.to_double()));
+    hash.feed(static_cast<std::uint64_t>(system.companions.size()));
+    for (const SystemStar& companion : system.companions) {
+      hash.feed(static_cast<std::uint64_t>(companion.phys.cls));
+      hash.feed(std::bit_cast<std::uint64_t>(companion.phys.mass_solar.to_double()));
+      hash.feed(std::bit_cast<std::uint64_t>(companion.orbit.a_m.to_double()));
+    }
     for (int slot = 0; slot < kMaxPlanetSlots; ++slot) {
       const SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
       if (!planet.occupied) continue;

@@ -48,8 +48,19 @@ struct SystemBelt {
   det::Real inner_m, outer_m, thickness_m;
 };
 
+// Companion star (multistar/v1): a wide S-type companion on a Keplerian
+// orbit around the primary, placed far beyond the outer planet so the
+// planet architecture stays untouched (extension-safe layer).
+struct SystemStar {
+  core::StarPhys phys;
+  core::OrbitalElements orbit;  // parent = the primary star
+};
+
 struct StarSystemParams {
-  core::StarPhys star;          // single star (multi-star gated, T0012)
+  core::StarPhys star;          // the primary (system frame origin)
+  // 0 companions = single, 1 = binary, 2 = trinary. Multiplicity is drawn
+  // with roughly galactic frequencies (~2/3 single) under multistar/v1.
+  std::vector<SystemStar> companions;
   SystemArchetype archetype{SystemArchetype::SolarLike};
   det::Real frost_line_m;       // disk/v1 scaffold output
   std::vector<SystemPlanet> planets;  // slot-indexed (kMaxPlanetSlots)

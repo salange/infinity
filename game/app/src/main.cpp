@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <GLFW/glfw3.h>
@@ -237,9 +238,14 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
   const unsigned hardware = std::thread::hardware_concurrency();
   config.worker_count = hardware > 4 ? (hardware - 2 > 8 ? 8 : hardware - 2) : 2;
   config.split_factor = 1.5;
+  // Deepen the quadtree until the finest chunk is ~32 m across (~1 m
+  // voxels). The cap has to clear the largest bodies: a 1:10 gas giant is
+  // ~7000 km, so 16 levels would leave 200 m chunks and unusably blocky
+  // digging. 20 levels covers the whole class range; pack_column gives
+  // i/j 26 bits each, so there is plenty of address headroom.
   std::uint8_t max_lod = 8;
   while ((2.0 * anchor->radius) / static_cast<double>(std::uint64_t{1} << max_lod) > 32.0 &&
-         max_lod < 16) {
+         max_lod < 20) {
     ++max_lod;
   }
   config.max_lod = max_lod;
@@ -268,6 +274,53 @@ std::array<double, 4> project_point(const Mat4& m, const RVec3& v) {
     clip[row] = m.m[row] * v.x + m.m[4 + row] * v.y + m.m[8 + row] * v.z + m.m[12 + row];
   }
   return clip;
+}
+
+// Unit quad in the xy plane ([-1,1]^2, z = 0), used camera-oriented as
+// the corona/glow billboard (the shader shapes it radially).
+std::vector<float> unit_quad_vertices() {
+  static constexpr float kCorners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+  static constexpr int kTri[6] = {0, 1, 2, 0, 2, 3};
+  std::vector<float> vertices;
+  vertices.reserve(36);
+  for (const int index : kTri) {
+    vertices.insert(vertices.end(), {kCorners[index][0], kCorners[index][1], 0.0f, 0.0f,
+                                     0.0f, 1.0f});
+  }
+  return vertices;
+}
+
+// Blackbody-ish tint for a star's effective temperature: M dwarfs deep
+// orange through G yellow-white up to B blue (piecewise linear).
+void star_tint(double temp_k, float out[3]) {
+  struct Stop {
+    double temp;
+    float r, g, b;
+  };
+  static constexpr Stop kStops[] = {
+      {2500.0, 1.00f, 0.42f, 0.22f}, {3500.0, 1.00f, 0.60f, 0.40f},
+      {4500.0, 1.00f, 0.77f, 0.56f}, {5800.0, 1.00f, 0.93f, 0.82f},
+      {7000.0, 1.00f, 0.98f, 0.97f}, {8500.0, 0.83f, 0.90f, 1.00f},
+      {12000.0, 0.72f, 0.82f, 1.00f}, {30000.0, 0.60f, 0.74f, 1.00f},
+  };
+  constexpr int kCount = static_cast<int>(sizeof(kStops) / sizeof(kStops[0]));
+  if (temp_k <= kStops[0].temp) {
+    out[0] = kStops[0].r; out[1] = kStops[0].g; out[2] = kStops[0].b;
+    return;
+  }
+  for (int i = 1; i < kCount; ++i) {
+    if (temp_k <= kStops[i].temp) {
+      const float t = static_cast<float>((temp_k - kStops[i - 1].temp) /
+                                         (kStops[i].temp - kStops[i - 1].temp));
+      out[0] = kStops[i - 1].r + t * (kStops[i].r - kStops[i - 1].r);
+      out[1] = kStops[i - 1].g + t * (kStops[i].g - kStops[i - 1].g);
+      out[2] = kStops[i - 1].b + t * (kStops[i].b - kStops[i - 1].b);
+      return;
+    }
+  }
+  out[0] = kStops[kCount - 1].r;
+  out[1] = kStops[kCount - 1].g;
+  out[2] = kStops[kCount - 1].b;
 }
 
 std::vector<float> unit_sphere_vertices(int slices, int stacks) {
@@ -299,10 +352,18 @@ std::vector<float> unit_sphere_vertices(int slices, int stacks) {
 int main(int argc, char** argv) {
   long max_frames = 0;
   double spawn_altitude = -1.0;  // <0: default orbit spawn
-  const char* seed_text = "7";
+  // DEFAULT-SEED CONTRACT (2026-08-31): the default seed must produce a
+  // system with >= 5 planets, at least one of them EarthLike with >= 1
+  // moon. Seed "83" (hex, = 0x83): G star, 9 planets, EarthLike
+  // super-earth with 2 moons at slot 1. If a generation change breaks
+  // these properties for this seed, search for a new qualifying seed
+  // (scan `infinity-cli dump-system` over seeds) and replace it here AND
+  // in the contract test (game/tests/test_system.cpp).
+  const char* seed_text = "83";
   const char* type_text = nullptr;
   const char* diff_text = nullptr;
   bool map_demo = false;  // scripted M/Esc for headless smoke + captures
+  bool windowed = false;  // default is fullscreen on the primary monitor
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       max_frames = std::strtol(argv[++i], nullptr, 10);
@@ -316,6 +377,8 @@ int main(int argc, char** argv) {
       diff_text = argv[++i];
     } else if (std::strcmp(argv[i], "--map-demo") == 0) {
       map_demo = true;
+    } else if (std::strcmp(argv[i], "--windowed") == 0) {
+      windowed = true;
     }
   }
 
@@ -359,7 +422,26 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  GLFWwindow* window = glfwCreateWindow(1280, 720, "infinity", nullptr, nullptr);
+  // Fullscreen on the primary monitor by default (borderless at the
+  // desktop video mode); --windowed keeps the old 1280x720 window.
+  GLFWmonitor* monitor = nullptr;
+  int win_w = 1280;
+  int win_h = 720;
+  if (!windowed) {
+    monitor = glfwGetPrimaryMonitor();
+    const GLFWvidmode* mode = monitor != nullptr ? glfwGetVideoMode(monitor) : nullptr;
+    if (mode != nullptr) {
+      win_w = mode->width;
+      win_h = mode->height;
+      glfwWindowHint(GLFW_RED_BITS, mode->redBits);
+      glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
+      glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
+      glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+    } else {
+      monitor = nullptr;  // no usable video mode: fall back to windowed
+    }
+  }
+  GLFWwindow* window = glfwCreateWindow(win_w, win_h, "infinity", monitor, nullptr);
   if (window == nullptr) {
     std::fprintf(stderr, "glfwCreateWindow failed\n");
     glfwTerminate();
@@ -379,6 +461,10 @@ int main(int argc, char** argv) {
   const std::uint32_t cube_mesh = rhi->create_mesh(cube.data(), cube.size());
   const std::vector<float> ball = unit_sphere_vertices(32, 16);
   const std::uint32_t body_mesh = rhi->create_mesh(ball.data(), ball.size());
+  const std::vector<float> star_ball = unit_sphere_vertices(48, 24);
+  const std::uint32_t star_mesh = rhi->create_mesh(star_ball.data(), star_ball.size());
+  const std::vector<float> quad = unit_quad_vertices();
+  const std::uint32_t glow_mesh = rhi->create_mesh(quad.data(), quad.size());
   // Sea shell (spec section 5): one translucent sphere at sea level,
   // EarthLike only. Zero shading effort by design. Rebuilt per anchor.
   std::uint32_t sea_mesh = 0;
@@ -402,6 +488,7 @@ int main(int argc, char** argv) {
   double measured_speed = 0.0;
 
   AppState state{rhi.get(), 1280, 720};
+  glfwGetFramebufferSize(window, &state.width, &state.height);
   glfwSetWindowUserPointer(window, &state);
   glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
   glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -615,28 +702,37 @@ int main(int argc, char** argv) {
     };
     recompute_bodies();
 
-    // --- anchor switching (T0014): re-anchor to the nearest landable ----
-    // body once it is decisively closer than the current one. The altitude
-    // governor then handles approach braking on its own.
-    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
+    // --- closest planet (uniform-planet rule, 2026-08-31) ---------------
+    // Every planet is treated the same: whichever is closest by surface
+    // gap governs the speed limit, the flight zone, and landing.
+    const auto closest_planet = [&]() {
       const SVec3 at = player.position();
-      const double anchor_gap = inf::sim::length(at) - anchor->radius;
-      int candidate = -1;
-      double candidate_gap = 1e300;
+      int best = anchor->slot;
+      double best_gap = inf::sim::length(at) - anchor->radius;
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
-        if (!entry.occupied || !entry.landable || slot == anchor->slot) {
+        if (!entry.occupied || slot == anchor->slot) {
           continue;
         }
         const double gap =
             inf::sim::length(planet_local[static_cast<std::size_t>(slot)] - at) -
             entry.phys.radius_m.to_double();
-        if (gap < candidate_gap) {
-          candidate = slot;
-          candidate_gap = gap;
+        if (gap < best_gap) {
+          best = slot;
+          best_gap = gap;
         }
       }
-      if (candidate >= 0 && candidate_gap < anchor_gap * 0.5) {
+      return std::pair<int, double>{best, best_gap};
+    };
+
+    // --- anchor switching (T0014): re-anchor to the closest planet ------
+    // once it is decisively closer than the current one. The altitude
+    // governor then handles approach braking on its own.
+    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
+      const SVec3 at = player.position();
+      const double anchor_gap = inf::sim::length(at) - anchor->radius;
+      const auto [candidate, candidate_gap] = closest_planet();
+      if (candidate != anchor->slot && candidate_gap < anchor_gap * 0.5) {
         save_anchor_edits(*anchor);
         for (auto& [addr, chunk] : loaded) {
           rhi->destroy_mesh(chunk.mesh_id);
@@ -654,9 +750,51 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Star + moons in the anchor frame (for rendering, radar, keep-out).
+    // Feed the closest planet to the player (speed governor, zone, the
+    // E-landing gate). Uses the system-layer truths so anchor and
+    // non-anchor planets are treated identically.
+    {
+      const auto [closest, closest_gap] = closest_planet();
+      const auto& entry = system.planets[static_cast<std::size_t>(closest)];
+      inf::sim::NearestBody nearest;
+      nearest.center = planet_local[static_cast<std::size_t>(closest)];
+      nearest.radius_m = entry.phys.radius_m.to_double();
+      nearest.atmosphere_m = entry.phys.atmosphere.height_m.to_double();
+      nearest.is_anchor = closest == anchor->slot;
+      player.set_nearest_body(nearest);
+    }
+
+    // Stars (primary + companions) + moons in the anchor frame (for
+    // rendering, lighting, radar, keep-out).
     const SVec3 star_local = SVec3{0.0, 0.0, 0.0} - planet_sys;
     const double star_radius = system.star.radius_solar.to_double() * 6.957e7;
+    struct StarInstance {
+      SVec3 pos;
+      double radius;
+      double luminosity;
+      float tint[3];
+      float phase;
+    };
+    std::vector<StarInstance> stars_local;
+    {
+      StarInstance primary;
+      primary.pos = star_local;
+      primary.radius = star_radius;
+      primary.luminosity = system.star.luminosity_solar.to_double();
+      star_tint(system.star.temperature_k.to_double(), primary.tint);
+      primary.phase = 0.618f;
+      stars_local.push_back(primary);
+      for (std::size_t ci = 0; ci < system.companions.size(); ++ci) {
+        const auto& companion = system.companions[ci];
+        StarInstance star;
+        star.pos = eval_pos(companion.orbit) - planet_sys;
+        star.radius = companion.phys.radius_solar.to_double() * 6.957e7;
+        star.luminosity = companion.phys.luminosity_solar.to_double();
+        star_tint(companion.phys.temperature_k.to_double(), star.tint);
+        star.phase = 0.618f + 0.731f * static_cast<float>(ci + 1);
+        stars_local.push_back(star);
+      }
+    }
     struct MoonInstance {
       SVec3 pos;
       double radius;
@@ -678,7 +816,9 @@ int main(int argc, char** argv) {
     // star, non-anchor planets, and all moons (fly-through is not a
     // thing; the anchor's real ground is handled by the flight clamp).
     if (map_phase == MapPhase::Off) {
-      player.push_out(star_local, star_radius * 1.6);
+      for (const StarInstance& star : stars_local) {
+        player.push_out(star.pos, star.radius * 1.6);
+      }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
         if (entry.occupied && slot != anchor->slot) {
@@ -832,15 +972,78 @@ int main(int argc, char** argv) {
     const RVec3 cam_forward = to_render(cam_fwd_v);
     const RVec3 cam_up = to_render(cam_up_sv);
     const double altitude = inf::render::length(camera_pos) - anchor->radius;
+    double farthest_star = inf::sim::length(star_local - cam_pos_local);
+    for (const StarInstance& star : stars_local) {
+      farthest_star = std::max(farthest_star, inf::sim::length(star.pos - cam_pos_local));
+    }
     const double far_z =
         std::max({10'000.0, std::abs(altitude) * 4.0 + 2.5 * anchor->radius,
-                  inf::sim::length(star_local - cam_pos_local) * 2.5});
+                  farthest_star * 2.5});
     // At map framing distance the near plane scales up with altitude so
     // the sparse far-field scene keeps usable depth precision.
     const double near_z = std::clamp(std::abs(altitude) * 1e-4, 0.3, 1e8);
     const Mat4 projection = inf::render::perspective(kFovY, input.aspect, near_z, far_z);
     const Mat4 view = inf::render::look_dir(cam_forward, cam_up);
     const Mat4 view_projection = inf::render::mul(projection, view);
+
+    // Star renderer: animated photosphere sphere (mode 1) plus an
+    // additive corona billboard (mode 2), camera-aligned; shared by the
+    // flight scene and map mode. Distant stars keep a minimum apparent
+    // size so they read as suns, not specks.
+    const double px_world_all = 2.0 * std::tan(kFovY * 0.5) / state.height;
+    const auto draw_star = [&](const StarInstance& star, double min_px) {
+      const double dist = inf::sim::length(star.pos - cam_pos_local);
+      if (dist < star.radius * 1.05) {
+        return;
+      }
+      const double size = std::max(star.radius, dist * px_world_all * min_px * 0.5);
+      const RVec3 rel = to_render(star.pos) - camera_pos;
+      {
+        const Mat4 model = inf::render::from_basis(
+            RVec3{size, 0.0, 0.0}, RVec3{0.0, size, 0.0}, RVec3{0.0, 0.0, size}, rel);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = star_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.color[0] = star.tint[0];
+        item.color[1] = star.tint[1];
+        item.color[2] = star.tint[2];
+        item.color[3] = 1.0f;
+        item.mode = 1;
+        const RVec3 view_dir = inf::render::normalize(rel);
+        item.aux[0] = static_cast<float>(view_dir.x);
+        item.aux[1] = static_cast<float>(view_dir.y);
+        item.aux[2] = static_cast<float>(view_dir.z);
+        item.aux[3] = star.phase;
+        item.extra[0] = 0.85f;  // sunspot amount
+        items.push_back(item);
+      }
+      {
+        const double glow = size * 6.0;
+        const RVec3 bill_right =
+            inf::render::normalize(inf::render::cross(cam_forward, cam_up));
+        const Mat4 model = inf::render::from_basis(bill_right * glow, cam_up * glow,
+                                                   cam_forward * glow, rel);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = glow_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.color[0] = star.tint[0];
+        item.color[1] = star.tint[1];
+        item.color[2] = star.tint[2];
+        item.color[3] = 1.0f;
+        item.mode = 2;
+        item.aux[3] = star.phase;
+        item.extra[0] = 1.0f;                                // glow intensity
+        item.extra[1] = static_cast<float>(size / glow);     // silhouette radius
+        // Diffraction spikes only while the star is small on screen: a
+        // far sun sparkles, a near sun is a raging disc.
+        const double apparent_px = size / (dist * px_world_all);
+        item.extra[2] =
+            static_cast<float>(std::clamp(1.0 - apparent_px / 60.0, 0.0, 1.0)) * 0.9f;
+        items.push_back(item);
+      }
+    };
 
     items.clear();
     items.reserve(loaded.size() + player.beams().size() + 8);
@@ -879,7 +1082,9 @@ int main(int argc, char** argv) {
         item.color[3] = 1.0f;
         items.push_back(item);
       };
-      draw_ball(star_local, star_radius, 5.0, 1.0f, 0.92f, 0.72f);
+      for (const StarInstance& star : stars_local) {
+        draw_star(star, 5.0);
+      }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
         if (!entry.occupied || slot == anchor->slot) {
@@ -910,13 +1115,15 @@ int main(int argc, char** argv) {
     std::vector<inf::app::RadarBody> radar_bodies;
     radar_bodies.reserve(2 + moons_local.size() + inf::gen::kMaxPlanetSlots);
     {
-      inf::app::RadarBody star_icon;
-      star_icon.rel = star_local - player_pos;
-      star_icon.color[0] = 1.0f;
-      star_icon.color[1] = 0.88f;
-      star_icon.color[2] = 0.55f;
-      star_icon.scale = 1.6f;
-      radar_bodies.push_back(star_icon);
+      for (const StarInstance& star : stars_local) {
+        inf::app::RadarBody star_icon;
+        star_icon.rel = star.pos - player_pos;
+        star_icon.color[0] = star.tint[0];
+        star_icon.color[1] = star.tint[1];
+        star_icon.color[2] = star.tint[2];
+        star_icon.scale = 1.6f;
+        radar_bodies.push_back(star_icon);
+      }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
         if (!entry.occupied) {
@@ -1077,22 +1284,9 @@ int main(int argc, char** argv) {
         }
       }
 
-      // The star (clamped like the planets, warm tint).
-      {
-        const double star_r_true = system.star.radius_solar.to_double() * 6.957e7;
-        const double dist = inf::sim::length(SVec3{0.0, 0.0, 0.0} - planet_sys - cam_pos_local);
-        const double r = std::max(star_r_true, dist * px_world * min_px * 0.75);
-        const Mat4 model = inf::render::from_basis(
-            RVec3{r, 0.0, 0.0}, RVec3{0.0, r, 0.0}, RVec3{0.0, 0.0, r}, sys_origin_rel);
-        const Mat4 mvp = inf::render::mul(view_projection, model);
-        inf::render::Rhi::DrawItem item;
-        item.mesh = body_mesh;
-        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
-        item.color[0] = 1.0f;
-        item.color[1] = 0.92f;
-        item.color[2] = 0.72f;
-        item.color[3] = 1.0f;
-        items.push_back(item);
+      // The stars (clamped like the planets, full photosphere + corona).
+      for (const StarInstance& star : stars_local) {
+        draw_star(star, min_px * 0.75);
       }
 
       // Planets + moon specks.
@@ -1239,7 +1433,36 @@ int main(int argc, char** argv) {
                           state.height);
     }
 
-    rhi->render_frame(sky[0], sky[1], sky[2], items.data(), items.size());
+    // Frame lighting: the star with the highest apparent flux at the
+    // player is the directional sun (matters in bi/tri-star systems when
+    // roaming near a companion); tint softened toward white.
+    inf::render::Rhi::FrameParams frame_params;
+    frame_params.sky[0] = sky[0];
+    frame_params.sky[1] = sky[1];
+    frame_params.sky[2] = sky[2];
+    {
+      const StarInstance* dominant = &stars_local.front();
+      double best_flux = -1.0;
+      for (const StarInstance& star : stars_local) {
+        const double dist = std::max(1.0, inf::sim::length(star.pos - player_pos));
+        const double flux = star.luminosity / (dist * dist);
+        if (flux > best_flux) {
+          best_flux = flux;
+          dominant = &star;
+        }
+      }
+      const SVec3 sun_dir = inf::sim::normalize(dominant->pos - player_pos);
+      frame_params.sun_dir[0] = static_cast<float>(sun_dir.x);
+      frame_params.sun_dir[1] = static_cast<float>(sun_dir.y);
+      frame_params.sun_dir[2] = static_cast<float>(sun_dir.z);
+      for (int c = 0; c < 3; ++c) {
+        frame_params.sun_color[c] = dominant->tint[c] + 0.25f * (1.0f - dominant->tint[c]);
+      }
+    }
+    // Wrapped so the f32 shader time keeps sub-ms precision forever.
+    frame_params.time_s = static_cast<float>(
+        std::fmod(static_cast<double>(now.ns_since_epoch) * 1e-9, 4096.0));
+    rhi->render_frame(frame_params, items.data(), items.size());
 
     fps_accum += dt;
     ++fps_frames;
@@ -1247,6 +1470,9 @@ int main(int argc, char** argv) {
       const char* mode_name = player.zone() == inf::sim::FlightZone::Atmosphere
                                   ? "flight (atmo)"
                                   : "flight (space)";
+      if (player.can_land()) {
+        mode_name = "flight (E to land)";
+      }
       switch (player.mode()) {
         case inf::sim::PlayerMode::Landing: mode_name = "landing"; break;
         case inf::sim::PlayerMode::OnFoot: mode_name = "on foot"; break;

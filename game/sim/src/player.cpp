@@ -39,13 +39,37 @@ double Player::ground_radius(const Vec3& dir) const {
   return field_->ground_radius_m(unit).to_double();
 }
 
+NearestBody Player::nearest_or_anchor() const {
+  if (has_nearest_) {
+    return nearest_;
+  }
+  NearestBody anchor;
+  anchor.center = Vec3{0.0, 0.0, 0.0};
+  anchor.radius_m = field_->planet().radius_m.to_double();
+  anchor.atmosphere_m = field_->planet().atmosphere_height_m.to_double();
+  anchor.is_anchor = true;
+  return anchor;
+}
+
 FlightZone Player::zone() const {
-  const double atmosphere = field_->planet().atmosphere_height_m.to_double();
-  if (atmosphere <= 0.0) {
+  const NearestBody body = nearest_or_anchor();
+  if (body.atmosphere_m <= 0.0) {
     return FlightZone::Space;
   }
-  const double alt = length(position_) - field_->planet().radius_m.to_double();
-  return alt < atmosphere ? FlightZone::Atmosphere : FlightZone::Space;
+  const double alt = length(position_ - body.center) - body.radius_m;
+  return alt < body.atmosphere_m ? FlightZone::Atmosphere : FlightZone::Space;
+}
+
+bool Player::can_land() const {
+  if (mode_ != PlayerMode::Flight) {
+    return false;
+  }
+  const NearestBody body = nearest_or_anchor();
+  if (!body.is_anchor) {
+    return false;
+  }
+  const double band = body.atmosphere_m > 0.0 ? body.atmosphere_m : kAirlessLandingBand;
+  return length(position_ - body.center) - body.radius_m < band;
 }
 
 double Player::altitude() const {
@@ -94,7 +118,8 @@ void Player::exit_map() {
 void Player::rebase(const gen::EffectiveField& field, const Vec3& position) {
   field_ = &field;
   position_ = position;
-  beams_.clear();  // beam positions were in the old body's frame
+  beams_.clear();      // beam positions were in the old body's frame
+  has_nearest_ = false;  // so was the nearest-body feed; re-fed next frame
 }
 
 void Player::push_out(const Vec3& center, double min_dist) {
@@ -134,10 +159,15 @@ void Player::update_flight(const InputFrame& input) {
 
   // --- throttle -----------------------------------------------------------
   // Altitude governor between the hard caps: Mach 6 inside the atmosphere
-  // band, 0.1c outside (spec section 9; airless planets have no band).
-  const double alt = std::max(0.0, length(position_) - field_->planet().radius_m.to_double());
-  const double zone_cap = zone() == FlightZone::Atmosphere ? kMachSix : kTenthC;
-  const double cap = std::min(std::clamp(alt * 0.8, 40.0, kTenthC), zone_cap);
+  // band, light speed outside (supersedes the 0.1c cap of spec section 9,
+  // 2026-08-31; airless planets have no band). Altitude is measured
+  // against the NEAREST planet — every planet slows the ship down in its
+  // vicinity the same way, anchor or not.
+  const NearestBody nearest = nearest_or_anchor();
+  const double alt =
+      std::max(0.0, length(position_ - nearest.center) - nearest.radius_m);
+  const double zone_cap = zone() == FlightZone::Atmosphere ? kMachSix : kLightSpeed;
+  const double cap = std::min(std::clamp(alt * 0.8, 40.0, kLightSpeed), zone_cap);
   const double accel = std::max(25.0, cap / 2.5);
   if (input.forward) {
     speed_ += accel * dt;
@@ -152,9 +182,11 @@ void Player::update_flight(const InputFrame& input) {
 
   try_fire(input);
 
-  if (input.interact_pressed) {
-    // Begin landing: eased descent to eye height over the local ground,
-    // leveling the ship into the tangent plane.
+  if (input.interact_pressed && can_land()) {
+    // Begin landing (only inside the nearest planet's atmosphere band,
+    // and only onto the anchor — which IS the nearest planet then):
+    // eased descent to eye height over the local ground, leveling the
+    // ship into the tangent plane.
     const Vec3 radial = normalize(position_);
     const double target_r = ground_radius(radial) + kEyeHeight;
     mode_ = PlayerMode::Landing;

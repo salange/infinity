@@ -27,6 +27,7 @@ inline constexpr core::NameId ArchitectureV1{0xc84a4530235f9e42ULL};  // "archit
 inline constexpr core::NameId PlanetsV1{0xbe9efd4e11872704ULL};       // "planets/v1"
 inline constexpr core::NameId MoonsV1{0xb228c7ac1177455aULL};         // "moons/v1"
 inline constexpr core::NameId BeltsV1{0x067c9da641973dd1ULL};         // "belts/v1"
+inline constexpr core::NameId MultistarV1{0x505708ce7508c26bULL};     // "multistar/v1"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -78,6 +79,7 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"planets/v1", name::PlanetsV1},
     {"moons/v1", name::MoonsV1},
     {"belts/v1", name::BeltsV1},
+    {"multistar/v1", name::MultistarV1},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

@@ -31,12 +31,19 @@ TEST_CASE("planet params: ranges hold for 1000 seeds per type") {
       CAPTURE(type_index);
       CAPTURE(seed);
       REQUIRE(params.type == type);
-      REQUIRE(params.radius_m.to_double() >= 150'000.0);
-      REQUIRE(params.radius_m.to_double() <= 800'000.0);
+      // Radius must come from the shared class table (gen/planet.hpp) —
+      // no second range lives in this test either.
+      const gen::RadiusRange rocky = gen::radius_range_m(core::PlanetClass::Rocky);
+      const gen::RadiusRange super = gen::radius_range_m(core::PlanetClass::SuperEarth);
+      REQUIRE(params.radius_m.to_double() >= rocky.lo_m);
+      REQUIRE(params.radius_m.to_double() <= super.hi_m);
+      if (type == gen::PlanetType::EarthLike) {
+        REQUIRE(params.radius_m.to_double() >= gen::kAtmosphereMinRadiusM);
+      }
       REQUIRE(params.core_radius_m.to_double() > 0.0);
       REQUIRE(params.core_radius_m.to_double() < params.radius_m.to_double());
-      REQUIRE(params.gravity.to_double() > 1.5);
-      REQUIRE(params.gravity.to_double() < 20.0);
+      REQUIRE(params.gravity.to_double() >= 1.0);
+      REQUIRE(params.gravity.to_double() <= 25.0);
       REQUIRE(params.cells_per_face >= 3);
       REQUIRE(params.cells_per_face <= 24);
       if (type == gen::PlanetType::Barren) {

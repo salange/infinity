@@ -63,15 +63,28 @@ struct Beam {
   double traveled = 0.0;
 };
 
+// The closest planet this frame (anchor-local frame), fed by the app.
+// Every planet is treated the same: whichever is closest governs the
+// speed limit, the flight zone, and whether E may land. When the app
+// never feeds one (headless tests), the anchor body is the nearest body.
+struct NearestBody {
+  Vec3 center;             // planet center, anchor-local meters
+  double radius_m = 0.0;
+  double atmosphere_m = 0.0;  // 0 = airless
+  bool is_anchor = true;      // only the anchor has terrain to land on
+};
+
 class Player {
  public:
   static constexpr double kEyeHeight = 1.80;
   static constexpr double kShipClearance = 2.5;
   static constexpr double kBeamSpeed = 500.0;
   static constexpr double kMachSix = 2058.0;     // atmosphere hard cap (Mach 6)
-  static constexpr double kTenthC = 29'979'245.8;  // space hard cap
+  static constexpr double kLightSpeed = 299'792'458.0;  // space hard cap (c)
   static constexpr double kBeamMaxDistance = 1500.0;
   static constexpr double kReticleMax = 0.42;  // NDC-vertical units
+  // Landing window on airless worlds (no atmosphere band to gate E by).
+  static constexpr double kAirlessLandingBand = 8'000.0;
 
   Player(const gen::EffectiveField& field, Vec3 spawn_position);
 
@@ -87,10 +100,17 @@ class Player {
   double reticle_y() const { return reticle_y_; }
   const std::vector<Beam>& beams() const { return beams_; }
   double altitude() const;
-  // Space vs Atmosphere (M5): inside the planet's atmosphere band the
-  // speed is hard-capped at Mach 2; outside at 0.1c. Airless planets are
-  // Space everywhere.
+  // Space vs Atmosphere (M5): inside the NEAREST planet's atmosphere band
+  // the speed is hard-capped at Mach 6; outside at light speed. Airless
+  // planets are Space everywhere.
   FlightZone zone() const;
+
+  // Per-frame nearest-planet feed (see NearestBody). The nearest planet
+  // governs the altitude speed governor, zone(), and the landing gate.
+  void set_nearest_body(const NearestBody& body) { nearest_ = body; has_nearest_ = true; }
+  // E may land: the nearest planet is the anchor (has terrain) and the
+  // ship is inside its atmosphere band (a fixed window on airless worlds).
+  bool can_land() const;
 
   // Map mode (design/map-mode.md section 1/4): pushes the current mode
   // and freezes the player (position/orientation stay PLANET-LOCAL, so
@@ -123,6 +143,7 @@ class Player {
   void try_fire(const InputFrame& input);
   double ground_radius(const Vec3& dir) const;
   void clamp_to_ground_flight();
+  NearestBody nearest_or_anchor() const;
 
   const gen::EffectiveField* field_;  // current anchor body (never null)
   PlayerMode mode_ = PlayerMode::Flight;
@@ -143,6 +164,9 @@ class Player {
 
   std::vector<Beam> beams_;
   double fire_cooldown_ = 0.0;
+
+  NearestBody nearest_;
+  bool has_nearest_ = false;
 
   PlayerMode map_pushed_mode_ = PlayerMode::Flight;
 };

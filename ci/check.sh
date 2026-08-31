@@ -102,7 +102,7 @@ fi
 
 echo "=== app smoke (60 frames, needs display) ==="
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && [ -z "${INFINITY_SKIP_APP_SMOKE:-}" ]; then
-  "$BUILD_DIR/game/app/infinity" --frames 60
+  "$BUILD_DIR/game/app/infinity" --frames 60 --windowed
 else
   echo "no display (or skipped) — app smoke not run"
 fi

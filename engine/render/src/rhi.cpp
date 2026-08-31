@@ -30,14 +30,36 @@ namespace {
 
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
+constexpr std::uint64_t kItemUniformSize = 112;  // mvp + color + aux + extra
+constexpr std::uint64_t kFrameUniformSize = 32;  // sun_dir + sun_color/time
 
 constexpr const char* kMeshShader = R"(
-struct Uniforms { mvp: mat4x4<f32>, color: vec4<f32> };
+// Per-item block. aux/extra are mode-specific:
+//   mode 0 (extra.w): legacy — color.a == 0 lit terrain, > 0 unlit color.
+//   mode 1: star photosphere — aux.xyz = camera->star-center unit dir,
+//           aux.w = per-star phase seed, extra.x = spot amount.
+//   mode 2: corona/glow billboard (additive pass) — aux.w = phase seed,
+//           extra.x = intensity, extra.y = photosphere radius in
+//           billboard units, extra.z = diffraction-spike strength [0,1].
+struct Uniforms {
+  mvp: mat4x4<f32>,
+  color: vec4<f32>,
+  aux: vec4<f32>,
+  extra: vec4<f32>,
+};
+// Per-frame globals: sun_dir.xyz = light direction (frame of the meshes),
+// sun_color.rgb = light tint, sun_color.a = time in seconds.
+struct Frame {
+  sun_dir: vec4<f32>,
+  sun_color: vec4<f32>,
+};
 @group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var<uniform> frame: Frame;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
+  @location(1) opos: vec3<f32>,
 };
 
 @vertex
@@ -45,21 +67,161 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> 
   var out: VSOut;
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = normal;
+  out.opos = position;
   return out;
+}
+
+// --- cheap deterministic 3D value noise + fbm (visual only) --------------
+fn hash3(p: vec3<f32>) -> f32 {
+  var q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+  q += dot(q, q.yxz + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+
+fn vnoise(p: vec3<f32>) -> f32 {
+  let i = floor(p);
+  let fr = fract(p);
+  let w = fr * fr * (3.0 - 2.0 * fr);
+  let n000 = hash3(i + vec3<f32>(0.0, 0.0, 0.0));
+  let n100 = hash3(i + vec3<f32>(1.0, 0.0, 0.0));
+  let n010 = hash3(i + vec3<f32>(0.0, 1.0, 0.0));
+  let n110 = hash3(i + vec3<f32>(1.0, 1.0, 0.0));
+  let n001 = hash3(i + vec3<f32>(0.0, 0.0, 1.0));
+  let n101 = hash3(i + vec3<f32>(1.0, 0.0, 1.0));
+  let n011 = hash3(i + vec3<f32>(0.0, 1.0, 1.0));
+  let n111 = hash3(i + vec3<f32>(1.0, 1.0, 1.0));
+  let x00 = mix(n000, n100, w.x);
+  let x10 = mix(n010, n110, w.x);
+  let x01 = mix(n001, n101, w.x);
+  let x11 = mix(n011, n111, w.x);
+  return mix(mix(x00, x10, w.y), mix(x01, x11, w.y), w.z);
+}
+
+fn fbm(p: vec3<f32>) -> f32 {
+  var value = 0.0;
+  var amplitude = 0.5;
+  var q = p;
+  for (var i = 0; i < 5; i++) {
+    value += amplitude * vnoise(q);
+    q = q * 2.02 + vec3<f32>(17.3, 9.1, 4.7);
+    amplitude *= 0.5;
+  }
+  return value;
+}
+
+// Narkowicz ACES filmic approximation: HDR-style highlight rolloff to
+// white without a post-process chain — the "blinding but soft" look.
+fn aces(x: vec3<f32>) -> vec3<f32> {
+  let mapped = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+  return clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Star photosphere: a per-pixel TEMPERATURE field rendered through a
+// blackbody-ish ramp (deep saturated intergranular lanes -> body tint ->
+// white-hot granule cores), double domain warp for plasma churn,
+// empirical limb darkening, faculae near the limb, sunspots with
+// penumbra, chromosphere flash — then ACES-tonemapped from HDR values.
+fn star_surface(n_in: vec3<f32>, tint: vec3<f32>, view_dir: vec3<f32>, phase: f32,
+                spot_amount: f32, time: f32) -> vec3<f32> {
+  let n = normalize(n_in);
+  let drift = vec3<f32>(time * 0.006, time * 0.004, time * 0.009);
+  let p = n * 15.0 + vec3<f32>(phase * 37.0) + drift;
+  // Double domain warp: convection churn instead of static noise.
+  let w1 = vec3<f32>(fbm(p * 0.55), fbm(p * 0.55 + 11.7), fbm(p * 0.55 + 71.3));
+  let q = p * 1.1 + w1 * 2.0;
+  let w2 = vec3<f32>(fbm(q + vec3<f32>(31.4)), fbm(q + vec3<f32>(53.1)),
+                     fbm(q + vec3<f32>(97.7)));
+  let cells = fbm(p + w2 * 2.6);                     // large convection cells
+  let fine = fbm(p * 3.3 + w1 * 1.8 + drift * 2.0);  // fine granulation
+  var temp_f = clamp(cells * 0.85 + fine * 0.55, 0.0, 1.3);
+  // Sunspots: cool patches, soft penumbra.
+  let s = fbm(n * 3.1 + vec3<f32>(phase * 53.0) + drift * 0.3);
+  temp_f *= 1.0 - 0.85 * smoothstep(0.64, 0.80, s) * spot_amount;
+  // Blackbody-ish ramp derived from the star's tint.
+  let lane = tint * tint * 0.5;  // cooler: darker AND more saturated
+  var c = mix(lane, tint * 1.2, smoothstep(0.12, 0.74, temp_f));
+  c = mix(c, vec3<f32>(1.45), smoothstep(0.74, 1.12, temp_f));
+  // Limb darkening (power-law fit) + faculae brightening near the limb.
+  let mu = clamp(dot(n, -view_dir), 0.0, 1.0);
+  let limb = 0.22 + 0.78 * pow(mu, 0.6);
+  let faculae = smoothstep(0.45, 0.10, mu) * smoothstep(0.5, 0.9, fine);
+  c = c * limb + tint * faculae * 0.55;
+  // Chromosphere flash at the very limb.
+  let rim = pow(1.0 - mu, 5.5);
+  c += mix(tint, vec3<f32>(1.0, 0.42, 0.22), 0.6) * rim * 1.5;
+  return aces(c * 1.7);
+}
+
+// Corona billboard (additive, opos.xy in [-1,1]): blinding rim just
+// outside the photosphere silhouette, wide chromatic halo (white near
+// the disc, saturated tint far out), flowing radial streamers,
+// prominence arcs hugging the limb, and distance-adaptive diffraction
+// spikes so far stars sparkle. disc_r = photosphere radius in billboard
+// units; spike in [0,1] fades the cross out on close approach.
+fn corona(opos: vec2<f32>, tint: vec3<f32>, phase: f32, intensity: f32,
+          disc_r: f32, spike: f32, time: f32) -> vec3<f32> {
+  let r = length(opos);
+  let window = smoothstep(1.0, 0.60, r);
+  let theta = atan2(opos.y, opos.x);
+  let edge = max(r - disc_r, 0.0);
+  var c = vec3<f32>(0.0);
+  // Blinding inner rim.
+  c += mix(vec3<f32>(1.35), tint, 0.3) * exp(-edge * 24.0) * 2.8;
+  // Chromatic halo: hue drifts from white-hot to the star tint outward.
+  let halo_tint = mix(vec3<f32>(1.0), tint, clamp(edge * 3.2, 0.0, 1.0));
+  c += halo_tint * exp(-edge * 5.0) * 0.9;
+  c += tint * exp(-edge * 1.8) * 0.22;  // faint far reach
+  // Flowing radial streamers (polar FBM, drifting outward over time).
+  let ray_p = vec3<f32>(cos(theta), sin(theta), 0.0) * 3.0 +
+              vec3<f32>(phase * 19.0) + vec3<f32>(0.0, 0.0, r * 2.2 - time * 0.05);
+  let streamer = pow(max(fbm(ray_p) * 1.55 - 0.35, 0.0), 2.0);
+  c += tint * streamer * exp(-edge * 3.4) * 1.2;
+  // Prominences: red-orange loop arcs right at the limb.
+  let band = exp(-abs(r - disc_r * 1.05) * 30.0);
+  let arc_p = vec3<f32>(cos(theta), sin(theta), 0.6) * 5.0 +
+              vec3<f32>(phase * 71.0, 0.0, time * 0.03);
+  let arcs = pow(max(fbm(arc_p) * 1.7 - 0.78, 0.0), 1.4);
+  c += vec3<f32>(1.0, 0.30, 0.12) * band * arcs * 2.4;
+  // Diffraction spikes: a 4-point cross, only when the star is small on
+  // screen — far suns read as bright stars, near suns as raging discs.
+  let cross = pow(abs(cos(theta)), 40.0) + pow(abs(sin(theta)), 40.0);
+  c += mix(tint, vec3<f32>(1.0), 0.55) * cross * exp(-r * 2.6) * spike * 1.3;
+  // Slow flicker.
+  let flicker = 0.94 + 0.06 * vnoise(vec3<f32>(time * 0.5, phase * 91.0, 0.0));
+  return aces(c * flicker * intensity) * window;
 }
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+  let mode = u32(u.extra.w + 0.5);
+  let time = frame.sun_color.a;
+  if (mode == 1u) {
+    let c = star_surface(in.opos, u.color.rgb, normalize(u.aux.xyz), u.aux.w,
+                         u.extra.x, time);
+    return vec4<f32>(min(c, vec3<f32>(1.0)), 1.0);
+  }
+  if (mode == 2u) {
+    let c = corona(in.opos.xy, u.color.rgb, u.aux.w, u.extra.x, u.extra.y, u.extra.z,
+                   time);
+    return vec4<f32>(c, 1.0);
+  }
   if (u.color.a > 0.001) {
     // Unlit solid color; alpha passes through (blended pipeline only).
     return vec4<f32>(u.color.rgb, u.color.a);
   }
-  let light = normalize(vec3<f32>(0.45, 0.75, 0.5));
+  // Lit terrain: directional sun + a cool sky/bounce fill from the
+  // opposite hemisphere so the night side stays readable and the
+  // terminator picks up a blue-hour cast.
+  let light = normalize(frame.sun_dir.xyz);
   let n = normalize(in.normal);
   let ndl = max(dot(n, light), 0.0);
+  // Soft terminator wrap so the day/night line does not alias harshly.
+  let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
   let base = vec3<f32>(0.55, 0.52, 0.45);
-  let color = base * (0.22 + 0.78 * ndl);
-  return vec4<f32>(color, 1.0);
+  var color = base * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
+  let fill = max(dot(n, -light), 0.0);
+  color += base * fill * vec3<f32>(0.05, 0.07, 0.12);
+  return vec4<f32>(aces(color), 1.0);
 }
 )";
 
@@ -87,7 +249,8 @@ struct DeviceRequest {
   std::string message;
 };
 
-WGPUSurface create_surface(WGPUInstance instance, GLFWwindow* window, std::string* error) {
+WGPUSurface create_surface(WGPUInstance instance, GLFWwindow* window,
+                           [[maybe_unused]] std::string* error) {
   WGPUSurfaceDescriptor desc{};
 #if defined(__linux__)
   const int platform = glfwGetPlatform();
@@ -149,9 +312,11 @@ struct Rhi::Impl {
   // Mesh pipeline state (created on demand).
   WGPURenderPipeline mesh_pipeline = nullptr;
   WGPURenderPipeline mesh_pipeline_blend = nullptr;
+  WGPURenderPipeline mesh_pipeline_add = nullptr;
   WGPUBindGroupLayout bind_layout = nullptr;
   WGPUBindGroup bind_group = nullptr;
   WGPUBuffer uniform_buffer = nullptr;
+  WGPUBuffer frame_buffer = nullptr;
   WGPUTexture depth_texture = nullptr;
   WGPUTextureView depth_view = nullptr;
   std::unordered_map<std::uint32_t, MeshEntry> meshes;
@@ -202,15 +367,20 @@ struct Rhi::Impl {
     module_desc.nextInChain = &wgsl.chain;
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &module_desc);
 
-    WGPUBindGroupLayoutEntry layout_entry{};
-    layout_entry.binding = 0;
-    layout_entry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
-    layout_entry.buffer.type = WGPUBufferBindingType_Uniform;
-    layout_entry.buffer.hasDynamicOffset = 1U;
-    layout_entry.buffer.minBindingSize = 80;
+    WGPUBindGroupLayoutEntry layout_entries[2] = {};
+    layout_entries[0].binding = 0;
+    layout_entries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+    layout_entries[0].buffer.type = WGPUBufferBindingType_Uniform;
+    layout_entries[0].buffer.hasDynamicOffset = 1U;
+    layout_entries[0].buffer.minBindingSize = kItemUniformSize;
+    layout_entries[1].binding = 1;
+    layout_entries[1].visibility = WGPUShaderStage_Fragment;
+    layout_entries[1].buffer.type = WGPUBufferBindingType_Uniform;
+    layout_entries[1].buffer.hasDynamicOffset = 0U;
+    layout_entries[1].buffer.minBindingSize = kFrameUniformSize;
     WGPUBindGroupLayoutDescriptor layout_desc{};
-    layout_desc.entryCount = 1;
-    layout_desc.entries = &layout_entry;
+    layout_desc.entryCount = 2;
+    layout_desc.entries = layout_entries;
     bind_layout = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
 
     WGPUPipelineLayoutDescriptor pipeline_layout_desc{};
@@ -282,6 +452,19 @@ struct Rhi::Impl {
     pipeline_desc.label = sv("mesh-blend");
     mesh_pipeline_blend = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
 
+    // Additive variant (corona/glow): src One + dst One, depth-tested so
+    // planets occlude the glow, but no depth writes.
+    WGPUBlendState additive{};
+    additive.color.operation = WGPUBlendOperation_Add;
+    additive.color.srcFactor = WGPUBlendFactor_One;
+    additive.color.dstFactor = WGPUBlendFactor_One;
+    additive.alpha.operation = WGPUBlendOperation_Add;
+    additive.alpha.srcFactor = WGPUBlendFactor_One;
+    additive.alpha.dstFactor = WGPUBlendFactor_One;
+    color_target.blend = &additive;
+    pipeline_desc.label = sv("mesh-add");
+    mesh_pipeline_add = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+
     wgpuPipelineLayoutRelease(pipeline_layout);
     wgpuShaderModuleRelease(module);
 
@@ -291,15 +474,25 @@ struct Rhi::Impl {
     uniform_desc.size = kUniformStride * kMaxDrawItems;
     uniform_buffer = wgpuDeviceCreateBuffer(device, &uniform_desc);
 
-    WGPUBindGroupEntry bind_entry{};
-    bind_entry.binding = 0;
-    bind_entry.buffer = uniform_buffer;
-    bind_entry.offset = 0;
-    bind_entry.size = 80;
+    WGPUBufferDescriptor frame_desc{};
+    frame_desc.label = sv("frame-uniforms");
+    frame_desc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+    frame_desc.size = kFrameUniformSize;
+    frame_buffer = wgpuDeviceCreateBuffer(device, &frame_desc);
+
+    WGPUBindGroupEntry bind_entries[2] = {};
+    bind_entries[0].binding = 0;
+    bind_entries[0].buffer = uniform_buffer;
+    bind_entries[0].offset = 0;
+    bind_entries[0].size = kItemUniformSize;
+    bind_entries[1].binding = 1;
+    bind_entries[1].buffer = frame_buffer;
+    bind_entries[1].offset = 0;
+    bind_entries[1].size = kFrameUniformSize;
     WGPUBindGroupDescriptor bind_desc{};
     bind_desc.layout = bind_layout;
-    bind_desc.entryCount = 1;
-    bind_desc.entries = &bind_entry;
+    bind_desc.entryCount = 2;
+    bind_desc.entries = bind_entries;
     bind_group = wgpuDeviceCreateBindGroup(device, &bind_desc);
   }
 
@@ -309,7 +502,9 @@ struct Rhi::Impl {
     }
     if (bind_group != nullptr) wgpuBindGroupRelease(bind_group);
     if (mesh_pipeline_blend != nullptr) wgpuRenderPipelineRelease(mesh_pipeline_blend);
+    if (mesh_pipeline_add != nullptr) wgpuRenderPipelineRelease(mesh_pipeline_add);
     if (uniform_buffer != nullptr) wgpuBufferRelease(uniform_buffer);
+    if (frame_buffer != nullptr) wgpuBufferRelease(frame_buffer);
     if (bind_layout != nullptr) wgpuBindGroupLayoutRelease(bind_layout);
     if (mesh_pipeline != nullptr) wgpuRenderPipelineRelease(mesh_pipeline);
     if (depth_view != nullptr) wgpuTextureViewRelease(depth_view);
@@ -465,16 +660,27 @@ void Rhi::destroy_mesh(std::uint32_t mesh) {
   }
 }
 
-bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
+bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                        std::size_t item_count) {
   impl_->ensure_mesh_pipeline();
+
+  {
+    float frame_block[8] = {frame.sun_dir[0],   frame.sun_dir[1],   frame.sun_dir[2],
+                            0.0f,               frame.sun_color[0], frame.sun_color[1],
+                            frame.sun_color[2], frame.time_s};
+    wgpuQueueWriteBuffer(impl_->queue, impl_->frame_buffer, 0, frame_block,
+                         sizeof(frame_block));
+  }
 
   // Upload all uniforms before the command buffer executes.
   const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
   for (std::size_t i = 0; i < count; ++i) {
-    float block[20];
+    float block[28];
     std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
     std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
+    std::memcpy(block + 20, items[i].aux, sizeof(items[i].aux));
+    std::memcpy(block + 24, items[i].extra, sizeof(items[i].extra));
+    block[27] = static_cast<float>(items[i].mode);
     wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, i * kUniformStride, block,
                          sizeof(block));
   }
@@ -500,7 +706,7 @@ bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
   attachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
   attachment.loadOp = WGPULoadOp_Clear;
   attachment.storeOp = WGPUStoreOp_Store;
-  attachment.clearValue = WGPUColor{r, g, b, 1.0};
+  attachment.clearValue = WGPUColor{frame.sky[0], frame.sky[1], frame.sky[2], 1.0};
   WGPURenderPassDepthStencilAttachment depth_attachment{};
   depth_attachment.view = impl_->depth_view;
   depth_attachment.depthLoadOp = WGPULoadOp_Clear;
@@ -512,9 +718,13 @@ bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
   pass_desc.depthStencilAttachment = &depth_attachment;
 
   WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
-  const auto draw_items = [&](bool translucent) {
+  enum class Pass { Opaque, Blend, Additive };
+  const auto draw_items = [&](Pass which) {
     for (std::size_t i = 0; i < count; ++i) {
-      if (items[i].translucent != translucent) {
+      const Pass item_pass = items[i].mode == 2 ? Pass::Additive
+                             : items[i].translucent ? Pass::Blend
+                                                    : Pass::Opaque;
+      if (item_pass != which) {
         continue;
       }
       const auto it = impl_->meshes.find(items[i].mesh);
@@ -528,9 +738,11 @@ bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
     }
   };
   wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
-  draw_items(false);
+  draw_items(Pass::Opaque);
   wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_blend);
-  draw_items(true);
+  draw_items(Pass::Blend);
+  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_add);
+  draw_items(Pass::Additive);
   wgpuRenderPassEncoderEnd(pass);
   wgpuRenderPassEncoderRelease(pass);
 
@@ -545,7 +757,13 @@ bool Rhi::render_frame(float r, float g, float b, const DrawItem* items,
   return true;
 }
 
-bool Rhi::render_clear(float r, float g, float b) { return render_frame(r, g, b, nullptr, 0); }
+bool Rhi::render_clear(float r, float g, float b) {
+  FrameParams frame;
+  frame.sky[0] = r;
+  frame.sky[1] = g;
+  frame.sky[2] = b;
+  return render_frame(frame, nullptr, 0);
+}
 
 const std::string& Rhi::adapter_info() const { return impl_->adapter_info; }
 

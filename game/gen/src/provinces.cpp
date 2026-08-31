@@ -84,6 +84,26 @@ const ArchetypeSpec& weighted_pick(const TableView& table, std::uint64_t word) {
   return table.specs[table.count - 1];
 }
 
+// T0015 WP8: landform-operator strengths per archetype (data, not
+// draws — deterministic functions of the archetype pick).
+struct LandformSpec {
+  double terrace_amount;
+  double terrace_step_m;
+  double dune_amount;
+};
+
+LandformSpec landform_for(Archetype archetype) {
+  switch (archetype) {
+    case Archetype::Canyon: return {0.50, 110, 0.0};
+    case Archetype::HighlandPlateau: return {0.45, 150, 0.0};  // scarp edges
+    case Archetype::Highlands: return {0.25, 130, 0.0};
+    case Archetype::Dunes: return {0.0, 0, 1.0};
+    case Archetype::Mesas: return {0.80, 95, 0.15};
+    case Archetype::Canyonlands: return {0.55, 120, 0.10};
+    default: return {0.0, 0, 0.0};
+  }
+}
+
 }  // namespace
 
 const char* to_string(Archetype archetype) {
@@ -124,6 +144,10 @@ ProvinceParams ProvinceField::cell_params(const CellId& cell) const {
   params.base_elevation_m = uniform(draw1[1], spec.base_lo, spec.base_hi);
   params.ruggedness = uniform(draw1[2], spec.rug_lo, spec.rug_hi);
   params.carving = uniform(draw1[3], spec.carve_lo, spec.carve_hi);
+  const LandformSpec landform = landform_for(spec.archetype);
+  params.terrace_amount = Real(landform.terrace_amount);
+  params.terrace_step_m = Real(landform.terrace_step_m);
+  params.dune_amount = Real(landform.dune_amount);
   params.palette_shift = static_cast<std::uint32_t>(draw0[3] >> 40U);
   return params;
 }
@@ -204,6 +228,9 @@ BlendedParams ProvinceField::sample(const Dir3& unit_dir) const {
     blended.base_elevation_m += weight * params.base_elevation_m;
     blended.ruggedness += weight * params.ruggedness;
     blended.carving += weight * params.carving;
+    blended.terrace_amount += weight * params.terrace_amount;
+    blended.terrace_step_m += weight * params.terrace_step_m;
+    blended.dune_amount += weight * params.dune_amount;
     total_weight += weight;
     if (weight > best_weight) {
       best_weight = weight;
@@ -217,6 +244,9 @@ BlendedParams ProvinceField::sample(const Dir3& unit_dir) const {
     blended.base_elevation_m = blended.base_elevation_m / total_weight;
     blended.ruggedness = blended.ruggedness / total_weight;
     blended.carving = blended.carving / total_weight;
+    blended.terrace_amount = blended.terrace_amount / total_weight;
+    blended.terrace_step_m = blended.terrace_step_m / total_weight;
+    blended.dune_amount = blended.dune_amount / total_weight;
   } else {
     // Coverage guarantee should make this unreachable; deterministic
     // fallback to the owner cell keeps the function total regardless.
@@ -226,6 +256,9 @@ BlendedParams ProvinceField::sample(const Dir3& unit_dir) const {
     blended.base_elevation_m = params.base_elevation_m;
     blended.ruggedness = params.ruggedness;
     blended.carving = params.carving;
+    blended.terrace_amount = params.terrace_amount;
+    blended.terrace_step_m = params.terrace_step_m;
+    blended.dune_amount = params.dune_amount;
     blended.dominant = owner;
     blended.dominant_archetype = params.archetype;
   }

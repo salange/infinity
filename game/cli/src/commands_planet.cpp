@@ -176,11 +176,7 @@ int cmd_terrain_map(const core::Seed128& seed, const char* type_text, const char
       const double lon = 2.0 * kPi * ((x + 0.5) / kWidth) - kPi;
       const gen::Dir3 dir = latlon_dir(lat, lon);
       const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir), &cache);
-      gen::BlendedParams params{};
-      params.relief_amplitude_m = canonical.relief_amplitude_m;
-      params.base_elevation_m = canonical.base_elevation_m;
-      params.ruggedness = canonical.ruggedness;
-      params.carving = canonical.carving;
+      gen::BlendedParams params = gen::TerrainField::to_blended(canonical);
       const double h =
           field.elevation_from_params(dir, params, canonical.macro_rel).to_double();
       heights[static_cast<std::size_t>(y) * kWidth + x] = h;
@@ -270,11 +266,7 @@ int cmd_macro_stats(int seed_count) {
         const double lon = 2.0 * kPi * ((x + 0.5) / 64.0) - kPi;
         const gen::Dir3 dir = latlon_dir(lat, lon);
         const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir), &cache);
-        gen::BlendedParams params{};
-        params.relief_amplitude_m = canonical.relief_amplitude_m;
-        params.base_elevation_m = canonical.base_elevation_m;
-        params.ruggedness = canonical.ruggedness;
-        params.carving = canonical.carving;
+        gen::BlendedParams params = gen::TerrainField::to_blended(canonical);
         const double h =
             field.elevation_from_params(dir, params, canonical.macro_rel).to_double();
         if (h > sea) {
@@ -334,11 +326,7 @@ int cmd_terrain_stats(const core::Seed128& seed) {
         const double pl = std::sqrt(px * px + py * py + pz * pz);
         const gen::Dir3 pd{det::Real(px / pl), det::Real(py / pl), det::Real(pz / pl)};
         const auto canonical = field.canonical_params(gen::dir_to_face_uv(pd), &cache);
-        gen::BlendedParams params{};
-        params.relief_amplitude_m = canonical.relief_amplitude_m;
-        params.base_elevation_m = canonical.base_elevation_m;
-        params.ruggedness = canonical.ruggedness;
-        params.carving = canonical.carving;
+        gen::BlendedParams params = gen::TerrainField::to_blended(canonical);
         // Full surface height incl. the 3D detail term at the surface.
         const gen::Dir3 pos{det::Real(pd.x.to_double() * radius),
                             det::Real(pd.y.to_double() * radius),

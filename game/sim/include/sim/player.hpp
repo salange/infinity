@@ -123,6 +123,15 @@ class Player {
   void enter_map();
   void exit_map();
 
+  // Debug/capture aids: directly set attitude/position/speed
+  // (scripted captures and recordings; never gameplay paths).
+  void set_attitude(const Vec3& forward, const Vec3& up) {
+    forward_ = normalize(forward);
+    up_ = normalize(up - forward_ * dot(up, forward_));
+  }
+  void set_position(const Vec3& position) { position_ = position; }
+  void set_speed(double speed) { speed_ = speed; }
+
   // Interplanetary flight: swap the effective field (and coordinate
   // frame) to another anchor body. position is the player's pose in the
   // TARGET body's planet-local frame; attitude and speed carry over,

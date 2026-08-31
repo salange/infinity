@@ -1,9 +1,11 @@
 #include "render/rhi.hpp"
 
 #include <webgpu/webgpu.h>
+#include <webgpu/wgpu.h>  // wgpuDevicePoll (wgpu-native extension)
 
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -31,7 +33,7 @@ namespace {
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
 constexpr std::uint64_t kItemUniformSize = 112;  // mvp + color + aux + extra
-constexpr std::uint64_t kFrameUniformSize = 32;  // sun_dir + sun_color/time
+constexpr std::uint64_t kFrameUniformSize = 128;  // 8 vec4s (see Frame in WGSL)
 
 constexpr const char* kMeshShader = R"(
 // Per-item block. aux/extra are mode-specific:
@@ -41,17 +43,37 @@ constexpr const char* kMeshShader = R"(
 //   mode 2: corona/glow billboard (additive pass) — aux.w = phase seed,
 //           extra.x = intensity, extra.y = photosphere radius in
 //           billboard units, extra.z = diffraction-spike strength [0,1].
+//   mode 3: glow sprite (additive pass) — soft radial glow, or a rim halo
+//           when extra.z > 0. extra.x = intensity, extra.y = falloff
+//           exponent (disc) / sharpness (rim), extra.z = rim radius in
+//           quad units (0 = disc). Used for lens flares, the sun veil,
+//           and planet limb glow.
+//   mode 4: analytic sky dome (opaque, fullscreen quad at far depth):
+//           per-pixel view-ray gradient sky from the frame uniforms.
 struct Uniforms {
   mvp: mat4x4<f32>,
   color: vec4<f32>,
   aux: vec4<f32>,
   extra: vec4<f32>,
 };
-// Per-frame globals: sun_dir.xyz = light direction (frame of the meshes),
-// sun_color.rgb = light tint, sun_color.a = time in seconds.
+// Per-frame globals (frame of the meshes = anchor-planet-local):
+//   sun_dir.xyz light direction; sun_color.rgb light tint, .a time (s);
+//   cam_right/up/fwd.xyz camera basis, right.w/up.w = tan(fov/2)*aspect
+//   and tan(fov/2), fwd.w = camera altitude / atmosphere height;
+//   planet_up.xyz local up at the camera; atmo.rgb sky palette.
+// planet_center.xyz = anchor planet center relative to the camera,
+// planet_center.w = normal blend: how far lit-terrain shading normals
+// are pulled toward the analytic sphere radial (0 on the surface, 1
+// from orbit — hides per-chunk normal seams at distance).
 struct Frame {
   sun_dir: vec4<f32>,
   sun_color: vec4<f32>,
+  cam_right: vec4<f32>,
+  cam_up: vec4<f32>,
+  cam_fwd: vec4<f32>,
+  planet_up: vec4<f32>,
+  atmo: vec4<f32>,
+  planet_center: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<uniform> frame: Frame;
@@ -186,15 +208,66 @@ fn corona(opos: vec2<f32>, tint: vec3<f32>, phase: f32, intensity: f32,
   // screen — far suns read as bright stars, near suns as raging discs.
   let cross = pow(abs(cos(theta)), 40.0) + pow(abs(sin(theta)), 40.0);
   c += mix(tint, vec3<f32>(1.0), 0.55) * cross * exp(-r * 2.6) * spike * 1.3;
-  // Slow flicker.
-  let flicker = 0.94 + 0.06 * vnoise(vec3<f32>(time * 0.5, phase * 91.0, 0.0));
+  // Slow, subtle flicker (kept small — visible pulsing reads as a bug).
+  let flicker = 0.97 + 0.03 * vnoise(vec3<f32>(time * 0.25, phase * 91.0, 0.0));
   return aces(c * flicker * intensity) * window;
+}
+
+// Analytic sky dome (tier-1 gradient atmosphere, sources note
+// atmosphere-rendering.md): Rayleigh-ish zenith/horizon ramp, Mie
+// forward lobe around the sun, sunset band at low sun elevation,
+// day/night from the sun-up dot, altitude fade to space.
+fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
+  let view = normalize(frame.cam_right.xyz * (ndc.x * frame.cam_right.w) +
+                       frame.cam_up.xyz * (ndc.y * frame.cam_up.w) +
+                       frame.cam_fwd.xyz);
+  let sun = normalize(frame.sun_dir.xyz);
+  let up = normalize(frame.planet_up.xyz);
+  // Sub-linear falloff: the sky keeps most of its color well up into the
+  // band and only thins near the top (a linear ramp read as space from
+  // half the atmosphere up, making entry/exit look like a hard curtain).
+  let density = pow(clamp(1.0 - frame.cam_fwd.w, 0.0, 1.0), 0.45);
+  let sun_h = dot(sun, up);
+  let view_h = dot(view, up);
+  let cos_vs = dot(view, sun);
+  let day = smoothstep(-0.10, 0.30, sun_h);
+  let tint = frame.atmo.rgb;
+  // Zenith deepens and cools; the horizon brightens and warms.
+  let zenith = tint * vec3<f32>(0.40, 0.52, 0.75);
+  let horizon = mix(tint, vec3<f32>(1.0, 0.88, 0.72), 0.45) * 1.06;
+  var sky = mix(horizon, zenith, pow(clamp(view_h, 0.0, 1.0), 0.55));
+  // Sunset band: a low sun reddens the sky toward its azimuth.
+  let low_sun = pow(clamp(1.0 - abs(sun_h) * 2.6, 0.0, 1.0), 1.4);
+  let toward = pow(clamp(cos_vs, 0.0, 1.0), 2.6);
+  sky = mix(sky, vec3<f32>(1.0, 0.42, 0.18), low_sun * toward * 0.75);
+  // Mie forward lobe + tight glare around the sun disc.
+  let mie = pow(clamp(cos_vs, 0.0, 1.0), 24.0) * 0.55 +
+            pow(clamp(cos_vs, 0.0, 1.0), 220.0) * 1.6;
+  var c = sky * day + frame.sun_color.rgb * mie * (0.25 + 0.75 * day);
+  // Night floor: faint cold airglow instead of dead black.
+  c += tint * 0.02 * (1.0 - day);
+  let space = vec3<f32>(0.013, 0.015, 0.028);
+  return mix(space, aces(c), density);
 }
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let mode = u32(u.extra.w + 0.5);
   let time = frame.sun_color.a;
+  if (mode == 3u) {
+    let r = length(in.opos.xy);
+    var base = 0.0;
+    if (u.extra.z > 0.001) {
+      base = exp(-abs(r - u.extra.z) * u.extra.y);
+    } else {
+      base = pow(clamp(1.0 - r, 0.0, 1.0), u.extra.y);
+    }
+    let window = smoothstep(1.0, 0.90, r);
+    return vec4<f32>(u.color.rgb * (u.extra.x * base * window), 1.0);
+  }
+  if (mode == 4u) {
+    return vec4<f32>(sky_dome(in.opos.xy), 1.0);
+  }
   if (mode == 1u) {
     let c = star_surface(in.opos, u.color.rgb, normalize(u.aux.xyz), u.aux.w,
                          u.extra.x, time);
@@ -205,23 +278,40 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                    time);
     return vec4<f32>(c, 1.0);
   }
-  if (u.color.a > 0.001) {
+  if (mode == 0u && u.color.a > 0.001) {
     // Unlit solid color; alpha passes through (blended pipeline only).
     return vec4<f32>(u.color.rgb, u.color.a);
   }
+  // mode 5 falls through to the lit path below with color.a as alpha
+  // (lit translucent surfaces — the sea shell).
   // Lit terrain: directional sun + a cool sky/bounce fill from the
   // opposite hemisphere so the night side stays readable and the
   // terminator picks up a blue-hour cast.
   let light = normalize(frame.sun_dir.xyz);
-  let n = normalize(in.normal);
+  var n = normalize(in.normal);
+  // From orbit, pull the shading normal toward the analytic sphere
+  // radial: per-chunk gradient normals disagree slightly across chunk
+  // borders, which reads as a quad grid at distance. aux.xyz carries the
+  // mesh's translation (camera-relative), so opos + aux is the fragment
+  // in camera-relative world space.
+  if (frame.planet_center.w > 0.001) {
+    let radial = normalize(in.opos + u.aux.xyz - frame.planet_center.xyz);
+    n = normalize(mix(n, radial, frame.planet_center.w));
+  }
   let ndl = max(dot(n, light), 0.0);
   // Soft terminator wrap so the day/night line does not alias harshly.
   let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
-  let base = vec3<f32>(0.55, 0.52, 0.45);
+  // Albedo: the default terrain material, or the item's rgb when set
+  // (lit colored surfaces, e.g. the ocean-blue sea-level impostor).
+  var base = vec3<f32>(0.55, 0.52, 0.45);
+  if (u.color.r + u.color.g + u.color.b > 0.001) {
+    base = u.color.rgb;
+  }
   var color = base * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
   let fill = max(dot(n, -light), 0.0);
   color += base * fill * vec3<f32>(0.05, 0.07, 0.12);
-  return vec4<f32>(aces(color), 1.0);
+  let alpha = select(1.0, u.color.a, mode == 5u);
+  return vec4<f32>(aces(color), alpha);
 }
 )";
 
@@ -321,6 +411,93 @@ struct Rhi::Impl {
   WGPUTextureView depth_view = nullptr;
   std::unordered_map<std::uint32_t, MeshEntry> meshes;
   std::uint32_t next_mesh_id = 1;
+  std::string capture_path;  // non-empty: capture on the next render_frame
+
+  // --- debug frame recorder ---------------------------------------------
+  // Reduced-resolution re-renders of the scene, every kRecInterval-th
+  // frame, into an in-memory ring of the last kRingSeconds. A trigger
+  // dumps the ring to disk and keeps writing frames until rec_until.
+  static constexpr std::uint32_t kRecW = 640;
+  static constexpr std::uint32_t kRecH = 360;
+  static constexpr double kRingSeconds = 3.0;
+  bool ring_enabled = false;
+  float last_ring_time = -1.0f;
+  WGPUTexture rec_color = nullptr;
+  WGPUTextureView rec_color_view = nullptr;
+  WGPUTexture rec_depth = nullptr;
+  WGPUTextureView rec_depth_view = nullptr;
+  WGPUBuffer rec_buffer = nullptr;
+  std::uint32_t rec_bpr = 0;
+  struct RingFrame {
+    float time_s;
+    std::vector<std::uint8_t> rgb;  // kRecW * kRecH * 3, tight
+  };
+  std::deque<RingFrame> ring;
+  std::uint64_t frame_counter = 0;
+  float last_frame_time = 0.0f;
+  std::string rec_dir;      // active triggered-recording directory
+  double rec_until = -1e30;  // future-record until this frame time
+  int rec_seq_index = 0;
+
+  void ensure_recorder_targets() {
+    if (rec_color != nullptr) {
+      return;
+    }
+    WGPUTextureDescriptor color_desc{};
+    color_desc.label = sv("rec-color");
+    color_desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
+    color_desc.dimension = WGPUTextureDimension_2D;
+    color_desc.size = WGPUExtent3D{kRecW, kRecH, 1};
+    color_desc.format = format;
+    color_desc.mipLevelCount = 1;
+    color_desc.sampleCount = 1;
+    rec_color = wgpuDeviceCreateTexture(device, &color_desc);
+    rec_color_view = wgpuTextureCreateView(rec_color, nullptr);
+    WGPUTextureDescriptor depth_desc{};
+    depth_desc.label = sv("rec-depth");
+    depth_desc.usage = WGPUTextureUsage_RenderAttachment;
+    depth_desc.dimension = WGPUTextureDimension_2D;
+    depth_desc.size = WGPUExtent3D{kRecW, kRecH, 1};
+    depth_desc.format = WGPUTextureFormat_Depth32Float;
+    depth_desc.mipLevelCount = 1;
+    depth_desc.sampleCount = 1;
+    rec_depth = wgpuDeviceCreateTexture(device, &depth_desc);
+    rec_depth_view = wgpuTextureCreateView(rec_depth, nullptr);
+    rec_bpr = ((kRecW * 4 + 255) / 256) * 256;
+    WGPUBufferDescriptor buffer_desc{};
+    buffer_desc.label = sv("rec-readback");
+    buffer_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+    buffer_desc.size = static_cast<std::uint64_t>(rec_bpr) * kRecH;
+    rec_buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+  }
+
+  void write_ppm(const std::string& path, std::uint32_t w, std::uint32_t h,
+                 const std::uint8_t* rgb) {
+    std::FILE* file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr) {
+      std::fprintf(stderr, "recorder: FAILED to open %s\n", path.c_str());
+      return;
+    }
+    std::fprintf(file, "P6\n%u %u\n255\n", w, h);
+    std::fwrite(rgb, 1, static_cast<std::size_t>(w) * h * 3, file);
+    std::fclose(file);
+  }
+
+  void append_time_index(float time_s) {
+    std::FILE* file = std::fopen((rec_dir + "/times.txt").c_str(), "a");
+    if (file != nullptr) {
+      std::fprintf(file, "seq-%04d %.4f\n", rec_seq_index, time_s);
+      std::fclose(file);
+    }
+  }
+
+  void emit_sequence_frame(float time_s, const std::uint8_t* rgb) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "/seq-%04d.ppm", rec_seq_index);
+    write_ppm(rec_dir + name, kRecW, kRecH, rgb);
+    append_time_index(time_s);
+    ++rec_seq_index;
+  }
 
   void configure_surface() {
     WGPUSurfaceConfiguration config{};
@@ -405,7 +582,11 @@ struct Rhi::Impl {
     WGPUDepthStencilState depth_state{};
     depth_state.format = WGPUTextureFormat_Depth32Float;
     depth_state.depthWriteEnabled = WGPUOptionalBool_True;
-    depth_state.depthCompare = WGPUCompareFunction_Less;
+    // Reversed-Z: the app builds its projection with near/far swapped, so
+    // closer = LARGER depth; cleared to 0, tested with Greater. This is
+    // what keeps solar-system-scale distances stable in an f32 depth
+    // buffer (classic-Z quantized them onto the far plane).
+    depth_state.depthCompare = WGPUCompareFunction_Greater;
     depth_state.stencilFront.compare = WGPUCompareFunction_Always;
     depth_state.stencilFront.failOp = WGPUStencilOperation_Keep;
     depth_state.stencilFront.depthFailOp = WGPUStencilOperation_Keep;
@@ -500,6 +681,11 @@ struct Rhi::Impl {
     for (auto& [id, mesh] : meshes) {
       wgpuBufferRelease(mesh.buffer);
     }
+    if (rec_buffer != nullptr) wgpuBufferRelease(rec_buffer);
+    if (rec_color_view != nullptr) wgpuTextureViewRelease(rec_color_view);
+    if (rec_color != nullptr) wgpuTextureRelease(rec_color);
+    if (rec_depth_view != nullptr) wgpuTextureViewRelease(rec_depth_view);
+    if (rec_depth != nullptr) wgpuTextureRelease(rec_depth);
     if (bind_group != nullptr) wgpuBindGroupRelease(bind_group);
     if (mesh_pipeline_blend != nullptr) wgpuRenderPipelineRelease(mesh_pipeline_blend);
     if (mesh_pipeline_add != nullptr) wgpuRenderPipelineRelease(mesh_pipeline_add);
@@ -665,9 +851,17 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   impl_->ensure_mesh_pipeline();
 
   {
-    float frame_block[8] = {frame.sun_dir[0],   frame.sun_dir[1],   frame.sun_dir[2],
-                            0.0f,               frame.sun_color[0], frame.sun_color[1],
-                            frame.sun_color[2], frame.time_s};
+    float frame_block[32] = {
+        frame.sun_dir[0],    frame.sun_dir[1],    frame.sun_dir[2],    0.0f,
+        frame.sun_color[0],  frame.sun_color[1],  frame.sun_color[2],  frame.time_s,
+        frame.cam_right[0],  frame.cam_right[1],  frame.cam_right[2],  frame.tan_half_x,
+        frame.cam_up[0],     frame.cam_up[1],     frame.cam_up[2],     frame.tan_half_y,
+        frame.cam_fwd[0],    frame.cam_fwd[1],    frame.cam_fwd[2],    frame.altitude_frac,
+        frame.planet_up[0],  frame.planet_up[1],  frame.planet_up[2],  0.0f,
+        frame.atmo_tint[0],  frame.atmo_tint[1],  frame.atmo_tint[2],  1.0f,
+        frame.planet_center[0], frame.planet_center[1], frame.planet_center[2],
+        frame.normal_blend,
+    };
     wgpuQueueWriteBuffer(impl_->queue, impl_->frame_buffer, 0, frame_block,
                          sizeof(frame_block));
   }
@@ -685,24 +879,12 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                          sizeof(block));
   }
 
-  WGPUSurfaceTexture surface_texture{};
-  wgpuSurfaceGetCurrentTexture(impl_->surface, &surface_texture);
-  if (surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal &&
-      surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) {
-    if (surface_texture.texture != nullptr) {
-      wgpuTextureRelease(surface_texture.texture);
-    }
-    if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
-        surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
-      impl_->configure_surface();
-    }
-    return false;
-  }
-  WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, nullptr);
-
-  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
+  // Attachment templates: the main pass fills in the surface view; the
+  // capture/recorder paths swap in their own offscreen views. Keeping
+  // them independent of surface acquisition means captures and the ring
+  // keep working when the window is hidden and macOS stops handing out
+  // surface textures (fully headless operation).
   WGPURenderPassColorAttachment attachment{};
-  attachment.view = view;
   attachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
   attachment.loadOp = WGPULoadOp_Clear;
   attachment.storeOp = WGPUStoreOp_Store;
@@ -711,50 +893,283 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   depth_attachment.view = impl_->depth_view;
   depth_attachment.depthLoadOp = WGPULoadOp_Clear;
   depth_attachment.depthStoreOp = WGPUStoreOp_Store;
-  depth_attachment.depthClearValue = 1.0f;
-  WGPURenderPassDescriptor pass_desc{};
-  pass_desc.colorAttachmentCount = 1;
-  pass_desc.colorAttachments = &attachment;
-  pass_desc.depthStencilAttachment = &depth_attachment;
+  depth_attachment.depthClearValue = 0.0f;  // reversed-Z: far plane
 
-  WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
-  enum class Pass { Opaque, Blend, Additive };
-  const auto draw_items = [&](Pass which) {
-    for (std::size_t i = 0; i < count; ++i) {
-      const Pass item_pass = items[i].mode == 2 ? Pass::Additive
-                             : items[i].translucent ? Pass::Blend
-                                                    : Pass::Opaque;
-      if (item_pass != which) {
-        continue;
-      }
-      const auto it = impl_->meshes.find(items[i].mesh);
-      if (it == impl_->meshes.end() || it->second.vertex_count == 0) {
-        continue;
-      }
-      const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
-      wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
-      wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
-      wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
+  WGPUSurfaceTexture surface_texture{};
+  wgpuSurfaceGetCurrentTexture(impl_->surface, &surface_texture);
+  const bool have_surface =
+      surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
+      surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal;
+  if (!have_surface) {
+    if (surface_texture.texture != nullptr) {
+      wgpuTextureRelease(surface_texture.texture);
     }
+    if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
+        surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
+      impl_->configure_surface();
+    }
+  }
+
+  enum class Pass { Opaque, Blend, Additive };
+  const auto record_scene = [&](WGPURenderPassEncoder pass) {
+    const auto draw_items = [&](Pass which) {
+      for (std::size_t i = 0; i < count; ++i) {
+        const Pass item_pass = items[i].mode == 2 || items[i].mode == 3
+                                   ? Pass::Additive
+                               : items[i].translucent ? Pass::Blend
+                                                      : Pass::Opaque;
+        if (item_pass != which) {
+          continue;
+        }
+        const auto it = impl_->meshes.find(items[i].mesh);
+        if (it == impl_->meshes.end() || it->second.vertex_count == 0) {
+          continue;
+        }
+        const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
+      }
+    };
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
+    draw_items(Pass::Opaque);
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_blend);
+    draw_items(Pass::Blend);
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_add);
+    draw_items(Pass::Additive);
   };
-  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
-  draw_items(Pass::Opaque);
-  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_blend);
-  draw_items(Pass::Blend);
-  wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_add);
-  draw_items(Pass::Additive);
-  wgpuRenderPassEncoderEnd(pass);
-  wgpuRenderPassEncoderRelease(pass);
 
-  WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
-  wgpuCommandEncoderRelease(encoder);
-  wgpuQueueSubmit(impl_->queue, 1, &commands);
-  wgpuCommandBufferRelease(commands);
-  wgpuTextureViewRelease(view);
+  if (have_surface) {
+    WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, nullptr);
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
+    attachment.view = view;
+    WGPURenderPassDescriptor pass_desc{};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &attachment;
+    pass_desc.depthStencilAttachment = &depth_attachment;
+    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+    record_scene(pass);
+    wgpuRenderPassEncoderEnd(pass);
+    wgpuRenderPassEncoderRelease(pass);
 
-  wgpuSurfacePresent(impl_->surface);
-  wgpuTextureRelease(surface_texture.texture);
-  return true;
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
+    wgpuCommandEncoderRelease(encoder);
+    wgpuQueueSubmit(impl_->queue, 1, &commands);
+    wgpuCommandBufferRelease(commands);
+    wgpuTextureViewRelease(view);
+
+    wgpuSurfacePresent(impl_->surface);
+    wgpuTextureRelease(surface_texture.texture);
+  }
+
+  // --- one-shot capture: identical scene into an offscreen target -------
+  if (!impl_->capture_path.empty()) {
+    const std::string path = impl_->capture_path;
+    impl_->capture_path.clear();
+    const std::uint32_t width = impl_->width;
+    const std::uint32_t height = impl_->height;
+    const std::uint32_t bytes_per_row = ((width * 4 + 255) / 256) * 256;
+
+    WGPUTextureDescriptor color_desc{};
+    color_desc.label = sv("capture-color");
+    color_desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
+    color_desc.dimension = WGPUTextureDimension_2D;
+    color_desc.size = WGPUExtent3D{width, height, 1};
+    color_desc.format = impl_->format;
+    color_desc.mipLevelCount = 1;
+    color_desc.sampleCount = 1;
+    WGPUTexture color_tex = wgpuDeviceCreateTexture(impl_->device, &color_desc);
+    WGPUTextureView color_view = wgpuTextureCreateView(color_tex, nullptr);
+
+    WGPUBufferDescriptor read_desc{};
+    read_desc.label = sv("capture-readback");
+    read_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+    read_desc.size = static_cast<std::uint64_t>(bytes_per_row) * height;
+    WGPUBuffer read_buffer = wgpuDeviceCreateBuffer(impl_->device, &read_desc);
+
+    WGPUCommandEncoder cap_encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
+    WGPURenderPassColorAttachment cap_attachment = attachment;
+    cap_attachment.view = color_view;
+    WGPURenderPassDepthStencilAttachment cap_depth = depth_attachment;  // reuse, re-cleared
+    WGPURenderPassDescriptor cap_pass_desc{};
+    cap_pass_desc.colorAttachmentCount = 1;
+    cap_pass_desc.colorAttachments = &cap_attachment;
+    cap_pass_desc.depthStencilAttachment = &cap_depth;
+    WGPURenderPassEncoder cap_pass =
+        wgpuCommandEncoderBeginRenderPass(cap_encoder, &cap_pass_desc);
+    record_scene(cap_pass);
+    wgpuRenderPassEncoderEnd(cap_pass);
+    wgpuRenderPassEncoderRelease(cap_pass);
+
+    WGPUTexelCopyTextureInfo src{};
+    src.texture = color_tex;
+    WGPUTexelCopyBufferInfo dst{};
+    dst.buffer = read_buffer;
+    dst.layout.bytesPerRow = bytes_per_row;
+    dst.layout.rowsPerImage = height;
+    const WGPUExtent3D extent{width, height, 1};
+    wgpuCommandEncoderCopyTextureToBuffer(cap_encoder, &src, &dst, &extent);
+    WGPUCommandBuffer cap_commands = wgpuCommandEncoderFinish(cap_encoder, nullptr);
+    wgpuCommandEncoderRelease(cap_encoder);
+    wgpuQueueSubmit(impl_->queue, 1, &cap_commands);
+    wgpuCommandBufferRelease(cap_commands);
+
+    bool mapped_done = false;
+    bool mapped_ok = false;
+    WGPUBufferMapCallbackInfo map_info{};
+    map_info.mode = WGPUCallbackMode_AllowProcessEvents;
+    map_info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void* u2) {
+      *static_cast<bool*>(u1) = true;
+      *static_cast<bool*>(u2) = status == WGPUMapAsyncStatus_Success;
+    };
+    map_info.userdata1 = &mapped_done;
+    map_info.userdata2 = &mapped_ok;
+    wgpuBufferMapAsync(read_buffer, WGPUMapMode_Read, 0, read_desc.size, map_info);
+    while (!mapped_done) {
+      wgpuDevicePoll(impl_->device, 1U, nullptr);
+    }
+    if (mapped_ok) {
+      const auto* data = static_cast<const std::uint8_t*>(
+          wgpuBufferGetConstMappedRange(read_buffer, 0, read_desc.size));
+      const bool bgra = impl_->format == WGPUTextureFormat_BGRA8Unorm ||
+                        impl_->format == WGPUTextureFormat_BGRA8UnormSrgb;
+      std::FILE* file = std::fopen(path.c_str(), "wb");
+      if (file != nullptr && data != nullptr) {
+        std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+        std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3);
+        for (std::uint32_t y = 0; y < height; ++y) {
+          const std::uint8_t* src_row = data + static_cast<std::size_t>(y) * bytes_per_row;
+          for (std::uint32_t x = 0; x < width; ++x) {
+            row[x * 3 + 0] = src_row[x * 4 + (bgra ? 2 : 0)];
+            row[x * 3 + 1] = src_row[x * 4 + 1];
+            row[x * 3 + 2] = src_row[x * 4 + (bgra ? 0 : 2)];
+          }
+          std::fwrite(row.data(), 1, row.size(), file);
+        }
+        std::fclose(file);
+        std::printf("capture: wrote %ux%u to %s\n", width, height, path.c_str());
+      } else {
+        std::fprintf(stderr, "capture: FAILED to open %s\n", path.c_str());
+        if (file != nullptr) {
+          std::fclose(file);
+        }
+      }
+      wgpuBufferUnmap(read_buffer);
+    } else {
+      std::fprintf(stderr, "capture: readback map failed\n");
+    }
+    wgpuBufferRelease(read_buffer);
+    wgpuTextureViewRelease(color_view);
+    wgpuTextureRelease(color_tex);
+  }
+
+  // --- debug recorder: ring buffer + triggered sequences ----------------
+  impl_->last_frame_time = frame.time_s;
+  ++impl_->frame_counter;
+  const bool future_active = !impl_->rec_dir.empty() &&
+                             static_cast<double>(frame.time_s) < impl_->rec_until;
+  // Time-based cadence (~30 fps) so uncapped headless runs don't hammer
+  // the readback path; the < comparison handles the 4096 s time wrap.
+  const bool ring_due = frame.time_s - impl_->last_ring_time >= 0.0333f ||
+                        frame.time_s < impl_->last_ring_time;
+  if ((impl_->ring_enabled || future_active) && ring_due) {
+    impl_->last_ring_time = frame.time_s;
+    impl_->ensure_recorder_targets();
+    WGPUCommandEncoder rec_encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
+    WGPURenderPassColorAttachment rec_attachment = attachment;
+    rec_attachment.view = impl_->rec_color_view;
+    WGPURenderPassDepthStencilAttachment rec_depth_att = depth_attachment;
+    rec_depth_att.view = impl_->rec_depth_view;
+    WGPURenderPassDescriptor rec_pass_desc{};
+    rec_pass_desc.colorAttachmentCount = 1;
+    rec_pass_desc.colorAttachments = &rec_attachment;
+    rec_pass_desc.depthStencilAttachment = &rec_depth_att;
+    WGPURenderPassEncoder rec_pass =
+        wgpuCommandEncoderBeginRenderPass(rec_encoder, &rec_pass_desc);
+    record_scene(rec_pass);
+    wgpuRenderPassEncoderEnd(rec_pass);
+    wgpuRenderPassEncoderRelease(rec_pass);
+    WGPUTexelCopyTextureInfo rec_src{};
+    rec_src.texture = impl_->rec_color;
+    WGPUTexelCopyBufferInfo rec_dst{};
+    rec_dst.buffer = impl_->rec_buffer;
+    rec_dst.layout.bytesPerRow = impl_->rec_bpr;
+    rec_dst.layout.rowsPerImage = Impl::kRecH;
+    const WGPUExtent3D rec_extent{Impl::kRecW, Impl::kRecH, 1};
+    wgpuCommandEncoderCopyTextureToBuffer(rec_encoder, &rec_src, &rec_dst, &rec_extent);
+    WGPUCommandBuffer rec_commands = wgpuCommandEncoderFinish(rec_encoder, nullptr);
+    wgpuCommandEncoderRelease(rec_encoder);
+    wgpuQueueSubmit(impl_->queue, 1, &rec_commands);
+    wgpuCommandBufferRelease(rec_commands);
+
+    bool map_done = false;
+    bool map_ok = false;
+    WGPUBufferMapCallbackInfo map_info{};
+    map_info.mode = WGPUCallbackMode_AllowProcessEvents;
+    map_info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void* u2) {
+      *static_cast<bool*>(u1) = true;
+      *static_cast<bool*>(u2) = status == WGPUMapAsyncStatus_Success;
+    };
+    map_info.userdata1 = &map_done;
+    map_info.userdata2 = &map_ok;
+    wgpuBufferMapAsync(impl_->rec_buffer, WGPUMapMode_Read, 0,
+                       static_cast<std::uint64_t>(impl_->rec_bpr) * Impl::kRecH, map_info);
+    while (!map_done) {
+      wgpuDevicePoll(impl_->device, 1U, nullptr);
+    }
+    if (map_ok) {
+      const auto* data = static_cast<const std::uint8_t*>(wgpuBufferGetConstMappedRange(
+          impl_->rec_buffer, 0, static_cast<std::uint64_t>(impl_->rec_bpr) * Impl::kRecH));
+      if (data != nullptr) {
+        const bool bgra = impl_->format == WGPUTextureFormat_BGRA8Unorm ||
+                          impl_->format == WGPUTextureFormat_BGRA8UnormSrgb;
+        std::vector<std::uint8_t> rgb(static_cast<std::size_t>(Impl::kRecW) * Impl::kRecH * 3);
+        for (std::uint32_t y = 0; y < Impl::kRecH; ++y) {
+          const std::uint8_t* src_row = data + static_cast<std::size_t>(y) * impl_->rec_bpr;
+          std::uint8_t* dst_row = rgb.data() + static_cast<std::size_t>(y) * Impl::kRecW * 3;
+          for (std::uint32_t x = 0; x < Impl::kRecW; ++x) {
+            dst_row[x * 3 + 0] = src_row[x * 4 + (bgra ? 2 : 0)];
+            dst_row[x * 3 + 1] = src_row[x * 4 + 1];
+            dst_row[x * 3 + 2] = src_row[x * 4 + (bgra ? 0 : 2)];
+          }
+        }
+        if (future_active) {
+          impl_->emit_sequence_frame(frame.time_s, rgb.data());
+        } else {
+          impl_->ring.push_back(Impl::RingFrame{frame.time_s, std::move(rgb)});
+          while (!impl_->ring.empty() &&
+                 (frame.time_s - impl_->ring.front().time_s > Impl::kRingSeconds ||
+                  impl_->ring.size() > 120)) {
+            impl_->ring.pop_front();
+          }
+        }
+      }
+      wgpuBufferUnmap(impl_->rec_buffer);
+    }
+  }
+  return have_surface;
+}
+
+void Rhi::request_capture(const std::string& path) { impl_->capture_path = path; }
+
+void Rhi::set_ring_enabled(bool enabled) { impl_->ring_enabled = enabled; }
+
+void Rhi::trigger_recording(const std::string& dir, double future_seconds) {
+  impl_->rec_dir = dir;
+  impl_->rec_seq_index = 0;
+  impl_->rec_until = static_cast<double>(impl_->last_frame_time) + future_seconds;
+  // Dump the ring (the immediate past) as the sequence prefix.
+  for (const Impl::RingFrame& ring_frame : impl_->ring) {
+    impl_->emit_sequence_frame(ring_frame.time_s, ring_frame.rgb.data());
+  }
+  impl_->ring.clear();
+  std::printf("recorder: %d ring frames dumped to %s, recording %.1fs more\n",
+              impl_->rec_seq_index, dir.c_str(), future_seconds);
+}
+
+bool Rhi::recording_active() const {
+  return !impl_->rec_dir.empty() &&
+         static_cast<double>(impl_->last_frame_time) < impl_->rec_until;
 }
 
 bool Rhi::render_clear(float r, float g, float b) {

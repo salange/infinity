@@ -25,9 +25,19 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
-// Game-scale constants (1:10 rule: lengths /10 AND mu /10).
-constexpr double kAuGame = 1.495978707e10;        // 1 AU / 10, meters
-constexpr double kMuSunGame = 1.32712440018e19;   // GM_sun / 10
+// Game-scale constants. Bodies (radii, star radii) run at 1:10; ORBITS
+// run at 1:40 -- an extra x4 compression so planets and stars are four
+// times larger relative to their orbits (2026-08-31, Sascha). See
+// design/scales-and-distances.md.
+//
+// mu deliberately stays at /10. With a at 1:40 and mu at 1:10, Kepler
+// (P = 2*pi*sqrt(a^3/mu)) gives periods at 1:80 of real -- eight times
+// shorter than the old proportional rule -- and orbital speeds 2x real.
+// The short years are wanted: an Earth-analogue year lands near 45 game
+// days, so a season is a play session rather than a fortnight.
+constexpr double kOrbitScale = 4.0;               // extra compression under 1:10
+constexpr double kAuGame = 1.495978707e10 / kOrbitScale;  // 1 AU / 40, meters
+constexpr double kMuSunGame = 1.32712440018e19;   // GM_sun / 10 (NOT compressed)
 constexpr double kEarthDayGame = 8640.0;          // 24 h / 10, seconds
 
 Real u01(std::uint64_t word) {
@@ -333,7 +343,13 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
     for (int it = 0; it < 24; ++it) {
       cbrt = (2.0 * cbrt + target / (cbrt * cbrt)) / 3.0;
     }
-    const double hill_m = planet.orbit.a_m.to_double() * cbrt;
+    // Satellite systems keep their 1:10 proportions: feed the Hill radius
+    // the ASTRONOMICAL distance, not the compressed one. Once heliocentric
+    // orbits are deliberately off-proportion the Hill sphere stops being a
+    // physical quantity and becomes a layout heuristic -- and shrinking it
+    // 4x would drive Io-analogues inside two planet radii and strip the
+    // moons off 12% of the worlds that have them.
+    const double hill_m = planet.orbit.a_m.to_double() * kOrbitScale * cbrt;
     const double moon_zone = hill_m / 3.0;
     double moon_a = std::max(planet.phys.radius_m.to_double() * 3.0, moon_zone * 0.02);
     for (int mi = 0; mi < moon_count; ++mi) {

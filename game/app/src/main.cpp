@@ -1342,7 +1342,11 @@ int main(int argc, char** argv) {
       m.m[0] = 1.0f;
       m.m[5] = 1.0f;
       m.m[10] = 0.00001f;
-      m.m[14] = 0.00005f;  // reversed-Z far: everything wins depth over it
+      // Reversed-Z: barely above the clear value (0) so the dome renders,
+      // but BELOW any real geometry's depth — including stars and corona
+      // billboards at 1e9+ m, whose depth is ~1e-10. At the old 5e-5 the
+      // dome popped on at the atmosphere boundary and erased the sun.
+      m.m[14] = 1e-22f;
       m.m[15] = 1.0f;
       std::memcpy(dome.mvp, m.m, sizeof(m.m));
       dome.mode = 4;

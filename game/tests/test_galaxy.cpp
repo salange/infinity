@@ -4,6 +4,7 @@
 
 #include "core/seed.hpp"
 #include "gen/galaxy.hpp"
+#include "gen/deep_sky.hpp"
 #include "gen/galaxy_octree.hpp"
 #include "gen/names.hpp"
 #include "gen/universe.hpp"
@@ -216,5 +217,78 @@ TEST_CASE("galaxy octree: counts, determinism, magnitude-limited API (WP3)") {
       // Position inside the cell.
       CHECK(std::abs(star.position_m.x.to_double()) <= octree.root_size_m() * 0.5);
     }
+  }
+}
+
+TEST_CASE("deep sky: nebulae in arms, globulars in the halo (WP4)") {
+  const auto spiral = params_of_type(gen::GalaxyType::Barred);
+  const core::Key key = home_galaxy_key();
+  const gen::NebulaField nebulae(key, spiral);
+  const gen::GalaxyDensity density(spiral);
+  const double radius = density.radius_m().to_double();
+
+  SUBCASE("nebulae concentrate where the dust (arm term) is") {
+    // Enumerate every nebula and compare the mean dust density at their
+    // centres against the mean over uniform disc positions: arm-weighted
+    // placement must beat uniform by a clear factor.
+    std::vector<gen::Nebula> all;
+    nebulae.nebulae_in_ball(gen::Dir3{Real(0.0), Real(0.0), Real(0.0)},
+                            Real(radius * 1.2), &all);
+    REQUIRE(all.size() > 10);
+    double at_nebulae = 0.0;
+    for (const auto& nebula : all) {
+      at_nebulae += density.dust(nebula.center_m).to_double();
+    }
+    at_nebulae /= static_cast<double>(all.size());
+    double uniform_mean = 0.0;
+    int samples = 0;
+    for (int i = 0; i < 4096; ++i) {
+      const double angle = 6.283185307179586 * (i % 64) / 64.0;
+      const double ring = radius * (0.1 + 0.85 * ((i / 64) / 64.0));
+      const gen::Dir3 p{Real(ring * std::cos(angle)), Real(ring * std::sin(angle)),
+                        Real(0.0)};
+      uniform_mean += density.dust(p).to_double();
+      ++samples;
+    }
+    uniform_mean /= static_cast<double>(samples);
+    CHECK(at_nebulae > uniform_mean * 1.4);
+  }
+
+  SUBCASE("ellipticals host essentially no nebulae or open clusters") {
+    const auto elliptical = params_of_type(gen::GalaxyType::Elliptical);
+    const gen::NebulaField none(key, elliptical);
+    std::vector<gen::Nebula> all;
+    const gen::GalaxyDensity ell(elliptical);
+    none.nebulae_in_ball(gen::Dir3{Real(0.0), Real(0.0), Real(0.0)},
+                         Real(ell.radius_m().to_double() * 1.2), &all);
+    CHECK(all.empty());
+    const gen::StarClusterField ell_clusters(key, elliptical);
+    CHECK(ell_clusters.cell_open_clusters(16, 16, 16).count == 0);
+    CHECK(ell_clusters.globular_count() > 0);  // but globulars remain
+  }
+
+  SUBCASE("globulars are spherical (not disc-flattened) and deterministic") {
+    const gen::StarClusterField clusters(key, spiral);
+    REQUIRE(clusters.globular_count() >= 8);
+    double mean_abs_z = 0.0;
+    double mean_r = 0.0;
+    for (int i = 0; i < clusters.globular_count(); ++i) {
+      const auto globular = clusters.globular(i);
+      CHECK(globular.globular);
+      CHECK(globular.age_gyr.to_double() >= 9.0);
+      mean_abs_z += std::abs(globular.center_m.z.to_double());
+      mean_r += std::sqrt(
+          globular.center_m.x.to_double() * globular.center_m.x.to_double() +
+          globular.center_m.y.to_double() * globular.center_m.y.to_double() +
+          globular.center_m.z.to_double() * globular.center_m.z.to_double());
+    }
+    mean_abs_z /= clusters.globular_count();
+    mean_r /= clusters.globular_count();
+    // Spherical: mean |z| = mean r / 2 exactly for isotropy; the thin
+    // disc would give a ratio of ~scale_height/radius << 0.2.
+    CHECK(mean_abs_z / mean_r > 0.3);
+    const auto again = clusters.globular(3);
+    const auto again2 = clusters.globular(3);
+    CHECK(again.center_m.x.to_double() == again2.center_m.x.to_double());
   }
 }

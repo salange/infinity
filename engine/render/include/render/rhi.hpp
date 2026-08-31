@@ -83,6 +83,11 @@ class Rhi {
     std::uint32_t planet_texture{0};
     // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
+    // T0018: overlay items (HUD, map cards, reticles) are drawn AFTER the
+    // HDR post chain, straight onto the tonemapped image — UI must not
+    // breathe with the eye's exposure. They still depth-test against the
+    // scene.
+    bool overlay = false;
   };
 
   // Per-frame globals: sky clear color, directional sun light (unit

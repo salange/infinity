@@ -1480,6 +1480,10 @@ int main(int argc, char** argv) {
             aim_at(inf::sim::normalize(moon.pos - player.position()));
           }
         }
+      } else if (cmd.op == "posnight" && !cmd.args.empty()) {
+        // True antisolar point at the given altitude (night-sky captures).
+        player.set_position(inf::sim::normalize(star_local) * -1.0 *
+                            (anchor->radius + arg_d(0)));
       } else if (cmd.op == "posmoonsun" && cmd.args.size() >= 3) {
         // Like posmoon, but on the moon's SUNWARD side (day-side
         // captures; moons move too fast for precomputed positions).
@@ -1680,7 +1684,9 @@ int main(int argc, char** argv) {
     // Clear color is CONSTANT deep space — it must match the sky dome's
     // fade-out color exactly, or leaving the atmosphere pops in
     // brightness (the dome renders the in-atmosphere sky per pixel).
-    const float sky[3] = {0.013f, 0.015f, 0.028f};
+    // T0018: genuinely dark — the HDR eye adapts; a bright fake floor
+    // exposed to a flat wash. Matches the dome's space floor.
+    const float sky[3] = {0.00004f, 0.00005f, 0.0001f};
     double atmosphere = anchor->planet.atmosphere_height_m.to_double();
     float palette[3] = {0.05f, 0.06f, 0.12f};
     switch (anchor->planet.type) {
@@ -2077,11 +2083,12 @@ int main(int argc, char** argv) {
           continue;
         }
         const double cos_ang = inf::sim::dot(inf::sim::normalize(cam_fwd_v), dir);
-        // Veil: never fully gone while the star is close — light floods
-        // the cockpit from every direction.
+        // Veil: a modest off-axis floor while the star is UP, but zero
+        // when it is occluded — under HDR auto-exposure (T0018) any fake
+        // luminance floor gets amplified into a full-screen wash on the
+        // night side.
         const double veil = closeness * closeness *
-                            (0.30 + 0.70 * std::max(cos_ang, 0.0)) *
-                            (0.1 + 0.9 * visibility);
+                            (0.06 + 0.94 * std::max(cos_ang, 0.0)) * visibility;
         if (veil > 0.004) {
           float warm[3] = {star.tint[0], star.tint[1], star.tint[2]};
           glare_sprite(0.0, 0.0, 3.0 * input.aspect, 3.0, warm, veil * 0.38, 0.55);
@@ -2539,8 +2546,14 @@ int main(int argc, char** argv) {
           anchor->moon >= 0 ? moon_names[static_cast<std::size_t>(anchor->slot)]
                                         [static_cast<std::size_t>(anchor->moon)]
                             : slot_names[static_cast<std::size_t>(anchor->slot)];
+      const std::size_t hud_start = items.size();
       hud->build(&items, player, radar_bodies, measured_speed, input.aspect, state.height,
                  dt, location_name, target);
+      // HUD is UI: it rides the LDR overlay pass, immune to eye
+      // adaptation (T0018).
+      for (std::size_t i = hud_start; i < items.size(); ++i) {
+        items[i].overlay = true;
+      }
     } else if (map_phase == MapPhase::On && hovered_slot >= 0) {
       // Info card from the forever-state payloads (map-mode spec §3).
       const auto& entry = system.planets[static_cast<std::size_t>(hovered_slot)];
@@ -2590,8 +2603,12 @@ int main(int argc, char** argv) {
       std::snprintf(buf, sizeof(buf), "Moons %zu   Atmosphere %s", entry.moons.size(),
                     entry.phys.atmosphere.height_m.to_double() > 0.0 ? "yes" : "no");
       lines.emplace_back(buf);
+      const std::size_t card_start = items.size();
       hud->build_map_card(&items, lines, pointer_ndc_x, pointer_ndc_y, input.aspect,
                           state.height);
+      for (std::size_t i = card_start; i < items.size(); ++i) {
+        items[i].overlay = true;
+      }
     }
 
     // Frame lighting: the star with the highest apparent flux at the

@@ -40,6 +40,20 @@ class Rhi {
   std::uint32_t create_mesh_mat(const float* vertices, std::size_t float_count);
   void destroy_mesh(std::uint32_t mesh);
 
+  // --- planet cube-map textures (T0016) --------------------------------
+  // One height + material pair of 6-layer texture arrays per body, in
+  // the engine cube-sphere frame (layer = face), sampled by the textured
+  // planet impostor (mode 6). Height is R16Float, normalized to [-1, 1]
+  // over the body's height amplitude; material is RGBA8 albedo. This is
+  // deliberately NOT a general texture system — one pair per resident
+  // body plus a shared sampler.
+  std::uint32_t create_planet_texture(std::uint32_t face_size);
+  // Full-layer upload of one cube face: height as raw IEEE half floats
+  // (face_size^2), material as RGBA8 (face_size^2 * 4 bytes).
+  void update_planet_face(std::uint32_t handle, std::uint32_t face,
+                          const std::uint16_t* height_half, const std::uint8_t* rgba);
+  void destroy_planet_texture(std::uint32_t handle);
+
   struct DrawItem {
     std::uint32_t mesh{0};
     // Column-major model-view-projection (camera-relative; f32-safe).
@@ -59,8 +73,14 @@ class Rhi {
     // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow,
     // 3 = additive glow sprite (lens flare / veil / limb halo; extra.x
     // intensity, extra.y falloff, extra.z rim radius or 0 for a disc),
-    // 4 = analytic sky dome (opaque fullscreen quad at far depth).
+    // 4 = analytic sky dome (opaque fullscreen quad at far depth),
+    // 6 = textured planet impostor: a unit sphere displaced in the
+    //     vertex shader from the planet_texture height map and shaded
+    //     from its material map (extra.x = height amplitude / radius,
+    //     extra.y = slope scale for shading normals).
     std::uint32_t mode{0};
+    // Mode 6 only: handle from create_planet_texture (0 = none).
+    std::uint32_t planet_texture{0};
     // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
   };

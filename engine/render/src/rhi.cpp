@@ -78,6 +78,55 @@ struct Frame {
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<uniform> frame: Frame;
+// Planet cube-map pair (T0016, mode 6): height normalized to [-1,1] over
+// the body's amplitude, material albedo; layer = cube face in the SAME
+// cube-sphere frame the generators use, so texel<->surface mapping is
+// exact by construction. Items without a texture bind a 1x1 default.
+@group(1) @binding(0) var planet_height: texture_2d_array<f32>;
+@group(1) @binding(1) var planet_material: texture_2d_array<f32>;
+@group(1) @binding(2) var planet_sampler: sampler;
+
+// Direction -> (u01, v01, face), mirroring world/cubesphere.cpp exactly
+// (dominant axis, ties broken x, y, z).
+fn cube_face_uv(d: vec3<f32>) -> vec3<f32> {
+  let ax = abs(d.x);
+  let ay = abs(d.y);
+  let az = abs(d.z);
+  var face = 0.0;
+  var u = 0.0;
+  var v = 0.0;
+  if (ax >= ay && ax >= az) {
+    if (d.x >= 0.0) { face = 0.0; u = d.y / ax; v = d.z / ax; }
+    else { face = 1.0; u = -d.y / ax; v = d.z / ax; }
+  } else if (ay >= az) {
+    if (d.y >= 0.0) { face = 2.0; u = -d.x / ay; v = d.z / ay; }
+    else { face = 3.0; u = d.x / ay; v = d.z / ay; }
+  } else {
+    if (d.z >= 0.0) { face = 4.0; u = d.y / az; v = d.x / az; }
+    else { face = 5.0; u = d.y / az; v = -d.x / az; }
+  }
+  return vec3<f32>((u + 1.0) * 0.5, (v + 1.0) * 0.5, face);
+}
+
+// In-face tangent axes for the shading-normal gradient (approximate:
+// the uv axes projected onto the tangent plane are close enough for
+// lighting).
+fn cube_axis_u(face: u32) -> vec3<f32> {
+  switch face {
+    case 0u: { return vec3<f32>(0.0, 1.0, 0.0); }
+    case 1u: { return vec3<f32>(0.0, -1.0, 0.0); }
+    case 2u: { return vec3<f32>(-1.0, 0.0, 0.0); }
+    case 3u: { return vec3<f32>(1.0, 0.0, 0.0); }
+    default: { return vec3<f32>(0.0, 1.0, 0.0); }
+  }
+}
+fn cube_axis_v(face: u32) -> vec3<f32> {
+  switch face {
+    case 4u: { return vec3<f32>(1.0, 0.0, 0.0); }
+    case 5u: { return vec3<f32>(-1.0, 0.0, 0.0); }
+    default: { return vec3<f32>(0.0, 0.0, 1.0); }
+  }
+}
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -94,6 +143,21 @@ struct VSOut {
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
            @location(2) mat_pack: f32, @location(3) mat_blend: f32) -> VSOut {
   var out: VSOut;
+  let mode = u32(u.extra.w + 0.5);
+  if (mode == 6u) {
+    // Textured planet impostor: displace the unit sphere radially from
+    // the height cube map — real silhouette relief for a texture fetch.
+    // extra.x = height amplitude / body radius.
+    let dir = normalize(position);
+    let fuv = cube_face_uv(dir);
+    let h = textureSampleLevel(planet_height, planet_sampler, fuv.xy, i32(fuv.z), 0.0).r;
+    out.pos = u.mvp * vec4<f32>(dir * (1.0 + h * u.extra.x), 1.0);
+    out.opos = dir;  // undisplaced unit direction; fragment re-derives uv
+    out.normal = dir;
+    out.mat_pack = 0.0;
+    out.mat_blend = 0.0;
+    return out;
+  }
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = normal;
   out.opos = position;
@@ -292,6 +356,39 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   if (mode == 4u) {
     return vec4<f32>(sky_dome(in.opos.xy), 1.0);
   }
+  if (mode == 6u) {
+    // Textured planet impostor: albedo from the material map, shading
+    // normal from the height-map gradient (derive, don't store —
+    // extra.y = slope scale), lit like terrain.
+    let dir = normalize(in.opos);
+    let fuv = cube_face_uv(dir);
+    let layer = i32(fuv.z);
+    let face = u32(fuv.z + 0.5);
+    let alb = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb;
+    let texel = 1.0 / f32(textureDimensions(planet_height).x);
+    let du = vec2<f32>(texel, 0.0);
+    let dv = vec2<f32>(0.0, texel);
+    let hx1 = textureSampleLevel(planet_height, planet_sampler, fuv.xy + du, layer, 0.0).r;
+    let hx0 = textureSampleLevel(planet_height, planet_sampler, fuv.xy - du, layer, 0.0).r;
+    let hy1 = textureSampleLevel(planet_height, planet_sampler, fuv.xy + dv, layer, 0.0).r;
+    let hy0 = textureSampleLevel(planet_height, planet_sampler, fuv.xy - dv, layer, 0.0).r;
+    let au = cube_axis_u(face);
+    let av = cube_axis_v(face);
+    let tu = normalize(au - dir * dot(au, dir));
+    let tv = normalize(av - dir * dot(av, dir));
+    var n = normalize(dir - tu * ((hx1 - hx0) * u.extra.y) -
+                      tv * ((hy1 - hy0) * u.extra.y));
+    let light = normalize(frame.sun_dir.xyz);
+    let ndl = max(dot(n, light), 0.0);
+    let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+    // Two-scale modulation in the planet-local frame, like the terrain
+    // path — breaks up flat biome fills at texture resolution.
+    let mo = 0.6 * vnoise(dir * 220.0) + 0.4 * vnoise(dir * 47.0);
+    let base6 = alb * (0.84 + 0.24 * mo);
+    var c6 = base6 * (0.05 + 1.05 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
+    c6 += base6 * max(dot(n, -light), 0.0) * vec3<f32>(0.05, 0.07, 0.12);
+    return vec4<f32>(aces(c6), 1.0);
+  }
   if (mode == 1u) {
     let c = star_surface(in.opos, u.color.rgb, normalize(u.aux.xyz), u.aux.w,
                          u.extra.x, time);
@@ -474,6 +571,73 @@ struct Rhi::Impl {
   WGPUBindGroup bind_group = nullptr;
   WGPUBuffer uniform_buffer = nullptr;
   WGPUBuffer frame_buffer = nullptr;
+
+  // Planet cube-map textures (T0016): group 1 = height array + material
+  // array + shared sampler. Items without a texture bind the 1x1 default
+  // so every pipeline can share one layout.
+  struct PlanetTexEntry {
+    WGPUTexture height = nullptr;
+    WGPUTexture material = nullptr;
+    WGPUTextureView height_view = nullptr;
+    WGPUTextureView material_view = nullptr;
+    WGPUBindGroup group = nullptr;
+    std::uint32_t size = 0;
+  };
+  WGPUBindGroupLayout tex_layout = nullptr;
+  WGPUSampler planet_sampler = nullptr;
+  PlanetTexEntry default_tex;
+  std::unordered_map<std::uint32_t, PlanetTexEntry> planet_textures;
+  std::uint32_t next_planet_tex_id = 1;
+
+  PlanetTexEntry make_planet_tex(std::uint32_t face_size) {
+    PlanetTexEntry entry;
+    entry.size = face_size;
+    WGPUTextureDescriptor desc{};
+    desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+    desc.dimension = WGPUTextureDimension_2D;
+    desc.size = WGPUExtent3D{face_size, face_size, 6};
+    desc.mipLevelCount = 1;
+    desc.sampleCount = 1;
+    desc.label = sv("planet-height");
+    desc.format = WGPUTextureFormat_R16Float;
+    entry.height = wgpuDeviceCreateTexture(device, &desc);
+    desc.label = sv("planet-material");
+    desc.format = WGPUTextureFormat_RGBA8Unorm;
+    entry.material = wgpuDeviceCreateTexture(device, &desc);
+    WGPUTextureViewDescriptor view_desc{};
+    view_desc.dimension = WGPUTextureViewDimension_2DArray;
+    view_desc.baseArrayLayer = 0;
+    view_desc.arrayLayerCount = 6;
+    view_desc.baseMipLevel = 0;
+    view_desc.mipLevelCount = 1;
+    view_desc.format = WGPUTextureFormat_R16Float;
+    view_desc.aspect = WGPUTextureAspect_All;
+    entry.height_view = wgpuTextureCreateView(entry.height, &view_desc);
+    view_desc.format = WGPUTextureFormat_RGBA8Unorm;
+    entry.material_view = wgpuTextureCreateView(entry.material, &view_desc);
+    WGPUBindGroupEntry entries[3] = {};
+    entries[0].binding = 0;
+    entries[0].textureView = entry.height_view;
+    entries[1].binding = 1;
+    entries[1].textureView = entry.material_view;
+    entries[2].binding = 2;
+    entries[2].sampler = planet_sampler;
+    WGPUBindGroupDescriptor group_desc{};
+    group_desc.layout = tex_layout;
+    group_desc.entryCount = 3;
+    group_desc.entries = entries;
+    entry.group = wgpuDeviceCreateBindGroup(device, &group_desc);
+    return entry;
+  }
+
+  void release_planet_tex(PlanetTexEntry& entry) {
+    if (entry.group != nullptr) wgpuBindGroupRelease(entry.group);
+    if (entry.height_view != nullptr) wgpuTextureViewRelease(entry.height_view);
+    if (entry.material_view != nullptr) wgpuTextureViewRelease(entry.material_view);
+    if (entry.height != nullptr) wgpuTextureRelease(entry.height);
+    if (entry.material != nullptr) wgpuTextureRelease(entry.material);
+    entry = PlanetTexEntry{};
+  }
   WGPUTexture depth_texture = nullptr;
   WGPUTextureView depth_view = nullptr;
   std::unordered_map<std::uint32_t, MeshEntry> meshes;
@@ -627,9 +791,42 @@ struct Rhi::Impl {
     layout_desc.entries = layout_entries;
     bind_layout = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
 
+    // Group 1: planet cube-map pair + sampler (T0016). The height map is
+    // sampled in the VERTEX stage (displacement).
+    WGPUBindGroupLayoutEntry tex_entries[3] = {};
+    tex_entries[0].binding = 0;
+    tex_entries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+    tex_entries[0].texture.sampleType = WGPUTextureSampleType_Float;
+    tex_entries[0].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+    tex_entries[1].binding = 1;
+    tex_entries[1].visibility = WGPUShaderStage_Fragment;
+    tex_entries[1].texture.sampleType = WGPUTextureSampleType_Float;
+    tex_entries[1].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+    tex_entries[2].binding = 2;
+    tex_entries[2].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+    tex_entries[2].sampler.type = WGPUSamplerBindingType_Filtering;
+    WGPUBindGroupLayoutDescriptor tex_layout_desc{};
+    tex_layout_desc.entryCount = 3;
+    tex_layout_desc.entries = tex_entries;
+    tex_layout = wgpuDeviceCreateBindGroupLayout(device, &tex_layout_desc);
+
+    WGPUSamplerDescriptor sampler_desc{};
+    sampler_desc.label = sv("planet-sampler");
+    sampler_desc.addressModeU = WGPUAddressMode_ClampToEdge;
+    sampler_desc.addressModeV = WGPUAddressMode_ClampToEdge;
+    sampler_desc.addressModeW = WGPUAddressMode_ClampToEdge;
+    sampler_desc.magFilter = WGPUFilterMode_Linear;
+    sampler_desc.minFilter = WGPUFilterMode_Linear;
+    sampler_desc.mipmapFilter = WGPUMipmapFilterMode_Nearest;
+    sampler_desc.lodMinClamp = 0.0f;
+    sampler_desc.lodMaxClamp = 32.0f;
+    sampler_desc.maxAnisotropy = 1;
+    planet_sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
+
+    WGPUBindGroupLayout group_layouts[2] = {bind_layout, tex_layout};
     WGPUPipelineLayoutDescriptor pipeline_layout_desc{};
-    pipeline_layout_desc.bindGroupLayoutCount = 1;
-    pipeline_layout_desc.bindGroupLayouts = &bind_layout;
+    pipeline_layout_desc.bindGroupLayoutCount = 2;
+    pipeline_layout_desc.bindGroupLayouts = group_layouts;
     WGPUPipelineLayout pipeline_layout =
         wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
 
@@ -748,12 +945,48 @@ struct Rhi::Impl {
     bind_desc.entryCount = 2;
     bind_desc.entries = bind_entries;
     bind_group = wgpuDeviceCreateBindGroup(device, &bind_desc);
+
+    // 1x1 default planet texture so group 1 is always bindable.
+    default_tex = make_planet_tex(1);
+    const std::uint16_t half_zero = 0;  // 0.0h
+    const std::uint8_t grey[4] = {140, 140, 140, 255};
+    for (std::uint32_t face = 0; face < 6; ++face) {
+      write_planet_face(default_tex, face, &half_zero, grey);
+    }
+  }
+
+  void write_planet_face(const PlanetTexEntry& entry, std::uint32_t face,
+                         const std::uint16_t* height_half, const std::uint8_t* rgba) {
+    WGPUTexelCopyTextureInfo dst{};
+    dst.mipLevel = 0;
+    dst.origin = WGPUOrigin3D{0, 0, face};
+    dst.aspect = WGPUTextureAspect_All;
+    WGPUTexelCopyBufferLayout layout{};
+    layout.offset = 0;
+    layout.rowsPerImage = entry.size;
+    const WGPUExtent3D extent{entry.size, entry.size, 1};
+    dst.texture = entry.height;
+    layout.bytesPerRow = entry.size * 2;
+    wgpuQueueWriteTexture(queue, &dst, height_half,
+                          static_cast<std::size_t>(entry.size) * entry.size * 2, &layout,
+                          &extent);
+    dst.texture = entry.material;
+    layout.bytesPerRow = entry.size * 4;
+    wgpuQueueWriteTexture(queue, &dst, rgba,
+                          static_cast<std::size_t>(entry.size) * entry.size * 4, &layout,
+                          &extent);
   }
 
   ~Impl() {
     for (auto& [id, mesh] : meshes) {
       wgpuBufferRelease(mesh.buffer);
     }
+    for (auto& [id, entry] : planet_textures) {
+      release_planet_tex(entry);
+    }
+    release_planet_tex(default_tex);
+    if (planet_sampler != nullptr) wgpuSamplerRelease(planet_sampler);
+    if (tex_layout != nullptr) wgpuBindGroupLayoutRelease(tex_layout);
     if (rec_buffer != nullptr) wgpuBufferRelease(rec_buffer);
     if (rec_color_view != nullptr) wgpuTextureViewRelease(rec_color_view);
     if (rec_color != nullptr) wgpuTextureRelease(rec_color);
@@ -932,6 +1165,30 @@ void Rhi::destroy_mesh(std::uint32_t mesh) {
   }
 }
 
+std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size) {
+  impl_->ensure_mesh_pipeline();  // layouts + sampler exist from here on
+  const std::uint32_t id = impl_->next_planet_tex_id++;
+  impl_->planet_textures.emplace(id, impl_->make_planet_tex(face_size));
+  return id;
+}
+
+void Rhi::update_planet_face(std::uint32_t handle, std::uint32_t face,
+                             const std::uint16_t* height_half, const std::uint8_t* rgba) {
+  const auto it = impl_->planet_textures.find(handle);
+  if (it == impl_->planet_textures.end() || face >= 6) {
+    return;
+  }
+  impl_->write_planet_face(it->second, face, height_half, rgba);
+}
+
+void Rhi::destroy_planet_texture(std::uint32_t handle) {
+  const auto it = impl_->planet_textures.find(handle);
+  if (it != impl_->planet_textures.end()) {
+    impl_->release_planet_tex(it->second);
+    impl_->planet_textures.erase(it);
+  }
+}
+
 bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                        std::size_t item_count) {
   impl_->ensure_mesh_pipeline();
@@ -1014,6 +1271,14 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         }
         const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+        WGPUBindGroup tex_group = impl_->default_tex.group;
+        if (items[i].planet_texture != 0) {
+          const auto tex_it = impl_->planet_textures.find(items[i].planet_texture);
+          if (tex_it != impl_->planet_textures.end()) {
+            tex_group = tex_it->second.group;
+          }
+        }
+        wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_group, 0, nullptr);
         wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
         wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
       }

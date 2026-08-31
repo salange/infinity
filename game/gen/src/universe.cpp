@@ -1,5 +1,7 @@
 #include "gen/universe.hpp"
 
+#include "core/det/trig.hpp"
+
 namespace inf::gen {
 
 using core::tree::AxisDesc;
@@ -22,15 +24,22 @@ NodeSpec universe_spec(const core::Key&, const core::tree::Node*) {
   return spec;
 }
 
-NodeSpec cluster_spec(const core::Key&, const core::tree::Node*) {
+NodeSpec cluster_spec(const core::Key& entity_key, const core::tree::Node*) {
   NodeSpec spec;
   AxisDesc galaxies;
   galaxies.name = name::GalaxiesAxis;
   galaxies.child_kind = kind::Galaxy;
   galaxies.topo = Topology::IndexedList;
-  galaxies.count = [](const core::tree::Node&, const core::Key&) { return std::uint64_t{1}; };
-  galaxies.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
-    return cell.x == 0;  // one galaxy per cluster until galaxy gen lands
+  // Real galaxy counts (T0017 WP5): 10-1000 per cluster, drawn from
+  // galaxy-layout/v1 off the cluster entity; positions come from the
+  // same layer (galaxy_position_in_cluster).
+  galaxies.count = [entity_key](const core::tree::Node&, const core::Key&) {
+    return static_cast<std::uint64_t>(galaxy_count_in_cluster(entity_key));
+  };
+  galaxies.occupied = [entity_key](const core::tree::Node&, const core::Key&,
+                                   const Cell& cell) {
+    return cell.x >= 0 &&
+           cell.x < static_cast<std::int64_t>(galaxy_count_in_cluster(entity_key));
   };
   spec.axes = {galaxies};
   return spec;
@@ -234,6 +243,42 @@ BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cel
                            .child(Step{name::MoonsAxis, Cell::slot(moon_index)});
   const auto node = tree->get(address);
   return BodyHandle{node->key(), node->params_key()};
+}
+
+std::uint32_t galaxy_count_in_cluster(const core::Key& cluster_entity_key) {
+  const core::Key layout = core::derive_named(cluster_entity_key, name::GalaxyLayoutV1);
+  const auto draw = core::draw_point(layout, channel::Params, 0, 0, 0);
+  // Log-uniform 10-1000: 10 * 100^u.
+  const double u = static_cast<double>(draw[0] >> 11U) * 0x1.0p-53;
+  const double count =
+      10.0 * det::fast_exp(det::Real(u * 4.605170185988091)).to_double();
+  const auto result = static_cast<std::uint32_t>(count);
+  return result < 10U ? 10U : (result > 1000U ? 1000U : result);
+}
+
+Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32_t index) {
+  if (index == 0) {
+    // The home galaxy of every cluster anchors its origin; for the HOME
+    // cluster this keeps the playable galaxy exactly where it was.
+    return Dir3{det::Real(0.0), det::Real(0.0), det::Real(0.0)};
+  }
+  const core::Key layout = core::derive_named(cluster_entity_key, name::GalaxyLayoutV1);
+  const auto draw = core::draw_point(layout, channel::Params, index, 1, 0);
+  const auto coord = [&](std::uint64_t word) {
+    const double u = static_cast<double>(word >> 11U) * 0x1.0p-53;
+    return det::Real((u - 0.5) * kClusterSizeM);
+  };
+  return Dir3{coord(draw[0]), coord(draw[1]), coord(draw[2])};
+}
+
+core::Key galaxy_key_in_cluster(const core::Seed128& seed, std::int64_t cx,
+                                std::int64_t cy, std::int64_t cz, std::uint32_t index) {
+  const auto tree = make_tree(seed);
+  const auto address =
+      core::tree::Address{}
+          .child(Step{name::ClustersAxis, Cell::grid(cx, cy, cz)})
+          .child(Step{name::GalaxiesAxis, Cell::index(static_cast<std::int64_t>(index))});
+  return tree->get(address)->key();
 }
 
 core::Key home_galaxy_key(const core::Seed128& seed) {

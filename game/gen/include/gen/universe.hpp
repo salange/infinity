@@ -67,4 +67,23 @@ BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cel
 // it).
 core::Key home_galaxy_key(const core::Seed128& seed);
 
+// --- cluster and universe levels (T0017 WP5) ------------------------------
+// universe.clusters is a CellGrid3D with this cell size (from the 1:10
+// interstellar scale: ~32 M game-ly, a typical cluster spacing). The
+// home cluster is cell (0,0,0), centred on the origin.
+inline constexpr double kClusterCellM = 3.0e22;
+// Cluster cube edge within which its galaxies scatter.
+inline constexpr double kClusterSizeM = 2.4e22;
+
+// Galaxies per cluster (10-1000, drawn from galaxy-layout/v1 off the
+// cluster's entity key) and their positions in the cluster frame. Galaxy
+// 0 sits at the cluster origin — for the home cluster that keeps the
+// playable galaxy exactly where it always was.
+std::uint32_t galaxy_count_in_cluster(const core::Key& cluster_entity_key);
+Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32_t index);
+// Entity key of any galaxy in any cluster — external galaxies need only
+// galaxy-params/v1 from this to render as impostors (T0018 WP5).
+core::Key galaxy_key_in_cluster(const core::Seed128& seed, std::int64_t cx,
+                                std::int64_t cy, std::int64_t cz, std::uint32_t index);
+
 }  // namespace inf::gen

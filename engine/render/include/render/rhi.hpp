@@ -50,7 +50,10 @@ class Rhi {
     // extra.w is reserved (carries the mode to the shader).
     float aux[4]{};
     float extra[4]{};
-    // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow.
+    // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow,
+    // 3 = additive glow sprite (lens flare / veil / limb halo; extra.x
+    // intensity, extra.y falloff, extra.z rim radius or 0 for a disc),
+    // 4 = analytic sky dome (opaque fullscreen quad at far depth).
     std::uint32_t mode{0};
     // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
@@ -65,12 +68,50 @@ class Rhi {
     float sun_dir[3]{0.45f, 0.75f, 0.5f};
     float sun_color[3]{1.0f, 1.0f, 1.0f};
     float time_s{0.0f};
+    // Camera basis + projection half-tangents and atmosphere state for
+    // the mode-4 sky dome (all in the mesh frame). altitude_frac is the
+    // camera altitude over the atmosphere height (>= 1 = space); the
+    // defaults keep the dome black when an app never fills these in.
+    float cam_right[3]{1.0f, 0.0f, 0.0f};
+    float cam_up[3]{0.0f, 1.0f, 0.0f};
+    float cam_fwd[3]{0.0f, 0.0f, -1.0f};
+    float tan_half_x{1.0f};
+    float tan_half_y{1.0f};
+    float planet_up[3]{0.0f, 0.0f, 1.0f};
+    float altitude_frac{2.0f};
+    float atmo_tint[3]{0.4f, 0.6f, 0.9f};
+    // Anchor planet center relative to the camera, and how strongly lit
+    // terrain normals blend toward the analytic sphere radial (0 on the
+    // surface, 1 from orbit; hides per-chunk normal seams at distance —
+    // lit items must then carry their translation in DrawItem.aux).
+    float planet_center[3]{0.0f, 0.0f, 0.0f};
+    float normal_blend{0.0f};
   };
 
   // Clears, draws the items (sun-lit terrain, unlit overlays, star
   // surfaces, additive glows), presents.
   bool render_frame(const FrameParams& frame, const DrawItem* items,
                     std::size_t item_count);
+
+  // One-shot capture: the next render_frame additionally renders the
+  // identical scene into an offscreen target, reads it back, and writes
+  // it as a binary PPM (P6) to path. Blocks that frame on the GPU
+  // readback — a debug/verification tool, not a per-frame feature.
+  void request_capture(const std::string& path);
+
+  // --- debug frame recorder (ring buffer + triggered sequences) --------
+  // While the ring is enabled (debug mode), every few frames the scene
+  // is re-rendered at a reduced resolution and kept in an in-memory ring
+  // holding the last few seconds. trigger_recording dumps that ring to
+  // dir as numbered PPMs and keeps recording for future_seconds more
+  // (this part works even with the ring disabled — release mode).
+  // Frames are named seq-%04d.ppm in capture order; times.txt maps each
+  // to its frame time.
+  void set_ring_enabled(bool enabled);
+  void trigger_recording(const std::string& dir, double future_seconds);
+  // True while a triggered recording is still capturing future frames
+  // (drives the on-screen REC indicator).
+  bool recording_active() const;
 
   // Human-readable adapter description ("<name> (<backend>)").
   const std::string& adapter_info() const;

@@ -45,7 +45,9 @@ Rhi::DrawItem hud_item(std::uint32_t mesh, double x, double y, double sx, double
   m.m[10] = 0.00001f;
   m.m[12] = static_cast<float>(x / aspect);
   m.m[13] = static_cast<float>(y);
-  m.m[14] = static_cast<float>(depth);
+  // Reversed-Z: callers still pass "smaller = closer" layering depths;
+  // flip here so the HUD stack keeps its ordering under Greater.
+  m.m[14] = static_cast<float>(1.0 - depth);
   m.m[15] = 1.0f;
   std::memcpy(item.mvp, m.m, sizeof(m.m));
   item.color[0] = color.r;
@@ -184,6 +186,9 @@ struct Hud::Impl {
   TextLine range_line;
   TextLine asl_line;
   TextLine biome_line;
+  TextLine location_line;     // planet name under the radar when near it
+  TextLine target_name_line;  // crosshair target readout (flight)
+  TextLine target_info_line;
   TextLine letter_n, letter_s, letter_e, letter_w;
   std::vector<TextLine> card_lines;  // map-mode info card (lazy)
 
@@ -218,8 +223,9 @@ struct Hud::Impl {
     rhi->destroy_mesh(quad_mesh);
     rhi->destroy_mesh(disc_mesh);
     rhi->destroy_mesh(ring_mesh);
-    for (TextLine* line : {&speed_line, &range_line, &asl_line, &biome_line, &letter_n,
-                           &letter_s, &letter_e, &letter_w}) {
+    for (TextLine* line : {&speed_line, &range_line, &asl_line, &biome_line, &location_line,
+                           &target_name_line, &target_info_line, &letter_n, &letter_s,
+                           &letter_e, &letter_w}) {
       line->destroy(rhi);
     }
     for (TextLine& line : card_lines) {
@@ -381,11 +387,15 @@ struct Hud::Impl {
     }
   }
 
-  // NMS-style system radar: bodies projected onto the ship's horizontal
-  // plane (up on the radar = ship forward), radial distance
-  // log-compressed so the outermost body sits near the rim, constant
-  // icon sizes, and a vertical elevation bar from each icon's plane
-  // point (above the ship plane = bar upward, below = downward).
+  // Ship-plane system radar (2026-08-31): the disc IS the plane spanned
+  // by the camera axis and the ship's left/right axis — top of the disc
+  // = straight ahead along the camera, bottom = behind, left/right =
+  // ship left/right. Bodies project into that plane; the camera-up
+  // component becomes the elevation bar (above the plane = stem up,
+  // below = stem down; the dim tick marks the in-plane point, the ring
+  // marks the current anchor body). Distance is linear out to the inner
+  // (half) ring, then log-compressed so the outermost body sits at the
+  // rim.
   void radar_system(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
                     const std::vector<RadarBody>& bodies, double aspect) {
     const double cx = kRadarCenterX * aspect;
@@ -394,41 +404,42 @@ struct Hud::Impl {
       return;
     }
 
-    const Vec3 forward = player.forward();
-    const Vec3 up = player.up();
-    const Vec3 right = sim::cross(forward, up);
-    // Radar plane basis: the ship's horizontal plane. "Forward" on the
-    // plane is the ship's forward projected into it.
-    Vec3 plane_fwd = forward - up * sim::dot(forward, up);
-    if (sim::length(plane_fwd) < 1e-9) {
-      plane_fwd = sim::cross(up, right);
-    }
-    plane_fwd = sim::normalize(plane_fwd);
+    // Radar basis straight from the camera: no horizon projection.
+    const Vec3 plane_fwd = sim::normalize(player.forward());
+    const Vec3 up = sim::normalize(player.up());
     const Vec3 plane_right = sim::normalize(sim::cross(plane_fwd, up));
 
-    // Log compression: the farthest body defines the rim.
     double max_dist = 1.0;
     for (const RadarBody& body : bodies) {
       max_dist = std::max(max_dist, sim::length(body.rel));
     }
-    constexpr double kNear = 5.0e7;  // meters mapped roughly linearly near the ship
-    const double denom = std::log1p(max_dist / kNear);
-    const double rim = kRadarHalf * 0.82;
+    // Two-zone range mapping: linear inside d_half (drawn out to the
+    // inner ring), log-compressed from there to the rim, calibrated so
+    // the farthest body lands exactly on the rim.
+    const double rim = kRadarHalf * 0.95;
+    const double r_half = kRadarHalf * 0.55;  // matches the inner chrome ring
+    const double d_half = std::max(1.0, max_dist * 0.15);
+    const double outer_denom = std::log1p(std::max(1e-9, (max_dist - d_half) / d_half));
+    const auto range_map = [&](double d) {
+      if (d <= d_half) {
+        return (d / d_half) * r_half;
+      }
+      return r_half + (rim - r_half) * std::log1p((d - d_half) / d_half) / outer_denom;
+    };
 
     for (const RadarBody& body : bodies) {
       const double dist = sim::length(body.rel);
       const double fx = sim::dot(body.rel, plane_right);
       const double fy = sim::dot(body.rel, plane_fwd);
-      const double fz = sim::dot(body.rel, up);  // above/below the ship plane
+      const double fz = sim::dot(body.rel, up);  // above/below the radar plane
       const double planar = std::max(1.0, std::hypot(fx, fy));
-      const double rho = rim * std::log1p(dist / kNear) / denom;
+      const double rho = range_map(dist);
       const double base_x = cx + (fx / planar) * rho;
       const double base_y = kRadarCenterY + (fy / planar) * rho;
 
-      // Elevation bar: signed, log-compressed like the radius.
+      // Elevation bar: signed, compressed with the same two-zone map.
       const double bar_span = kRadarHalf * 0.30;
-      double bar = std::log1p(std::abs(fz) / kNear) / denom * bar_span *
-                   (fz < 0.0 ? -1.0 : 1.0);
+      double bar = range_map(std::abs(fz)) / rim * bar_span * (fz < 0.0 ? -1.0 : 1.0);
       bar = std::clamp(bar, -bar_span, bar_span);
 
       const double icon = kRadarHalf * 0.085 * body.scale;
@@ -463,7 +474,8 @@ Hud::~Hud() = default;
 
 void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
                 const std::vector<RadarBody>& bodies, double measured_speed_mps,
-                double aspect, int height_px, double dt) {
+                double aspect, int height_px, double dt, const std::string& location_name,
+                const TargetInfo& target) {
   Impl& impl = *impl_;
   (void)height_px;
 
@@ -506,7 +518,7 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
   impl.text_item(items, impl.range_line, -0.96 * aspect, -0.85, 0.0042, text_color, aspect);
   impl.text_item(items, impl.asl_line, -0.96 * aspect, -0.92, 0.0042, text_color, aspect);
 
-  // --- lower right: radar + biome --------------------------------------
+  // --- lower right: radar + location/biome ------------------------------
   if (near_planet) {
     impl.radar_atmosphere(items, player, aspect);
     impl.biome_timer -= dt;
@@ -517,11 +529,48 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
           gen::Dir3{det::Real(dir.x), det::Real(dir.y), det::Real(dir.z)});
       impl.biome_line.set(impl.rhi, gen::to_string(blended.dominant_archetype));
     }
-    impl.text_item(items, impl.biome_line, kRadarCenterX * aspect, kRadarCenterY - kRadarHalf - 0.06,
-                   0.0042, Color{0.9f, 0.9f, 0.7f}, aspect, true);
+    // Planet name first, biome underneath.
+    impl.location_line.set(impl.rhi, location_name);
+    impl.text_item(items, impl.location_line, kRadarCenterX * aspect,
+                   kRadarCenterY - kRadarHalf - 0.06, 0.0042, Color{1.0f, 0.85f, 0.45f},
+                   aspect, true);
+    impl.text_item(items, impl.biome_line, kRadarCenterX * aspect,
+                   kRadarCenterY - kRadarHalf - 0.105, 0.0042, Color{0.9f, 0.9f, 0.7f},
+                   aspect, true);
   } else {
     impl.radar_system(items, player, bodies, aspect);
     impl.biome_line.set(impl.rhi, "");
+    impl.location_line.set(impl.rhi, "");
+  }
+
+  // --- crosshair target readout (flight) --------------------------------
+  if (target.valid) {
+    impl.target_name_line.set(impl.rhi, target.name);
+    char info[96];
+    const double km = target.distance_m / 1000.0;
+    char dist_text[32];
+    if (km >= 1.0e6) {
+      std::snprintf(dist_text, sizeof(dist_text), "%.2f Gm", target.distance_m / 1.0e9);
+    } else if (km >= 1000.0) {
+      std::snprintf(dist_text, sizeof(dist_text), "%.1f Mm", target.distance_m / 1.0e6);
+    } else {
+      std::snprintf(dist_text, sizeof(dist_text), "%.0f km", km);
+    }
+    if (target.eta_s >= 0.0 && target.eta_s < 99.0 * 3600.0) {
+      const int total = static_cast<int>(target.eta_s);
+      std::snprintf(info, sizeof(info), "DST %s   ETA %02d:%02d:%02d", dist_text,
+                    total / 3600, (total / 60) % 60, total % 60);
+    } else {
+      std::snprintf(info, sizeof(info), "DST %s", dist_text);
+    }
+    impl.target_info_line.set(impl.rhi, info);
+    impl.text_item(items, impl.target_name_line, 0.0, -0.085, 0.0042,
+                   Color{1.0f, 0.85f, 0.45f}, aspect, true);
+    impl.text_item(items, impl.target_info_line, 0.0, -0.13, 0.0038,
+                   Color{0.85f, 0.95f, 1.0f}, aspect, true);
+  } else {
+    impl.target_name_line.set(impl.rhi, "");
+    impl.target_info_line.set(impl.rhi, "");
   }
 }
 

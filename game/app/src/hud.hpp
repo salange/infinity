@@ -21,6 +21,16 @@ struct RadarBody {
   bool anchor{false}; // the body currently anchoring the world frame
 };
 
+// Crosshair target readout (flight mode): the planet under/near the
+// crosshair, with surface distance and — when actually closing in on
+// it — an ETA at the current speed.
+struct TargetInfo {
+  bool valid{false};
+  std::string name;
+  double distance_m{0.0};
+  double eta_s{-1.0};  // < 0: not closing on the target
+};
+
 // In-game HUD (Sascha 2026-08-30):
 // - lower left: velocity, plus altitude when near the planet (inside the
 //   atmosphere band) or distance-to-body with switched label/units when
@@ -45,9 +55,13 @@ class Hud {
   // Appends the HUD draw items for this frame (called after the 3D scene
   // items so the overlay draws on top). bodies feeds the space radar's
   // system view; ignored while the atmosphere radar is showing.
+  // location_name is the current planet's display name, shown under the
+  // radar while near/landed on it; target is the crosshair readout
+  // (TargetInfo.valid = false hides it).
   void build(std::vector<render::Rhi::DrawItem>* items, const sim::Player& player,
              const std::vector<RadarBody>& bodies, double measured_speed_mps, double aspect,
-             int height_px, double dt);
+             int height_px, double dt, const std::string& location_name,
+             const TargetInfo& target);
 
   // Map-mode overlay (design/map-mode.md section 3): the hover info card,
   // anchored at the pointer (NDC), lines top to bottom. The flight/walk

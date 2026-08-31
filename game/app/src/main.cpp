@@ -4,7 +4,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -75,6 +78,43 @@ struct LoadedChunk {
 
 RVec3 to_render(const SVec3& v) { return RVec3{v.x, v.y, v.z}; }
 
+// Debug script (--script <file>): one command per line, '#' comments.
+//   pos <x> <y> <z>            place the player (planet-local meters)
+//   aim sun | planet <slot> | dir <fx> <fy> <fz>
+//   speed <m/s>                set current speed
+//   thrust <0|1>               hold/release forward thrust
+//   wait <seconds>             let the sim run
+//   capture <path.ppm>         single-frame offscreen capture
+//   record <dir> <seconds>     dump ring + record a sequence
+//   quit
+struct ScriptCmd {
+  std::string op;
+  std::vector<std::string> args;
+};
+
+std::vector<ScriptCmd> load_script(const char* path) {
+  std::vector<ScriptCmd> commands;
+  std::ifstream file(path);
+  std::string line;
+  while (std::getline(file, line)) {
+    const auto hash = line.find('#');
+    if (hash != std::string::npos) {
+      line.resize(hash);
+    }
+    std::istringstream stream(line);
+    ScriptCmd cmd;
+    if (!(stream >> cmd.op)) {
+      continue;
+    }
+    std::string arg;
+    while (stream >> arg) {
+      cmd.args.push_back(arg);
+    }
+    commands.push_back(std::move(cmd));
+  }
+  return commands;
+}
+
 // Unit cube (side 1, centered) as a lit-format triangle soup; used scaled
 // for beams and HUD quads (unlit color path ignores the normals).
 std::vector<float> unit_cube_vertices() {
@@ -128,7 +168,7 @@ inf::render::Rhi::DrawItem hud_quad(std::uint32_t mesh, double ndc_x, double ndc
   m.m[10] = 0.00001f;
   m.m[12] = static_cast<float>(ndc_x);
   m.m[13] = static_cast<float>(ndc_y);
-  m.m[14] = 0.0001f;  // near depth: passes the Less test over everything
+  m.m[14] = 0.9999f;  // reversed-Z near depth: wins the Greater test
   m.m[15] = 1.0f;
   std::memcpy(item.mvp, m.m, sizeof(m.m));
   item.color[0] = r;
@@ -364,6 +404,11 @@ int main(int argc, char** argv) {
   const char* diff_text = nullptr;
   bool map_demo = false;  // scripted M/Esc for headless smoke + captures
   bool windowed = false;  // default is fullscreen on the primary monitor
+  const char* capture_text = nullptr;  // --capture <path.ppm>: PPM of the last frame
+  double pitch_deg = 0.0;  // --pitch <deg>: initial pitch-down (capture aid)
+  bool release_mode = false;  // --release: debug frame ring OFF
+  bool hidden = false;        // --hidden: invisible window (scripted captures)
+  const char* script_text = nullptr;  // --script <file>: debug command script
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       max_frames = std::strtol(argv[++i], nullptr, 10);
@@ -379,6 +424,16 @@ int main(int argc, char** argv) {
       map_demo = true;
     } else if (std::strcmp(argv[i], "--windowed") == 0) {
       windowed = true;
+    } else if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
+      capture_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--pitch") == 0 && i + 1 < argc) {
+      pitch_deg = std::strtod(argv[++i], nullptr);
+    } else if (std::strcmp(argv[i], "--release") == 0) {
+      release_mode = true;
+    } else if (std::strcmp(argv[i], "--hidden") == 0) {
+      hidden = true;
+    } else if (std::strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
+      script_text = argv[++i];
     }
   }
 
@@ -412,6 +467,14 @@ int main(int argc, char** argv) {
       spawn_altitude >= 0.0 ? anchor->radius + spawn_altitude : anchor->radius * 2.2;
   inf::sim::Player player(*anchor->effective,
                           inf::sim::normalize(SVec3{1.0, 0.15, 0.3}) * spawn_r);
+  if (pitch_deg != 0.0) {
+    // Capture aid: pitch the spawn attitude down toward the planet.
+    const SVec3 fwd = player.forward();
+    const SVec3 up = player.up();
+    const SVec3 right = inf::sim::normalize(inf::sim::cross(fwd, up));
+    const double rad = -pitch_deg * 3.14159265358979323846 / 180.0;
+    player.set_attitude(inf::sim::rotate(fwd, right, rad), inf::sim::rotate(up, right, rad));
+  }
 
   std::printf("infinity %s (%s) — %s planet (slot %d), radius %.0f m\n",
               inf::gen::kVersion, inf::gen::kGitHash,
@@ -422,6 +485,12 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  if (hidden) {
+    // Scripted/headless captures: render into an invisible window — no
+    // window appears, nothing steals focus.
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    windowed = true;
+  }
   // Fullscreen on the primary monitor by default (borderless at the
   // desktop video mode); --windowed keeps the old 1280x720 window.
   GLFWmonitor* monitor = nullptr;
@@ -457,12 +526,21 @@ int main(int argc, char** argv) {
   }
   std::printf("adapter: %s\n", rhi->adapter_info().c_str());
 
+  // Debug mode is the default: the frame ring keeps the last ~3 s of
+  // reduced-res frames in memory for F9/scripted dumps. --release turns
+  // the ring off (F9 still records the 3 s of future frames).
+  rhi->set_ring_enabled(!release_mode);
+
   const std::vector<float> cube = unit_cube_vertices();
   const std::uint32_t cube_mesh = rhi->create_mesh(cube.data(), cube.size());
   const std::vector<float> ball = unit_sphere_vertices(32, 16);
   const std::uint32_t body_mesh = rhi->create_mesh(ball.data(), ball.size());
   const std::vector<float> star_ball = unit_sphere_vertices(48, 24);
   const std::uint32_t star_mesh = rhi->create_mesh(star_ball.data(), star_ball.size());
+  // High-tessellation sphere for the planet impostor: at 32x16 the
+  // silhouette reads visibly polygonal when the planet fills the view.
+  const std::vector<float> fine_ball = unit_sphere_vertices(96, 48);
+  const std::uint32_t impostor_mesh = rhi->create_mesh(fine_ball.data(), fine_ball.size());
   const std::vector<float> quad = unit_quad_vertices();
   const std::uint32_t glow_mesh = rhi->create_mesh(quad.data(), quad.size());
   // Sea shell (spec section 5): one translucent sphere at sea level,
@@ -505,7 +583,18 @@ int main(int argc, char** argv) {
   bool e_was_down = false;
   bool m_was_down = false;
   bool esc_was_down = false;
+  bool f9_was_down = false;
   double edit_cooldown = 0.0;
+  double rec_flash = 0.0;          // REC icon flash after the F9 press
+  std::string rec_dir_current;     // active recording dir (meta.csv sink)
+  std::vector<ScriptCmd> script;
+  if (script_text != nullptr) {
+    script = load_script(script_text);
+    std::printf("script: %zu commands from %s\n", script.size(), script_text);
+  }
+  std::size_t script_pc = 0;
+  double script_wait = 0.0;
+  bool script_thrust = false;
 
   // --- map mode state (T0013, design/map-mode.md) -----------------------
   enum class MapPhase { Off, Entering, On, Exiting };
@@ -668,7 +757,7 @@ int main(int argc, char** argv) {
     input.dt = dt;
     input.mouse_dx = mx - last_mx;
     input.mouse_dy = my - last_my;
-    input.forward = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+    input.forward = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS || script_thrust;
     input.back = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
     input.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
     input.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
@@ -680,6 +769,21 @@ int main(int argc, char** argv) {
     last_mx = mx;
     last_my = my;
     e_was_down = e_down;
+
+    // F9: debug recording — dump the last ~3 s ring and keep recording
+    // 3 s of future frames (REC icon top right while active).
+    const bool f9_down = glfwGetKey(window, GLFW_KEY_F9) == GLFW_PRESS;
+    if (f9_down && !f9_was_down) {
+      char dir_name[64];
+      std::snprintf(dir_name, sizeof(dir_name), "debug-rec-%lld",
+                    static_cast<long long>(now.ns_since_epoch / 1'000'000LL));
+      std::error_code ec;
+      std::filesystem::create_directories(dir_name, ec);
+      rec_dir_current = dir_name;
+      rhi->trigger_recording(rec_dir_current, 3.0);
+      rec_flash = 0.7;
+    }
+    f9_was_down = f9_down;
 
     player.update(input);
 
@@ -831,6 +935,64 @@ int main(int argc, char** argv) {
       }
     }
 
+    // --- debug script step (--script) ------------------------------------
+    if (script_wait > 0.0) {
+      script_wait -= dt;
+    }
+    while (script_pc < script.size() && script_wait <= 0.0) {
+      const ScriptCmd& cmd = script[script_pc];
+      ++script_pc;
+      const auto arg_d = [&](std::size_t index) {
+        return index < cmd.args.size() ? std::strtod(cmd.args[index].c_str(), nullptr) : 0.0;
+      };
+      const auto aim_at = [&](const SVec3& dir) {
+        SVec3 up_ref = inf::sim::normalize(player.position());
+        if (std::abs(inf::sim::dot(up_ref, dir)) > 0.98) {
+          up_ref = SVec3{0.0, 0.0, 1.0};
+        }
+        player.set_attitude(dir, up_ref);
+      };
+      if (cmd.op == "pos" && cmd.args.size() >= 3) {
+        player.set_position(SVec3{arg_d(0), arg_d(1), arg_d(2)});
+      } else if (cmd.op == "possun" && !cmd.args.empty()) {
+        // Place on the sun-facing side of the anchor at the given
+        // altitude (day-side captures).
+        player.set_position(inf::sim::normalize(star_local) *
+                            (anchor->radius + arg_d(0)));
+      } else if (cmd.op == "aim" && !cmd.args.empty()) {
+        if (cmd.args[0] == "sun") {
+          aim_at(inf::sim::normalize(star_local - player.position()));
+        } else if (cmd.args[0] == "planet" && cmd.args.size() >= 2) {
+          const int slot = static_cast<int>(arg_d(1));
+          if (slot >= 0 && slot < inf::gen::kMaxPlanetSlots) {
+            const SVec3 center = slot == anchor->slot
+                                     ? SVec3{0.0, 0.0, 0.0}
+                                     : planet_local[static_cast<std::size_t>(slot)];
+            aim_at(inf::sim::normalize(center - player.position()));
+          }
+        } else if (cmd.args[0] == "dir" && cmd.args.size() >= 4) {
+          aim_at(inf::sim::normalize(SVec3{arg_d(1), arg_d(2), arg_d(3)}));
+        }
+      } else if (cmd.op == "speed" && !cmd.args.empty()) {
+        player.set_speed(arg_d(0));
+      } else if (cmd.op == "thrust" && !cmd.args.empty()) {
+        script_thrust = arg_d(0) != 0.0;
+      } else if (cmd.op == "wait" && !cmd.args.empty()) {
+        script_wait = arg_d(0);
+      } else if (cmd.op == "capture" && !cmd.args.empty()) {
+        rhi->request_capture(cmd.args[0]);
+      } else if (cmd.op == "record" && cmd.args.size() >= 2) {
+        std::error_code ec;
+        std::filesystem::create_directories(cmd.args[0], ec);
+        rec_dir_current = cmd.args[0];
+        rhi->trigger_recording(rec_dir_current, arg_d(1));
+      } else if (cmd.op == "quit") {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+      } else {
+        std::fprintf(stderr, "script: unknown command '%s'\n", cmd.op.c_str());
+      }
+    }
+
     // --- map mode: enter / exit triggers ---------------------------------
     const bool m_down = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
     const bool m_pressed = (m_down && !m_was_down) || (map_demo && frame == 100);
@@ -948,30 +1110,26 @@ int main(int argc, char** argv) {
     // Simple sky (M5): blend the type's sky palette toward space black by
     // CAMERA altitude within the atmosphere band (fades out on the map
     // pull-up).
-    float sky[3] = {0.05f, 0.06f, 0.12f};
-    {
-      double atmosphere = anchor->planet.atmosphere_height_m.to_double();
-      float palette[3] = {0.05f, 0.06f, 0.12f};
-      switch (anchor->planet.type) {
-        case inf::gen::PlanetType::EarthLike: palette[0] = 0.45f; palette[1] = 0.65f; palette[2] = 0.95f; break;
-        case inf::gen::PlanetType::Desert: palette[0] = 0.78f; palette[1] = 0.58f; palette[2] = 0.42f; break;
-        case inf::gen::PlanetType::Ice: palette[0] = 0.62f; palette[1] = 0.74f; palette[2] = 0.92f; break;
-        case inf::gen::PlanetType::Barren: atmosphere = 0.0; break;
-      }
-      if (atmosphere > 0.0) {
-        const double raw_alt = inf::sim::length(cam_pos_local) - anchor->radius;
-        double t = 1.0 - raw_alt / atmosphere;
-        t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
-        t = std::pow(t, 0.7);
-        for (int c = 0; c < 3; ++c) {
-          sky[c] = sky[c] + static_cast<float>(t) * (palette[c] - sky[c]);
-        }
-      }
+    // Clear color is CONSTANT deep space — it must match the sky dome's
+    // fade-out color exactly, or leaving the atmosphere pops in
+    // brightness (the dome renders the in-atmosphere sky per pixel).
+    const float sky[3] = {0.013f, 0.015f, 0.028f};
+    double atmosphere = anchor->planet.atmosphere_height_m.to_double();
+    float palette[3] = {0.05f, 0.06f, 0.12f};
+    switch (anchor->planet.type) {
+      case inf::gen::PlanetType::EarthLike: palette[0] = 0.45f; palette[1] = 0.65f; palette[2] = 0.95f; break;
+      case inf::gen::PlanetType::Desert: palette[0] = 0.78f; palette[1] = 0.58f; palette[2] = 0.42f; break;
+      case inf::gen::PlanetType::Ice: palette[0] = 0.62f; palette[1] = 0.74f; palette[2] = 0.92f; break;
+      case inf::gen::PlanetType::Barren: atmosphere = 0.0; break;
     }
     const RVec3 camera_pos = to_render(cam_pos_local);
     const RVec3 cam_forward = to_render(cam_fwd_v);
     const RVec3 cam_up = to_render(cam_up_sv);
     const double altitude = inf::render::length(camera_pos) - anchor->radius;
+    // From high orbit the chunk terrain is hidden entirely: at that range
+    // its coarse LOD only produces lattice artifacts, and the lit
+    // ocean/terrain impostor carries the planet's look instead.
+    const bool show_surface = altitude < 0.7 * anchor->radius;
     double farthest_star = inf::sim::length(star_local - cam_pos_local);
     for (const StarInstance& star : stars_local) {
       farthest_star = std::max(farthest_star, inf::sim::length(star.pos - cam_pos_local));
@@ -982,7 +1140,12 @@ int main(int argc, char** argv) {
     // At map framing distance the near plane scales up with altitude so
     // the sparse far-field scene keeps usable depth precision.
     const double near_z = std::clamp(std::abs(altitude) * 1e-4, 0.3, 1e8);
-    const Mat4 projection = inf::render::perspective(kFovY, input.aspect, near_z, far_z);
+    // REVERSED-Z (2026-08-31): near/far swapped + Greater depth test in
+    // the RHI. With a classic [0,1] mapping, bodies at system distances
+    // (1e9+ m) quantized to depth 1.0 in f32 and randomly failed against
+    // the clear value — the sun's corona billboard flickered in and out.
+    // Reversed-Z puts float precision at the far range where it's needed.
+    const Mat4 projection = inf::render::perspective(kFovY, input.aspect, far_z, near_z);
     const Mat4 view = inf::render::look_dir(cam_forward, cam_up);
     const Mat4 view_projection = inf::render::mul(projection, view);
 
@@ -997,6 +1160,10 @@ int main(int argc, char** argv) {
         return;
       }
       const double size = std::max(star.radius, dist * px_world_all * min_px * 0.5);
+      const double apparent_px = size / (dist * px_world_all);
+      // Distant suns get a disproportionally larger, brighter corona so
+      // they stay spectacular as they shrink toward a point.
+      const double far_boost = std::clamp(60.0 / std::max(apparent_px, 1.0), 1.0, 2.6);
       const RVec3 rel = to_render(star.pos) - camera_pos;
       {
         const Mat4 model = inf::render::from_basis(
@@ -1019,11 +1186,16 @@ int main(int argc, char** argv) {
         items.push_back(item);
       }
       {
-        const double glow = size * 6.0;
+        // The billboard sits 3% closer to the camera than the star: at
+        // system distances the depth buffer cannot separate the quad
+        // from the photosphere sphere, and the z-fight showed as corona
+        // flicker around the disc.
+        const double glow = size * 6.0 * far_boost;
+        const RVec3 rel_glow = rel * 0.97;
         const RVec3 bill_right =
             inf::render::normalize(inf::render::cross(cam_forward, cam_up));
         const Mat4 model = inf::render::from_basis(bill_right * glow, cam_up * glow,
-                                                   cam_forward * glow, rel);
+                                                   cam_forward * glow, rel_glow);
         const Mat4 mvp = inf::render::mul(view_projection, model);
         inf::render::Rhi::DrawItem item;
         item.mesh = glow_mesh;
@@ -1034,11 +1206,10 @@ int main(int argc, char** argv) {
         item.color[3] = 1.0f;
         item.mode = 2;
         item.aux[3] = star.phase;
-        item.extra[0] = 1.0f;                                // glow intensity
-        item.extra[1] = static_cast<float>(size / glow);     // silhouette radius
+        item.extra[0] = static_cast<float>(0.8 + 0.5 * far_boost);  // glow intensity
+        item.extra[1] = static_cast<float>(size / glow);            // silhouette radius
         // Diffraction spikes only while the star is small on screen: a
         // far sun sparkles, a near sun is a raging disc.
-        const double apparent_px = size / (dist * px_world_all);
         item.extra[2] =
             static_cast<float>(std::clamp(1.0 - apparent_px / 60.0, 0.0, 1.0)) * 0.9f;
         items.push_back(item);
@@ -1047,12 +1218,42 @@ int main(int argc, char** argv) {
 
     items.clear();
     items.reserve(loaded.size() + player.beams().size() + 8);
+
+    // --- sky dome (mode 4): analytic atmosphere while inside the band ---
+    // Fullscreen quad at far depth; the shader builds the per-pixel view
+    // ray from the frame camera basis. Fades itself out toward space via
+    // altitude_frac (also passed below in the frame params).
+    const double dome_alt_frac =
+        atmosphere > 0.0
+            ? (inf::sim::length(cam_pos_local) - anchor->radius) / atmosphere
+            : 9.0;
+    if (map_phase == MapPhase::Off && atmosphere > 0.0 && dome_alt_frac < 1.0) {
+      inf::render::Rhi::DrawItem dome;
+      dome.mesh = glow_mesh;
+      Mat4 m{};
+      m.m[0] = 1.0f;
+      m.m[5] = 1.0f;
+      m.m[10] = 0.00001f;
+      m.m[14] = 0.00005f;  // reversed-Z far: everything wins depth over it
+      m.m[15] = 1.0f;
+      std::memcpy(dome.mvp, m.m, sizeof(m.m));
+      dome.mode = 4;
+      items.push_back(dome);
+    }
     for (const auto& [addr, chunk] : loaded) {
+      if (!show_surface) {
+        break;  // impostor-only from high orbit
+      }
       inf::render::Rhi::DrawItem item;
       item.mesh = chunk.mesh_id;
-      const Mat4 model = inf::render::translate(chunk.origin - camera_pos);
+      const RVec3 translation = chunk.origin - camera_pos;
+      const Mat4 model = inf::render::translate(translation);
       const Mat4 mvp = inf::render::mul(view_projection, model);
       std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+      // Lit items carry their translation for the orbit normal blend.
+      item.aux[0] = static_cast<float>(translation.x);
+      item.aux[1] = static_cast<float>(translation.y);
+      item.aux[2] = static_cast<float>(translation.z);
       items.push_back(item);
     }
 
@@ -1083,7 +1284,7 @@ int main(int argc, char** argv) {
         items.push_back(item);
       };
       for (const StarInstance& star : stars_local) {
-        draw_star(star, 5.0);
+        draw_star(star, 7.0);
       }
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
@@ -1095,17 +1296,209 @@ int main(int argc, char** argv) {
         draw_ball(planet_local[static_cast<std::size_t>(slot)],
                   entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2]);
       }
-      // The anchor itself gets an under-the-terrain impostor while the
-      // camera is far out: freshly-anchored planets are visible before
-      // their coarse chunks finish streaming.
-      if (inf::sim::length(player_pos) > 5.0 * anchor->radius) {
-        float color[3];
-        slot_color(anchor->slot, color);
-        draw_ball(SVec3{0.0, 0.0, 0.0}, anchor->radius * 0.995, 3.0, color[0], color[1],
-                  color[2]);
+      // The anchor always keeps an under-the-terrain impostor sphere,
+      // LIT with the same terrain material: freshly-anchored planets are
+      // visible before their chunks stream in, and LOD-seam pinholes at
+      // chunk corners show matching-shaded ground instead of black space
+      // (the "transparent quad grid" seen from orbit). Skips itself when
+      // the camera is near the surface, where terrain fully covers it.
+      {
+        // EarthLike: the impostor is the OCEAN — opaque, lit, sea-blue,
+        // at sea level. Coarse orbital LOD sags terrain below its true
+        // height between lattice points, which used to let the
+        // translucent sea shell show through as a blue quad grid; with
+        // the ocean ball underneath, dips below sea level simply read as
+        // sea, which is exactly what a planet looks like from space.
+        const bool has_sea = sea_radius > 0.0;
+        const double impostor_r = has_sea ? sea_radius : anchor->radius * 0.995;
+        if (inf::sim::length(cam_pos_local) > impostor_r * 1.05) {
+          const RVec3 rel = to_render(SVec3{0.0, 0.0, 0.0}) - camera_pos;
+          const Mat4 model = inf::render::from_basis(
+              RVec3{impostor_r, 0.0, 0.0}, RVec3{0.0, impostor_r, 0.0},
+              RVec3{0.0, 0.0, impostor_r}, rel);
+          const Mat4 mvp = inf::render::mul(view_projection, model);
+          inf::render::Rhi::DrawItem item;
+          item.mesh = impostor_mesh;
+          std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+          // color.a == 0: the lit material path (rgb = albedo override).
+          if (has_sea) {
+            item.color[0] = 0.10f;
+            item.color[1] = 0.28f;
+            item.color[2] = 0.52f;
+          }
+          item.aux[0] = static_cast<float>(rel.x);
+          item.aux[1] = static_cast<float>(rel.y);
+          item.aux[2] = static_cast<float>(rel.z);
+          items.push_back(item);
+        }
       }
       for (const MoonInstance& moon : moons_local) {
         draw_ball(moon.pos, moon.radius, 2.0, 0.62f, 0.62f, 0.66f);
+      }
+
+      // --- atmosphere limb glow (space view) ---------------------------
+      // A soft additive rim halo around every planet with an atmosphere,
+      // the thin bright shell games use for planets seen from orbit.
+      const auto draw_limb_halo = [&](const SVec3& pos, double radius, const float tint[3],
+                                      double intensity) {
+        const double dist = inf::sim::length(pos - cam_pos_local);
+        // Fade in smoothly with distance instead of popping at a gate —
+        // the hard cutoff was visible when leaving the atmosphere.
+        const double fade =
+            std::clamp((dist / radius - 1.10) / 0.5, 0.0, 1.0);
+        if (fade <= 0.0) {
+          return;  // inside/very near: the sky dome takes over
+        }
+        const double halo = radius * 1.22;
+        const RVec3 bill_right =
+            inf::render::normalize(inf::render::cross(cam_forward, cam_up));
+        const Mat4 model =
+            inf::render::from_basis(bill_right * halo, cam_up * halo, cam_forward * halo,
+                                    to_render(pos) - camera_pos);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = glow_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.color[0] = tint[0];
+        item.color[1] = tint[1];
+        item.color[2] = tint[2];
+        item.color[3] = 1.0f;
+        item.mode = 3;
+        item.extra[0] = static_cast<float>(intensity * fade);
+        item.extra[1] = 18.0f;                                  // rim sharpness
+        item.extra[2] = static_cast<float>(radius / halo);      // rim radius
+        items.push_back(item);
+      };
+      const auto palette_for = [&](inf::gen::PlanetType type, float out[3]) {
+        out[0] = 0.45f; out[1] = 0.65f; out[2] = 0.95f;
+        switch (type) {
+          case inf::gen::PlanetType::Desert: out[0] = 0.85f; out[1] = 0.62f; out[2] = 0.40f; break;
+          case inf::gen::PlanetType::Ice:    out[0] = 0.62f; out[1] = 0.76f; out[2] = 0.95f; break;
+          default: break;
+        }
+      };
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied || entry.phys.atmosphere.height_m.to_double() <= 0.0) {
+          continue;
+        }
+        float tint[3];
+        palette_for(entry.surface_type, tint);
+        const SVec3 pos = slot == anchor->slot ? SVec3{0.0, 0.0, 0.0}
+                                               : planet_local[static_cast<std::size_t>(slot)];
+        const double radius = slot == anchor->slot ? anchor->radius
+                                                   : entry.phys.radius_m.to_double();
+        draw_limb_halo(pos, radius, tint, 0.5);
+      }
+    }
+
+    // --- sun veil + lens flare (screen space, additive) -----------------
+    // Near a star the whole view stays awash in its light even when the
+    // camera turns away (veil), and while it is on screen it throws a
+    // core glare, an anamorphic streak, and a train of flare ghosts.
+    // Deliberately theatrical rather than physical.
+    const auto glare_sprite = [&](double x, double y, double sx, double sy,
+                                  const float tint[3], double intensity, double falloff) {
+      inf::render::Rhi::DrawItem item;
+      item.mesh = glow_mesh;
+      Mat4 m{};
+      m.m[0] = static_cast<float>(sx / input.aspect);
+      m.m[5] = static_cast<float>(sy);
+      m.m[10] = 0.00001f;
+      m.m[12] = static_cast<float>(x);
+      m.m[13] = static_cast<float>(y);
+      m.m[14] = 0.99994f;  // reversed-Z: just over the HUD
+      m.m[15] = 1.0f;
+      std::memcpy(item.mvp, m.m, sizeof(m.m));
+      item.color[0] = tint[0];
+      item.color[1] = tint[1];
+      item.color[2] = tint[2];
+      item.color[3] = 1.0f;
+      item.mode = 3;
+      item.extra[0] = static_cast<float>(intensity);
+      item.extra[1] = static_cast<float>(falloff);
+      items.push_back(item);
+    };
+    if (map_phase == MapPhase::Off) {
+      for (const StarInstance& star : stars_local) {
+        const SVec3 rel = star.pos - cam_pos_local;
+        const double dist = inf::sim::length(rel);
+        if (dist < 1.0) {
+          continue;
+        }
+        const SVec3 dir = rel * (1.0 / dist);
+        // Occlusion by any planet (incl. the anchor: covers night side
+        // and the sun below the horizon). SOFT: fades across ~6% of the
+        // occluder's radius at the limb — a hard binary test made the
+        // glare snap on/off whenever the line of sight grazed a planet
+        // edge (the reported sun flicker).
+        double visibility = 1.0;
+        for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+          const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+          if (!entry.occupied) {
+            continue;
+          }
+          const SVec3 center =
+              planet_local[static_cast<std::size_t>(slot)] - cam_pos_local;
+          const double radius = slot == anchor->slot ? anchor->radius
+                                                     : entry.phys.radius_m.to_double();
+          const double t = inf::sim::dot(center, dir);
+          if (t > 0.0 && t < dist) {
+            const double c2 = std::max(0.0, inf::sim::dot(center, center) - t * t);
+            const double closest = std::sqrt(c2);
+            visibility = std::min(
+                visibility,
+                std::clamp((closest - radius) / (radius * 0.06), 0.0, 1.0));
+          }
+        }
+        // Closeness drives everything: 1 within ~8 star radii, fading
+        // with distance (at a habitable-zone planet the veil is a subtle
+        // few percent, not a wash).
+        const double closeness = std::clamp(star.radius * 8.0 / dist, 0.0, 1.0);
+        if (closeness < 0.02) {
+          continue;
+        }
+        const double cos_ang = inf::sim::dot(inf::sim::normalize(cam_fwd_v), dir);
+        // Veil: never fully gone while the star is close — light floods
+        // the cockpit from every direction.
+        const double veil = closeness * closeness *
+                            (0.30 + 0.70 * std::max(cos_ang, 0.0)) *
+                            (0.1 + 0.9 * visibility);
+        if (veil > 0.004) {
+          float warm[3] = {star.tint[0], star.tint[1], star.tint[2]};
+          glare_sprite(0.0, 0.0, 3.0 * input.aspect, 3.0, warm, veil * 0.38, 0.55);
+        }
+        if (visibility <= 0.0 || cos_ang <= 0.0) {
+          continue;
+        }
+        // Screen position for the flare train.
+        const auto clip = project_point(view_projection, to_render(rel));
+        if (clip[3] <= 0.0) {
+          continue;
+        }
+        const double sx = clip[0] / clip[3];
+        const double sy = clip[1] / clip[3];
+        const double edge = std::max(std::abs(sx), std::abs(sy));
+        const double edge_fade = std::clamp(1.0 - (edge - 1.0) / 0.35, 0.0, 1.0);
+        const double flare = closeness * edge_fade * visibility;
+        if (flare < 0.01) {
+          continue;
+        }
+        float white_mix[3] = {star.tint[0] * 0.5f + 0.5f, star.tint[1] * 0.5f + 0.5f,
+                              star.tint[2] * 0.5f + 0.5f};
+        // Core glare + anamorphic streak (the JJ-Abrams special).
+        glare_sprite(sx, sy, 0.55, 0.55, white_mix, flare * 1.1, 3.0);
+        glare_sprite(sx, sy, 2.6, 0.05, white_mix, flare * 0.75, 2.0);
+        // Ghost train along the axis through the screen center.
+        static constexpr double kGhostPos[4] = {0.55, 0.25, -0.25, -0.55};
+        static constexpr double kGhostSize[4] = {0.10, 0.06, 0.08, 0.14};
+        for (int g = 0; g < 4; ++g) {
+          float ghost_tint[3] = {star.tint[0] * (g % 2 == 0 ? 0.4f : 0.9f),
+                                 star.tint[1] * 0.7f,
+                                 star.tint[2] * (g % 2 == 0 ? 0.9f : 0.4f)};
+          glare_sprite(sx * kGhostPos[g], sy * kGhostPos[g], kGhostSize[g], kGhostSize[g],
+                       ghost_tint, flare * 0.5, 1.6);
+        }
       }
     }
 
@@ -1361,7 +1754,18 @@ int main(int argc, char** argv) {
       items.push_back(hud_quad(cube_mesh, rx - box / ar, ry, thick / ar, box * 2.2, 1.0f, 0.75f, 0.2f));
     }
 
-    if (sea_mesh != 0) {
+    // REC indicator: red square top right — solid flash on the F9 press,
+    // then blinking while the triggered recording is still capturing.
+    rec_flash = std::max(0.0, rec_flash - dt);
+    if (rec_flash > 0.0 || rhi->recording_active()) {
+      const double blink = std::fmod(static_cast<double>(now.ns_since_epoch) * 1e-9, 0.8);
+      if (rec_flash > 0.0 || blink < 0.55) {
+        items.push_back(
+            hud_quad(cube_mesh, 0.94, 0.90, 0.030 / ar, 0.05, 1.0f, 0.16f, 0.12f));
+      }
+    }
+
+    if (sea_mesh != 0 && show_surface) {
       inf::render::Rhi::DrawItem item;
       item.mesh = sea_mesh;
       const Mat4 model = inf::render::from_basis(
@@ -1374,12 +1778,62 @@ int main(int argc, char** argv) {
       item.color[2] = 0.62f;
       item.color[3] = 0.42f;
       item.translucent = true;
+      // Lit translucent (mode 5): the sea shades with the sun like the
+      // terrain — an unlit shell used to glow bright blue through
+      // coarse-LOD terrain dips on the night side (the orbit quad grid).
+      item.mode = 5;
+      const RVec3 sea_rel = RVec3{0.0, 0.0, 0.0} - camera_pos;
+      item.aux[0] = static_cast<float>(sea_rel.x);
+      item.aux[1] = static_cast<float>(sea_rel.y);
+      item.aux[2] = static_cast<float>(sea_rel.z);
       items.push_back(item);
+    }
+
+    // Crosshair target: the planet whose disc (plus a small grace angle)
+    // the crosshair rests on — name, surface distance, and an ETA while
+    // actually closing on it.
+    inf::app::TargetInfo target;
+    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
+      const SVec3 fwd = inf::sim::normalize(player.forward());
+      double best_margin = 0.03;  // radians of grace beyond the disc edge
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied) {
+          continue;
+        }
+        const SVec3 rel = planet_local[static_cast<std::size_t>(slot)] - player_pos;
+        const double dist = inf::sim::length(rel);
+        const double radius = slot == anchor->slot ? anchor->radius
+                                                   : entry.phys.radius_m.to_double();
+        // Skip the anchor while flying close over it — the whole screen
+        // is planet there, the readout would be noise.
+        if (slot == anchor->slot && dist - radius < radius) {
+          continue;
+        }
+        if (dist <= radius) {
+          continue;
+        }
+        const double cos_ang = inf::sim::dot(fwd, rel * (1.0 / dist));
+        if (cos_ang <= 0.0) {
+          continue;
+        }
+        const double ang = std::acos(std::clamp(cos_ang, -1.0, 1.0));
+        const double ang_radius = std::asin(std::clamp(radius / dist, 0.0, 1.0));
+        const double margin = ang - ang_radius;
+        if (margin < best_margin) {
+          best_margin = margin;
+          target.valid = true;
+          target.name = slot_names[static_cast<std::size_t>(slot)];
+          target.distance_m = dist - radius;
+          const double closing = player.speed() * cos_ang;
+          target.eta_s = closing > 1.0 ? target.distance_m / closing : -1.0;
+        }
+      }
     }
 
     if (map_phase == MapPhase::Off) {
       hud->build(&items, player, radar_bodies, measured_speed, input.aspect, state.height,
-                 dt);
+                 dt, slot_names[static_cast<std::size_t>(anchor->slot)], target);
     } else if (map_phase == MapPhase::On && hovered_slot >= 0) {
       // Info card from the forever-state payloads (map-mode spec §3).
       const auto& entry = system.planets[static_cast<std::size_t>(hovered_slot)];
@@ -1462,6 +1916,50 @@ int main(int argc, char** argv) {
     // Wrapped so the f32 shader time keeps sub-ms precision forever.
     frame_params.time_s = static_cast<float>(
         std::fmod(static_cast<double>(now.ns_since_epoch) * 1e-9, 4096.0));
+    {
+      // Camera basis + atmosphere state for the mode-4 sky dome.
+      const RVec3 cam_right_v =
+          inf::render::normalize(inf::render::cross(cam_forward, cam_up));
+      const SVec3 up_local = inf::sim::normalize(cam_pos_local);
+      const double tan_half = std::tan(kFovY * 0.5);
+      const auto set3 = [](float out[3], const RVec3& v) {
+        out[0] = static_cast<float>(v.x);
+        out[1] = static_cast<float>(v.y);
+        out[2] = static_cast<float>(v.z);
+      };
+      set3(frame_params.cam_right, cam_right_v);
+      set3(frame_params.cam_up, cam_up);
+      set3(frame_params.cam_fwd, cam_forward);
+      set3(frame_params.planet_up, to_render(up_local));
+      for (int c = 0; c < 3; ++c) {
+        frame_params.atmo_tint[c] = palette[c];
+      }
+      frame_params.tan_half_x = static_cast<float>(tan_half * input.aspect);
+      frame_params.tan_half_y = static_cast<float>(tan_half);
+      frame_params.altitude_frac = static_cast<float>(std::clamp(dome_alt_frac, 0.0, 9.0));
+      set3(frame_params.planet_center, RVec3{0.0, 0.0, 0.0} - camera_pos);
+      // Blend terrain normals toward the sphere radial from ~0.25 radii
+      // of altitude up (full sphere shading from one radius out).
+      frame_params.normal_blend = static_cast<float>(
+          std::clamp((altitude / anchor->radius - 0.25) / 0.75, 0.0, 1.0));
+    }
+    // Verification captures (--capture): grab the final rendered frame,
+    // when the scene has had time to stream in.
+    if (capture_text != nullptr && max_frames > 0 && frame == max_frames - 1) {
+      rhi->request_capture(capture_text);
+    }
+    // Player-state sidecar for active recordings (frame-by-frame
+    // correlation when analyzing a dumped sequence).
+    if (rhi->recording_active() && !rec_dir_current.empty()) {
+      std::FILE* meta = std::fopen((rec_dir_current + "/meta.csv").c_str(), "a");
+      if (meta != nullptr) {
+        const SVec3 meta_pos = player.position();
+        std::fprintf(meta, "%.4f,%.1f,%.1f,%.1f,%.2f,%.1f,%d\n", frame_params.time_s,
+                     meta_pos.x, meta_pos.y, meta_pos.z, player.speed(), player.altitude(),
+                     static_cast<int>(player.mode()));
+        std::fclose(meta);
+      }
+    }
     rhi->render_frame(frame_params, items.data(), items.size());
 
     fps_accum += dt;

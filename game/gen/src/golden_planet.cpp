@@ -144,6 +144,34 @@ std::string hash_density_report() {
       std::snprintf(line, sizeof(line), "type=%u cave=none\n", type);
       report += line;
     }
+    // drainage/v1 (T0015 WP6): fingerprint of the whole river forest —
+    // vertex classification, parent links, Strahler orders and
+    // representative directions. Two clients must grow the identical
+    // network from the seed alone.
+    if (field.drainage().enabled()) {
+      core::GoldenHash drain_hash;
+      for (const DrainageField::Vertex& vertex : field.drainage().vertices()) {
+        drain_hash.feed(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(vertex.parent)));
+        drain_hash.feed(vertex.order);
+        drain_hash.feed(vertex.sea ? 1U : 0U);
+        feed_real(drain_hash, vertex.dir.x);
+        feed_real(drain_hash, vertex.dir.y);
+        feed_real(drain_hash, vertex.dir.z);
+      }
+      char line[48];
+      std::snprintf(line, sizeof(line), "type=%u drainage fnv=", type);
+      report += line;
+      const std::uint64_t hash = drain_hash.value();
+      for (int i = 15; i >= 0; --i) {
+        report += kDigits[(hash >> (i * 4)) & 0xFU];
+      }
+      report += "\n";
+    } else {
+      char line[40];
+      std::snprintf(line, sizeof(line), "type=%u drainage=none\n", type);
+      report += line;
+    }
   }
   return report;
 }

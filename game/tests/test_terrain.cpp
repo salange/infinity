@@ -448,3 +448,68 @@ TEST_CASE("caves: bounded systems, guaranteed mouths, topmost ground (WP7)") {
           gen::CaveField::kDepthBudgetM);
   }
 }
+
+TEST_CASE("drainage: spanning forest drains to sea, valleys carve (WP6)") {
+  const gen::BodyHandle body = body_for(0x83);
+
+  SUBCASE("dry worlds pay nothing") {
+    const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::Barren);
+    const gen::TerrainField field(body.entity, planet);
+    CHECK(!field.drainage().enabled());
+  }
+
+  const gen::PlanetParams planet = derive_planet_params(body, gen::PlanetType::EarthLike);
+  const gen::TerrainField field(body.entity, planet);
+  const gen::DrainageField& drainage = field.drainage();
+  REQUIRE(drainage.enabled());
+  const auto& verts = drainage.vertices();
+
+  int rivers = 0;
+  std::vector<int> child_count(verts.size(), 0);
+  for (std::size_t i = 0; i < verts.size(); ++i) {
+    const auto& v = verts[i];
+    if (v.parent < 0) continue;
+    ++rivers;
+    ++child_count[static_cast<std::size_t>(v.parent)];
+    CHECK(v.order >= 1);
+    // Every river vertex drains to the sea: walk the parent chain, it
+    // must terminate at a sea vertex without cycling.
+    std::size_t cursor = i;
+    std::size_t steps = 0;
+    while (verts[cursor].parent >= 0 && steps <= verts.size()) {
+      cursor = static_cast<std::size_t>(verts[cursor].parent);
+      ++steps;
+    }
+    CHECK(steps <= verts.size());
+    CHECK(verts[cursor].sea);
+    // Strahler is monotone downstream.
+    if (!verts[static_cast<std::size_t>(v.parent)].sea) {
+      CHECK(verts[static_cast<std::size_t>(v.parent)].order >= v.order);
+    }
+  }
+  CHECK(rivers > 0);
+  for (std::size_t i = 0; i < verts.size(); ++i) {
+    CHECK(child_count[i] <= (verts[i].sea ? 1 : 2));  // one river per mouth,
+                                                      // <=2 merges inland
+  }
+
+  SUBCASE("segment midpoints carve, clamped above the sea") {
+    bool found = false;
+    for (std::size_t i = 0; i < verts.size() && !found; ++i) {
+      const auto& v = verts[i];
+      if (v.parent < 0 || v.order < 2) continue;
+      const auto& u = verts[static_cast<std::size_t>(v.parent)];
+      const gen::Dir3 mid = gen::normalize(
+          gen::Dir3{(v.dir.x + u.dir.x) * Real(0.5), (v.dir.y + u.dir.y) * Real(0.5),
+                    (v.dir.z + u.dir.z) * Real(0.5)});
+      const double deep = drainage.carve_m(mid, Real(500.0)).to_double();
+      if (deep < 10.0) continue;  // midpoint fell in another river's cell — rare
+      found = true;
+      // Near the coast the carve backs off so the valley floor never
+      // dips into the sea.
+      CHECK(drainage.carve_m(mid, Real(5.0)).to_double() <= 2.0);
+      CHECK(deep <= 140.0);
+    }
+    CHECK(found);
+  }
+}

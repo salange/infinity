@@ -6,6 +6,7 @@
 
 #include "core/key.hpp"
 #include "gen/caves.hpp"
+#include "gen/drainage.hpp"
 #include "gen/features.hpp"
 #include "gen/geo.hpp"
 #include "gen/names.hpp"
@@ -132,6 +133,7 @@ class TerrainField {
   det::Real cave_depth_budget_m(const Dir3& unit_dir) const;
 
   const CaveField& caves() const { return caves_; }
+  const DrainageField& drainage() const { return drainage_; }
 
   // Signed density (meters-ish) at a planet-local position given in
   // meters. Positive = solid.
@@ -149,6 +151,7 @@ class TerrainField {
   MaterialField material_;
   FeatureField features_;
   CaveField caves_;
+  DrainageField drainage_;
 
   const CaveField::System* cached_system(const CellId& cell, ParamCache* cache,
                                          CaveField::System* storage) const;

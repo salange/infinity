@@ -88,3 +88,20 @@ TEST_CASE("draw layouts: tick and point are tag-separated") {
   // Identical word patterns under different tags must differ.
   CHECK(draw_tick(layer, kChanTest, 5, 6, 7) != draw_point(layer, kChanTest, 5, 6, 7));
 }
+
+TEST_CASE("key: octree level participates in child derivation (T0017)") {
+  using namespace inf::core;
+  constexpr KindId kKindSystem{2};
+  const Key universe = universe_key(Seed128{7, 13});
+  // Same coordinates at different levels must NOT collide — this was the
+  // entry_key bug: Address::str()/hash() included w, the key did not.
+  const Key level0 = derive_child(universe, kKindSystem, 3, 5, 7, 0);
+  const Key level1 = derive_child(universe, kKindSystem, 3, 5, 7, 1);
+  const Key level9 = derive_child(universe, kKindSystem, 3, 5, 7, 9);
+  CHECK(level0 != level1);
+  CHECK(level1 != level9);
+  CHECK(level0 != level9);
+  // Level 0 is bit-identical to the historical 3-coordinate derivation —
+  // no existing key (and no golden) moved.
+  CHECK(level0 == derive_child(universe, kKindSystem, 3, 5, 7));
+}

@@ -56,7 +56,25 @@ NodeSpec galaxy_spec(const core::Key&, const core::tree::Node*) {
     return cell.x >= 0 && cell.x < extent && cell.y >= 0 && cell.y < extent &&
            cell.z >= 0 && cell.z < extent;
   };
-  spec.axes = {systems};
+  // Deep-sky entities (T0017 WP4): coarse placement grids; real occupancy
+  // is the arm-weighted draw in NebulaField / StarClusterField.
+  AxisDesc nebulae;
+  nebulae.name = name::NebulaeV1;
+  nebulae.child_kind = kind::Nebula;
+  nebulae.topo = Topology::CellGrid3D;
+  nebulae.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
+    return cell.x >= 0 && cell.x < 32 && cell.y >= 0 && cell.y < 32 && cell.z >= 0 &&
+           cell.z < 32;
+  };
+  AxisDesc star_clusters;
+  star_clusters.name = name::StarClustersV1;
+  star_clusters.child_kind = kind::StarCluster;
+  star_clusters.topo = Topology::CellGrid3D;
+  star_clusters.occupied = [](const core::tree::Node&, const core::Key&, const Cell& cell) {
+    return cell.x >= 0 && cell.x < 32 && cell.y >= 0 && cell.y < 32 && cell.z >= 0 &&
+           cell.z < 32;
+  };
+  spec.axes = {systems, nebulae, star_clusters};
   return spec;
 }
 

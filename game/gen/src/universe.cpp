@@ -182,4 +182,49 @@ PlanetParams derive_planet_params(const BodyHandle& body,
   return derive_planet_params(body.entity, body.params, forced_type);
 }
 
+core::tree::Address system_address_for(const SystemCell& cell) {
+  Cell tree_cell;
+  tree_cell.x = cell.x;
+  tree_cell.y = cell.y;
+  tree_cell.z = cell.z;
+  tree_cell.w = cell.level;
+  return core::tree::Address{}
+      .child(Step{name::ClustersAxis, Cell::grid(0, 0, 0)})
+      .child(Step{name::GalaxiesAxis, Cell::index(0)})
+      .child(Step{name::SystemsAxis, tree_cell});
+}
+
+core::Key system_key_for(const core::Seed128& seed, const SystemCell& cell) {
+  const auto tree = make_tree(seed);
+  return tree->get(system_address_for(cell))->key();
+}
+
+BodyHandle body_for_system_slot(const core::Seed128& seed, const SystemCell& cell,
+                                int slot) {
+  const auto tree = make_tree(seed);
+  const auto address =
+      system_address_for(cell).child(Step{name::PlanetsAxis, Cell::slot(slot)});
+  const auto node = tree->get(address);
+  return BodyHandle{node->key(), node->params_key()};
+}
+
+BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cell,
+                                int slot, int moon_index) {
+  const auto tree = make_tree(seed);
+  const auto address = system_address_for(cell)
+                           .child(Step{name::PlanetsAxis, Cell::slot(slot)})
+                           .child(Step{name::MoonsAxis, Cell::slot(moon_index)});
+  const auto node = tree->get(address);
+  return BodyHandle{node->key(), node->params_key()};
+}
+
+core::Key home_galaxy_key(const core::Seed128& seed) {
+  const auto tree = make_tree(seed);
+  const auto address =
+      core::tree::Address{}
+          .child(Step{name::ClustersAxis, Cell::grid(0, 0, 0)})
+          .child(Step{name::GalaxiesAxis, Cell::index(0)});
+  return tree->get(address)->key();
+}
+
 }  // namespace inf::gen

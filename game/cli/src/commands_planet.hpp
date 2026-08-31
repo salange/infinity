@@ -11,5 +11,6 @@ int cmd_hash_planet();
 // land-fraction / pattern-distribution report across seeds.
 int cmd_terrain_map(const core::Seed128& seed, const char* type_text, const char* out_prefix);
 int cmd_macro_stats(int seed_count);
+int cmd_terrain_stats(const core::Seed128& seed);
 
 }  // namespace inf::cli

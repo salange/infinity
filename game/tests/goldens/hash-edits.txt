@@ -1,3 +1,3 @@
 # effective-density goldens (M7 scripted edit sequence)
-edits/v1 ground df75a08f2030a2ca
-edits/v1 grid 3d8616d58182684d
+edits/v1 ground 9ae59827bd5bf31e
+edits/v1 grid da19db991e2ce019

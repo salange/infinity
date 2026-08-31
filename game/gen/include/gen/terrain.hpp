@@ -7,6 +7,7 @@
 #include "core/key.hpp"
 #include "gen/geo.hpp"
 #include "gen/names.hpp"
+#include "gen/material.hpp"
 #include "gen/planet.hpp"
 #include "gen/provinces.hpp"
 
@@ -94,11 +95,13 @@ class TerrainField {
 
   const PlanetParams& planet() const { return planet_; }
   const ProvinceField& provinces() const { return provinces_; }
+  const MaterialField& material() const { return material_; }
 
  private:
   PlanetParams planet_;
   ProvinceField provinces_;
   MacroField macro_;
+  MaterialField material_;
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;
 };

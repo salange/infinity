@@ -12,7 +12,8 @@ namespace inf::gen {
 using det::Real;
 
 TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet)
-    : planet_(planet), provinces_(body_key, planet), macro_(body_key) {
+    : planet_(planet), provinces_(body_key, planet), macro_(body_key),
+      material_(body_key, planet) {
   // terrain/v2 (T0015 WP1): the layer name is bumped because the output
   // now composes macro/v1 — per the seeding spec's versioning rule, a
   // behaviour change is a NEW name, never a silent redefinition.

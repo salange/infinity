@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "core/key.hpp"
 #include "gen/geo.hpp"
@@ -57,7 +58,13 @@ struct GalaxyParams {
 };
 
 // One draw per galaxy from derive_named(K_galaxy, "galaxy-params/v1").
-GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key);
+// forced_type overrides the morphology roll (the planet layer's
+// forced_type precedent); all other draws stay keyed as-is. The game
+// forces the HOME galaxy to Barred — every player's starting sky is a
+// grand-design spiral (T0018, decided 2026-09-01) — while every other
+// galaxy rolls freely.
+GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key,
+                                  std::optional<GalaxyType> forced_type = std::nullopt);
 
 // --- the shared density model (WP2) --------------------------------------
 

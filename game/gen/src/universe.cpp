@@ -290,4 +290,10 @@ core::Key home_galaxy_key(const core::Seed128& seed) {
   return tree->get(address)->key();
 }
 
+GalaxyParams home_galaxy_params(const core::Seed128& seed) {
+  // Morphology forced to Barred (see the header note); all other draws
+  // stay keyed off the galaxy entity as usual.
+  return derive_galaxy_params(home_galaxy_key(seed), GalaxyType::Barred);
+}
+
 }  // namespace inf::gen

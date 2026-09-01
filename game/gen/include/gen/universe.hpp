@@ -4,6 +4,7 @@
 
 #include "core/seed.hpp"
 #include "core/tree/tree.hpp"
+#include "gen/galaxy.hpp"
 #include "gen/names.hpp"
 #include "gen/planet.hpp"
 
@@ -66,6 +67,13 @@ BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cel
 // The home galaxy's entity key (galaxy-params/v1 and the octree hang off
 // it).
 core::Key home_galaxy_key(const core::Seed128& seed);
+// The home galaxy's params, with the morphology FORCED to Barred (T0018,
+// 2026-09-01): every seed's starting sky is a grand-design barred spiral
+// — arms, dust rift, nebulae — instead of gambling the game's signature
+// vista on a 60% roll. Every other galaxy draws its type freely. Still a
+// pure function of the seed; all sky/octree consumers of the home galaxy
+// must go through this, never through derive_galaxy_params directly.
+GalaxyParams home_galaxy_params(const core::Seed128& seed);
 
 // --- cluster and universe levels (T0017 WP5) ------------------------------
 // universe.clusters is a CellGrid3D with this cell size (from the 1:10

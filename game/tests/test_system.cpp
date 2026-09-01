@@ -19,6 +19,8 @@ gen::StarSystemParams system_for(std::uint64_t lo) {
 }  // namespace
 
 TEST_CASE("system: deterministic and structurally sane") {
+  int landable_systems = 0;
+  int total_systems = 0;
   for (std::uint64_t seed = 1; seed <= 40; ++seed) {
     const gen::StarSystemParams a = system_for(seed);
     const gen::StarSystemParams b = system_for(seed);
@@ -53,9 +55,15 @@ TEST_CASE("system: deterministic and structurally sane") {
       }
     }
     REQUIRE(occupied >= 1);
-    REQUIRE(landable);  // default-spawn contract
+    // Giants stopped being landable (2026-09-01), so an all-giant system
+    // is legitimate — the client anchors on a giant with a keep-out and
+    // the player jumps on. Most systems must still offer ground; the
+    // DEFAULT seed's landable guarantee lives in its own contract test.
+    ++total_systems;
+    landable_systems += landable ? 1 : 0;
     REQUIRE(!a.belts.empty());
   }
+  REQUIRE(landable_systems * 10 >= total_systems * 7);
 }
 
 TEST_CASE("system: Hill spacing keeps neighbors >= 10 mutual Hill radii") {

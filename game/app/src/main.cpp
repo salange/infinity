@@ -357,6 +357,17 @@ std::vector<float> unit_quad_vertices() {
   return vertices;
 }
 
+// Display label for a system body: giants show their CLASS (they have
+// no meaningful surface type), rocky worlds show the surface type.
+const char* body_type_label(const inf::gen::SystemPlanet& entry) {
+  switch (entry.phys.cls) {
+    case inf::core::PlanetClass::GasGiant: return "Gas Giant";
+    case inf::core::PlanetClass::IceGiant: return "Ice Giant";
+    case inf::core::PlanetClass::SubNeptune: return "Sub-Neptune";
+    default: return inf::gen::to_string(entry.surface_type);
+  }
+}
+
 // Blackbody-ish tint for a star's effective temperature: M dwarfs deep
 // orange through G yellow-white up to B blue (piecewise linear).
 void star_tint(double temp_k, float out[3]) {
@@ -1050,11 +1061,19 @@ int main(int argc, char** argv) {
       if (job.moon < 0) {
         const inf::gen::BodyHandle body =
             inf::gen::body_for_system_slot(seed_copy, cell_copy, job.slot);
-        const inf::gen::PlanetParams planet =
-            inf::gen::planet_params_for_slot(system_copy, job.slot, body);
-        const inf::gen::TerrainField field(body.entity, planet);
-        result.radius_m = planet.radius_m.to_double();
-        result.texture = inf::gen::bake_planet_texture(field, job.size);
+        const auto& entry = system_copy.planets[static_cast<std::size_t>(job.slot)];
+        if (!entry.landable) {
+          // Giants: a banded gas ball, not rocky terrain (2026-09-01).
+          result.radius_m = entry.phys.radius_m.to_double();
+          result.texture =
+              inf::gen::bake_gas_texture(body.entity, entry.phys.cls, job.size);
+        } else {
+          const inf::gen::PlanetParams planet =
+              inf::gen::planet_params_for_slot(system_copy, job.slot, body);
+          const inf::gen::TerrainField field(body.entity, planet);
+          result.radius_m = planet.radius_m.to_double();
+          result.texture = inf::gen::bake_planet_texture(field, job.size);
+        }
       } else {
         const inf::gen::BodyHandle body =
             inf::gen::body_for_system_moon(seed_copy, cell_copy, job.slot, job.moon);
@@ -1293,7 +1312,12 @@ int main(int argc, char** argv) {
       const ClosestBody candidate = closest_body();
       const bool is_current =
           candidate.slot == anchor->slot && candidate.moon == anchor->moon;
-      if (!is_current && candidate.gap < anchor_gap * 0.5) {
+      // Giants stay in closest_body (the governor must brake for them)
+      // but never become the anchor: there is no surface to anchor to.
+      const bool candidate_landable =
+          candidate.moon >= 0 ||
+          system.planets[static_cast<std::size_t>(candidate.slot)].landable;
+      if (!is_current && candidate_landable && candidate.gap < anchor_gap * 0.5) {
         save_anchor_edits(*anchor);
         for (auto& [addr, chunk] : loaded) {
           rhi->destroy_mesh(chunk.mesh_id);
@@ -1316,7 +1340,10 @@ int main(int argc, char** argv) {
             candidate.moon >= 0 ? " moon " + std::to_string(candidate.moon) : std::string();
         std::printf("anchor: %s (slot %d%s, %s %s, radius %.0f km)\n", name.c_str(),
                     candidate.slot, moon_suffix.c_str(),
-                    inf::gen::to_string(anchor->planet.type),
+                    candidate.moon >= 0
+                        ? inf::gen::to_string(anchor->planet.type)
+                        : body_type_label(
+                              system.planets[static_cast<std::size_t>(candidate.slot)]),
                     candidate.moon >= 0 ? "moon" : "planet", anchor->radius / 1000.0);
       }
     }
@@ -1469,7 +1496,9 @@ int main(int argc, char** argv) {
         std::printf("jump: arrived at %s — %s (slot %d, %s, radius %.0f km)\n",
                     jump_sel_name.c_str(),
                     slot_names[static_cast<std::size_t>(arrival_slot)].c_str(),
-                    arrival_slot, inf::gen::to_string(anchor->planet.type),
+                    arrival_slot,
+                    body_type_label(
+                        system.planets[static_cast<std::size_t>(arrival_slot)]),
                     anchor->radius / 1000.0);
       }
     }
@@ -1527,8 +1556,12 @@ int main(int argc, char** argv) {
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
         if (entry.occupied && !(slot == anchor->slot && anchor->moon < 0)) {
+          // Giants get a fatter keep-out: there is no surface under the
+          // cloud tops, so the ship stops a little above them.
+          const double margin = entry.landable ? 1.02 : 1.03;
+          const double clearance = entry.landable ? 5.0 : 30.0;
           player.push_out(planet_local[static_cast<std::size_t>(slot)],
-                          entry.phys.radius_m.to_double() * 1.02 + 5.0);
+                          entry.phys.radius_m.to_double() * margin + clearance);
         }
       }
       for (const MoonInstance& moon : moons_local) {
@@ -1582,6 +1615,21 @@ int main(int argc, char** argv) {
             player.set_position(moon.pos + out * (moon.radius + arg_d(2)));
             aim_at(inf::sim::normalize(moon.pos - player.position()));
           }
+        }
+      } else if (cmd.op == "posplanet" && cmd.args.size() >= 2) {
+        // Place near planet <slot> at <alt> above its nominal radius.
+        const int slot = static_cast<int>(arg_d(0));
+        if (slot >= 0 && slot < inf::gen::kMaxPlanetSlots &&
+            system.planets[static_cast<std::size_t>(slot)].occupied) {
+          const SVec3 center = slot == anchor->slot && anchor->moon < 0
+                                   ? SVec3{0.0, 0.0, 0.0}
+                                   : planet_local[static_cast<std::size_t>(slot)];
+          const double radius =
+              system.planets[static_cast<std::size_t>(slot)].phys.radius_m.to_double();
+          const SVec3 out = inf::sim::normalize(
+              inf::sim::length(center) > 1.0 ? center : SVec3{1.0, 0.0, 0.0});
+          player.set_position(center + out * (radius + arg_d(1)));
+          aim_at(inf::sim::normalize(center - player.position()));
         }
       } else if (cmd.op == "posnight" && !cmd.args.empty()) {
         // True antisolar point at the given altitude (night-sky captures).
@@ -2039,11 +2087,14 @@ int main(int argc, char** argv) {
                   entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2],
                   body_tex_key(slot, -1));
       }
-      // The static land impostor is ALWAYS drawn (map off): from orbit it
-      // IS the planet (chunks hidden); nearer in it sits 300 m under the
-      // real terrain as the streaming backstop, so chunks arriving late
-      // refine the picture instead of flipping ocean into land.
-      if (land_mesh != 0) {
+      // The static land impostor: from orbit it IS the planet (chunks
+      // hidden above 0.35R); through the transition band it backstops
+      // late-arriving chunks. BELOW 0.22R it is hidden entirely — its
+      // ~40 km lattice interpolates linearly across real km-scale
+      // relief, so near the ground its sheets poked ABOVE true terrain
+      // as phantom collision-less surfaces (the "fall through the top
+      // layer onto stacked panes" bug, 2026-09-01).
+      if (land_mesh != 0 && altitude > 0.22 * anchor->radius) {
         const RVec3 rel = to_render(SVec3{0.0, 0.0, 0.0}) - camera_pos;
         const Mat4 model = inf::render::translate(rel);
         const Mat4 mvp = inf::render::mul(view_projection, model);

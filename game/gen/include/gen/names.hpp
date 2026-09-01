@@ -39,6 +39,7 @@ inline constexpr core::NameId NebulaeV1{0x077f97eae9e3adb4ULL};       // "nebula
 inline constexpr core::NameId StarClustersV1{0xb59ee6f1f35abb5eULL};  // "star-clusters/v1"
 inline constexpr core::NameId GalaxyLayoutV1{0xaa91de0c98bdfc07ULL};  // "galaxy-layout/v1"
 inline constexpr core::NameId SatellitesV1{0xf47f9c80f8ae1d0dULL};    // "satellites/v1"
+inline constexpr core::NameId GasBandsV1{0x1425be2bc6e9de2bULL};      // "gas-bands/v1"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -106,6 +107,7 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"star-clusters/v1", name::StarClustersV1},
     {"galaxy-layout/v1", name::GalaxyLayoutV1},
     {"satellites/v1", name::SatellitesV1},
+    {"gas-bands/v1", name::GasBandsV1},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

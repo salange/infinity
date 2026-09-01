@@ -1628,6 +1628,13 @@ int main(int argc, char** argv) {
           tangent = SVec3{1.0, 0.0, 0.0};
         }
         tangent = inf::sim::normalize(tangent);
+        // Optional second arg: yaw around the local vertical, so the
+        // composition can sweep the horizon toward the band or a moon.
+        if (cmd.args.size() >= 2) {
+          const double yaw = arg_d(1) * 3.14159265358979323846 / 180.0;
+          const SVec3 side = inf::sim::cross(up_ref, tangent);
+          tangent = inf::sim::normalize(tangent * std::cos(yaw) + side * std::sin(yaw));
+        }
         const double dip = arg_d(0) * 3.14159265358979323846 / 180.0;
         const SVec3 fwd = inf::sim::normalize(tangent * std::cos(dip) -
                                               up_ref * std::sin(dip));
@@ -2106,6 +2113,15 @@ int main(int argc, char** argv) {
           return;  // inside/very near: the sky dome takes over
         }
         const double halo = radius * 1.22;
+        // Phase-modulated: the halo is sunlight forward-scattered by the
+        // atmosphere, so it belongs on the lit limb — over a night-side
+        // nadir it drops to a whisper. (Unmodulated, HDR night exposure
+        // turned it into a neon ring swallowing the deep sky.)
+        const double phase =
+            inf::sim::dot(inf::sim::normalize(star_local - pos),
+                          inf::sim::normalize(cam_pos_local - pos));
+        const double lit = std::clamp((phase + 0.4) / 0.9, 0.0, 1.0);
+        intensity *= 0.04 + 0.96 * lit;
         const RVec3 bill_right =
             inf::render::normalize(inf::render::cross(cam_forward, cam_up));
         const Mat4 model =
@@ -2539,11 +2555,11 @@ int main(int argc, char** argv) {
     const double cross_len = 14.0 * px;
     const double cross_thick = 2.5 * px;
     const double ar = input.aspect;
-    if (map_phase == MapPhase::Off) {
+    if (map_phase == MapPhase::Off && script_hud) {
     items.push_back(hud_quad(cube_mesh, 0.0, 0.0, cross_len / ar, cross_thick, 0.9f, 0.95f, 1.0f));
     items.push_back(hud_quad(cube_mesh, 0.0, 0.0, cross_thick / ar, cross_len, 0.9f, 0.95f, 1.0f));
     }
-    if (map_phase == MapPhase::Off &&
+    if (map_phase == MapPhase::Off && script_hud &&
         (player.mode() == inf::sim::PlayerMode::Flight ||
          player.mode() == inf::sim::PlayerMode::Takeoff)) {
       const double rx = player.reticle_x();

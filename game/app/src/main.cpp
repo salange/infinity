@@ -25,6 +25,7 @@
 #include "gen/planet.hpp"
 #include "gen/system.hpp"
 #include "gen/galaxy.hpp"
+#include "gen/deep_sky.hpp"
 #include "gen/galaxy_octree.hpp"
 #include "gen/planet_texture.hpp"
 #include "gen/terrain.hpp"
@@ -38,6 +39,7 @@
 #include "world/chunk_manager.hpp"
 #include "world/edit_store.hpp"
 #include "gen/effective_field.hpp"
+#include "deep_sky_render.hpp"
 
 namespace {
 
@@ -481,8 +483,7 @@ int main(int argc, char** argv) {
   // Galaxy frame (T0017): the octree that owns every star system, and the
   // current system's galactocentric position. System/planet axes are all
   // galaxy-aligned, so the ship's forward vector IS a galactic direction.
-  const inf::gen::GalaxyParams galaxy_params =
-      inf::gen::derive_galaxy_params(inf::gen::home_galaxy_key(*seed));
+  const inf::gen::GalaxyParams galaxy_params = inf::gen::home_galaxy_params(*seed);
   const inf::gen::GalaxyOctree galaxy_octree(inf::gen::home_galaxy_key(*seed),
                                              galaxy_params);
   const auto system_galactic_pos = [&](const inf::gen::SystemCell& cell) {
@@ -589,6 +590,60 @@ int main(int argc, char** argv) {
   const std::uint32_t impostor_mesh = rhi->create_mesh(fine_ball.data(), fine_ball.size());
   const std::vector<float> quad = unit_quad_vertices();
   const std::uint32_t glow_mesh = rhi->create_mesh(quad.data(), quad.size());
+
+  // --- deep sky (T0018 WP2/WP3) ---------------------------------------
+  // Static per system: the resolved-star field (one mesh of billboards
+  // from the octree, magnitude-limited) and the diffuse band cube map
+  // (line integrals of the shared galaxy density plus nebula/cluster
+  // splats). Rebaked on every jump; parallax within a system is
+  // sub-pixel, so nothing moves between jumps.
+  const inf::gen::NebulaField nebula_field(inf::gen::home_galaxy_key(*seed),
+                                           galaxy_params);
+  const inf::gen::StarClusterField cluster_field(inf::gen::home_galaxy_key(*seed),
+                                                 galaxy_params);
+  std::uint32_t star_field_mesh = 0;
+  std::uint32_t sky_texture = 0;
+  constexpr std::uint32_t kSkyFaceSize = 512;
+  const auto rebuild_deep_sky = [&](const SVec3& gal_pos) {
+    const inf::gen::Dir3 eye{inf::det::Real(gal_pos.x), inf::det::Real(gal_pos.y),
+                             inf::det::Real(gal_pos.z)};
+    if (star_field_mesh != 0) {
+      rhi->destroy_mesh(star_field_mesh);
+      star_field_mesh = 0;
+    }
+    const inf::core::LocalClock sky_clock;
+    const inf::core::WorldTime sky_t0 = sky_clock.now();
+    inf::app::StarCatalogStats stats;
+    // m 8.3 is the display visibility floor at the night exposure
+    // ceiling — fainter stars would cost bake time without ever showing.
+    const std::vector<float> field =
+        inf::app::build_star_field_mesh(galaxy_octree, eye, 8.3, 90000, &stats);
+    // Bring-up isolation switches: INF_NOSTARS / INF_NOSKY.
+    if (!field.empty() && std::getenv("INF_NOSTARS") == nullptr) {
+      star_field_mesh = rhi->create_mesh_mat(field.data(), field.size());
+    }
+    const inf::core::WorldTime sky_t1 = sky_clock.now();
+    const int threads =
+        std::max(2U, std::thread::hardware_concurrency()) - 1;
+    const inf::app::SkyBakeResult bake = inf::app::bake_deep_sky(
+        galaxy_octree.density(), nebula_field, cluster_field, eye, kSkyFaceSize,
+        threads);
+    if (sky_texture == 0) {
+      sky_texture = rhi->create_planet_texture(kSkyFaceSize);
+    }
+    for (std::uint32_t face = 0; face < 6; ++face) {
+      rhi->update_planet_face(sky_texture, face, bake.luminance_half[face].data(),
+                              bake.chroma_rgba[face].data());
+    }
+    const inf::core::WorldTime sky_t2 = sky_clock.now();
+    std::printf(
+        "deep sky: %zu stars (brightest m=%.1f, %zu cells, %.0f ms), band %ux%u "
+        "(%.0f ms)\n",
+        stats.star_count, stats.brightest_apparent_mag, stats.cells_visited,
+        static_cast<double>(sky_t1 - sky_t0) * 1e-6, kSkyFaceSize, kSkyFaceSize,
+        static_cast<double>(sky_t2 - sky_t1) * 1e-6);
+  };
+  rebuild_deep_sky(galactic_pos);
   // Sea shell (spec section 5): one translucent sphere at sea level,
   // EarthLike only. Zero shading effort by design. Rebuilt per anchor.
   std::uint32_t sea_mesh = 0;
@@ -1363,6 +1418,9 @@ int main(int argc, char** argv) {
         rebuild_system_ui();
         recompute_bodies();
         start_bake_worker(system, current_cell);
+        // New vantage, new sky: rebake the band + star field while the
+        // transition still covers the screen (~0.5 s, deliberate).
+        rebuild_deep_sky(galactic_pos);
         std::printf("jump: arrived at %s — %s (slot %d, %s, radius %.0f km)\n",
                     jump_sel_name.c_str(),
                     slot_names[static_cast<std::size_t>(arrival_slot)].c_str(),
@@ -1803,7 +1861,10 @@ int main(int argc, char** argv) {
         atmosphere > 0.0
             ? (inf::sim::length(cam_pos_local) - anchor->radius) / atmosphere
             : 9.0;
-    if (map_phase == MapPhase::Off && atmosphere > 0.0 && dome_alt_frac < 1.0) {
+    // T0018 WP3: the dome is ALWAYS drawn in flight — in space it carries
+    // the baked deep-sky cube map alone (density -> 0 in the shader), in
+    // an atmosphere it adds the scattered daylight on top.
+    if (map_phase == MapPhase::Off) {
       inf::render::Rhi::DrawItem dome;
       dome.mesh = glow_mesh;
       Mat4 m{};
@@ -1818,7 +1879,23 @@ int main(int argc, char** argv) {
       m.m[15] = 1.0f;
       std::memcpy(dome.mvp, m.m, sizeof(m.m));
       dome.mode = 4;
+      static const bool no_sky_tex = std::getenv("INF_NOSKY") != nullptr;
+      dome.planet_texture = no_sky_tex ? 0 : sky_texture;
+      dome.extra[0] = 1.0f;  // band gain
       items.push_back(dome);
+      // WP2: the resolved-star field, one static mesh of billboards at
+      // infinity (rotation-only transform; the shader pins depth just
+      // above the dome so real geometry occludes stars).
+      if (star_field_mesh != 0) {
+        inf::render::Rhi::DrawItem stars_item;
+        stars_item.mesh = star_field_mesh;
+        std::memcpy(stars_item.mvp, view_projection.m, sizeof(view_projection.m));
+        stars_item.mode = 7;
+        const double star_half_px = 5.0;
+        stars_item.extra[0] = static_cast<float>(2.0 * star_half_px / state.width);
+        stars_item.extra[1] = static_cast<float>(2.0 * star_half_px / state.height);
+        items.push_back(stars_item);
+      }
     }
     for (const auto& [addr, chunk] : loaded) {
       if (!show_surface) {

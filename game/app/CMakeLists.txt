@@ -1,6 +1,7 @@
 add_executable(game_app
   src/main.cpp
-  src/hud.cpp)
+  src/hud.cpp
+  src/deep_sky_render.cpp)
 set_target_properties(game_app PROPERTIES OUTPUT_NAME "infinity")
 target_link_libraries(game_app
   PRIVATE engine::render game::sim glfw stb::headers game_warnings)

@@ -290,6 +290,13 @@ core::Key home_galaxy_key(const core::Seed128& seed) {
   return tree->get(address)->key();
 }
 
+core::Key home_cluster_key(const core::Seed128& seed) {
+  const auto tree = make_tree(seed);
+  const auto address =
+      core::tree::Address{}.child(Step{name::ClustersAxis, Cell::grid(0, 0, 0)});
+  return tree->get(address)->key();
+}
+
 GalaxyParams home_galaxy_params(const core::Seed128& seed) {
   // Morphology forced to Barred (see the header note); all other draws
   // stay keyed off the galaxy entity as usual.

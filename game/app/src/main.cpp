@@ -1045,9 +1045,8 @@ int main(int argc, char** argv) {
       // per cell, so extra texels buy nothing yet (T0015 section 13).
       const bool giant = entry.phys.radius_m.to_double() > 2.0e6;
       jobs.push_back({slot, -1, giant ? 128U : 256U});
-    }
-    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
-      const auto& entry = system_copy.planets[static_cast<std::size_t>(slot)];
+      // Moons ride right behind their planet (was: all moons last) — an
+      // early moon visit found a flat untextured ball otherwise.
       for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
         jobs.push_back({slot, static_cast<int>(mi), 192U});
       }
@@ -2089,12 +2088,16 @@ int main(int argc, char** argv) {
       }
       // The static land impostor: from orbit it IS the planet (chunks
       // hidden above 0.35R); through the transition band it backstops
-      // late-arriving chunks. BELOW 0.22R it is hidden entirely — its
-      // ~40 km lattice interpolates linearly across real km-scale
-      // relief, so near the ground its sheets poked ABOVE true terrain
-      // as phantom collision-less surfaces (the "fall through the top
-      // layer onto stacked panes" bug, 2026-09-01).
-      if (land_mesh != 0 && altitude > 0.22 * anchor->radius) {
+      // late-arriving chunks. BELOW 0.22R it is hidden — its ~40 km
+      // lattice interpolates linearly across real km-scale relief, so
+      // near the ground its sheets poked ABOVE true terrain as phantom
+      // collision-less surfaces (the "fall through the top layer onto
+      // stacked panes" bug, 2026-09-01) — UNLESS the chunk set is still
+      // sparse: on a fresh anchor (a first moon landing) hiding it left
+      // the player descending through visible-nothing onto invisible
+      // ground under the dome. A briefly-poking sheet beats a void.
+      if (land_mesh != 0 &&
+          (altitude > 0.22 * anchor->radius || loaded.size() < 200)) {
         const RVec3 rel = to_render(SVec3{0.0, 0.0, 0.0}) - camera_pos;
         const Mat4 model = inf::render::translate(rel);
         const Mat4 mvp = inf::render::mul(view_projection, model);

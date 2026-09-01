@@ -58,7 +58,8 @@ const char* to_string(GalaxyType type) {
   return "?";
 }
 
-GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key) {
+GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key,
+                                  std::optional<GalaxyType> forced_type) {
   const core::Key key = core::derive_named(galaxy_entity_key, name::GalaxyParamsV1);
   const auto draw0 = core::draw_point(key, channel::Params, 0, 0, 0);
   const auto draw1 = core::draw_point(key, channel::Params, 1, 0, 0);
@@ -79,6 +80,9 @@ GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key) {
     params.type = GalaxyType::Lenticular;
   } else {
     params.type = GalaxyType::Irregular;
+  }
+  if (forced_type.has_value()) {
+    params.type = *forced_type;
   }
 
   // Log-uniform diameter, 5 000 - 200 000 ly (Milky Way ~100 000).

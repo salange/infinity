@@ -484,7 +484,10 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
           s.color[0] = 0.70f; s.color[1] = 0.82f; s.color[2] = 1.0f;
         }
         s.color2[0] = 1.0f; s.color2[1] = 0.87f; s.color2[2] = 0.70f;
-        s.intensity = 2.2e-3;
+        // Bright enough that the bulge survives the bake's contrast
+        // curve as a naked-eye object — M31 is, and these are the sky's
+        // long-haul landmarks.
+        s.intensity = 6.0e-3;
         s.noise_seed = static_cast<double>(h % 8192U);
         gals.push_back(s);
       }
@@ -647,14 +650,14 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
             double body = 0.0;
             double bulge = 0.0;
             if (s.sub == static_cast<int>(gen::GalaxyType::Elliptical)) {
-              body = std::exp(-std::pow(e, 0.7) * 3.4);
+              body = std::exp(-std::pow(e, 0.7) * 3.0);
             } else if (s.sub == static_cast<int>(gen::GalaxyType::Irregular)) {
               const V3 np = dir * (10.0 * s.inv_ang_a * 0.35) +
                             V3{s.noise_seed, s.noise_seed * 1.7, s.noise_seed * 0.6};
-              body = std::exp(-e2 * 3.0) * (0.35 + 1.5 * fbm(np, 3));
+              body = std::exp(-e2 * 2.2) * (0.35 + 1.5 * fbm(np, 3));
             } else {
-              body = std::exp(-e * 2.8);
-              bulge = std::exp(-e2 * 16.0) * 1.4;
+              body = std::exp(-e * 2.0);
+              bulge = std::exp(-e2 * 8.0) * 1.2;
             }
             for (int c = 0; c < 3; ++c) {
               emission[c] +=
@@ -707,7 +710,14 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
           const double m0 = std::max({emission[0], emission[1], emission[2]});
           if (m0 > 0.0) {
             const double pivot = 6.0e-3;
-            const double m1 = pivot * std::pow(m0 / pivot, 1.55);
+            // Asymmetric around the pivot: ^1.55 below keeps the
+            // off-plane sky black, a gentler ^1.25 above plus a soft
+            // shoulder keeps the core a climax instead of a searchlight
+            // — it must never compete with an actual sun (Sascha,
+            // 2026-09-01, after the first flyable build).
+            const double ratio = m0 / pivot;
+            double m1 = pivot * std::pow(ratio, ratio < 1.0 ? 1.55 : 1.25);
+            m1 = m1 / (1.0 + m1 / 1.5);
             const double s = m1 / m0;
             emission[0] *= s;
             emission[1] *= s;
@@ -761,6 +771,20 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
         "(refs %.3g / ext %.3g), lum max %.4g mean %.4g\n",
         splats.size(), emission_gain, dust_gain, star_column_ref, extinguished_ref,
         max_lum, sum / (6.0 * static_cast<double>(texels)));
+    std::vector<const Splat*> gal_list;
+    for (const Splat& s : splats) {
+      if (s.kind == 7) {
+        gal_list.push_back(&s);
+      }
+    }
+    std::sort(gal_list.begin(), gal_list.end(), [](const Splat* a, const Splat* b) {
+      return a->ang_radius > b->ang_radius;
+    });
+    for (std::size_t i = 0; i < gal_list.size() && i < 3; ++i) {
+      const Splat* s = gal_list[i];
+      std::printf("  galaxy impostor %zu: dir (%.3f %.3f %.3f) radius %.1f deg\n", i,
+                  s->dir.x, s->dir.y, s->dir.z, s->ang_radius * 57.2958);
+    }
   }
   return result;
 }

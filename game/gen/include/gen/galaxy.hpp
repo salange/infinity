@@ -66,6 +66,21 @@ struct GalaxyParams {
 GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key,
                                   std::optional<GalaxyType> forced_type = std::nullopt);
 
+// --- satellites/v1 --------------------------------------------------------
+// Dwarf companion galaxies bound to a parent — the Magellanic deal: most
+// galaxies carry one or two, orbiting at 1.5-2.6 parent radii, small
+// (6-20 kly), mostly irregular with a dwarf-spheroidal minority. From
+// inside the parent they span several degrees of sky: the showpiece
+// companions. Draws hang off derive_named(K_galaxy, "satellites/v1"),
+// so adding them changed no existing subsystem's output.
+std::uint32_t satellite_count(const core::Key& galaxy_entity_key);
+struct SatelliteGalaxy {
+  Dir3 offset_m;        // from the parent galaxy's center (parent frame)
+  GalaxyParams params;  // dwarf-biased morphology, all fields filled
+};
+SatelliteGalaxy satellite_galaxy(const core::Key& galaxy_entity_key,
+                                 const GalaxyParams& parent, std::uint32_t index);
+
 // --- the shared density model (WP2) --------------------------------------
 
 // Mean stellar population at a point (radial gradient).

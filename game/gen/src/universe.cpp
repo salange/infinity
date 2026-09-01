@@ -45,8 +45,23 @@ NodeSpec cluster_spec(const core::Key& entity_key, const core::tree::Node*) {
   return spec;
 }
 
-NodeSpec galaxy_spec(const core::Key&, const core::tree::Node*) {
+NodeSpec galaxy_spec(const core::Key& entity_key, const core::tree::Node*) {
   NodeSpec spec;
+  // Satellite galaxies (satellites/v1): 0-2 dwarf companions per galaxy,
+  // count drawn off the galaxy entity; positions/params come from the
+  // same layer (gen::satellite_galaxy).
+  AxisDesc satellites;
+  satellites.name = name::SatellitesV1;
+  satellites.child_kind = kind::Galaxy;
+  satellites.topo = Topology::IndexedList;
+  satellites.count = [entity_key](const core::tree::Node&, const core::Key&) {
+    return static_cast<std::uint64_t>(satellite_count(entity_key));
+  };
+  satellites.occupied = [entity_key](const core::tree::Node&, const core::Key&,
+                                     const Cell& cell) {
+    return cell.x >= 0 &&
+           cell.x < static_cast<std::int64_t>(satellite_count(entity_key));
+  };
   AxisDesc systems;
   systems.name = name::SystemsAxis;
   systems.child_kind = kind::System;
@@ -83,7 +98,7 @@ NodeSpec galaxy_spec(const core::Key&, const core::tree::Node*) {
     return cell.x >= 0 && cell.x < 32 && cell.y >= 0 && cell.y < 32 && cell.z >= 0 &&
            cell.z < 32;
   };
-  spec.axes = {systems, nebulae, star_clusters};
+  spec.axes = {satellites, systems, nebulae, star_clusters};
   return spec;
 }
 
@@ -256,7 +271,8 @@ std::uint32_t galaxy_count_in_cluster(const core::Key& cluster_entity_key) {
   return result < 10U ? 10U : (result > 1000U ? 1000U : result);
 }
 
-Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32_t index) {
+Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32_t index,
+                                det::Real diameter_ly) {
   if (index == 0) {
     // The home galaxy of every cluster anchors its origin; for the HOME
     // cluster this keeps the playable galaxy exactly where it was.
@@ -264,11 +280,37 @@ Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32
   }
   const core::Key layout = core::derive_named(cluster_entity_key, name::GalaxyLayoutV1);
   const auto draw = core::draw_point(layout, channel::Params, index, 1, 0);
-  const auto coord = [&](std::uint64_t word) {
-    const double u = static_cast<double>(word >> 11U) * 0x1.0p-53;
-    return det::Real((u - 0.5) * kClusterSizeM);
+  const auto u01 = [](std::uint64_t word) {
+    return static_cast<double>(word >> 11U) * 0x1.0p-53;
   };
-  return Dir3{coord(draw[0]), coord(draw[1]), coord(draw[2])};
+  // Isotropic direction, LOG-UNIFORM distance with a per-galaxy floor at
+  // the 3-degree apparent span (tan 3 deg = 0.0524): neighbours come
+  // close enough to be real objects in the sky — up to 3 degrees, M31
+  // scale — but never closer, and giants that could not fit inside that
+  // cap at the nominal cluster radius get pushed beyond it instead
+  // (clusters are diffuse; a fuzzy edge is truer than a violated cap).
+  double dx = u01(draw[0]) - 0.5;
+  double dy = u01(draw[1]) - 0.5;
+  double dz = u01(draw[2]) - 0.5;
+  const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+  if (len > 1.0e-9) {
+    dx /= len;
+    dy /= len;
+    dz /= len;
+  } else {
+    dz = 1.0;
+  }
+  const double diameter_m = diameter_ly.to_double() * kLightYearM;
+  double r_lo = diameter_m / 0.0524;
+  if (r_lo < 2.0e21) {
+    r_lo = 2.0e21;  // never inside our own halo, whatever the size
+  }
+  const double nominal = 0.5 * kClusterSizeM;
+  const double r_hi = nominal > r_lo * 1.35 ? nominal : r_lo * 1.35;
+  const double span = det::fast_log(det::Real(r_hi / r_lo)).to_double();
+  const double r =
+      r_lo * det::fast_exp(det::Real(u01(draw[3]) * span)).to_double();
+  return Dir3{det::Real(dx * r), det::Real(dy * r), det::Real(dz * r)};
 }
 
 core::Key galaxy_key_in_cluster(const core::Seed128& seed, std::int64_t cx,

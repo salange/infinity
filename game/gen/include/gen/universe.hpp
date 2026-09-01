@@ -89,9 +89,13 @@ inline constexpr double kClusterSizeM = 2.4e22;
 // Galaxies per cluster (10-1000, drawn from galaxy-layout/v1 off the
 // cluster's entity key) and their positions in the cluster frame. Galaxy
 // 0 sits at the cluster origin — for the home cluster that keeps the
-// playable galaxy exactly where it always was.
+// playable galaxy exactly where it always was. Positions need the
+// galaxy's diameter: neighbours scatter log-uniformly in distance with a
+// per-galaxy floor at the 3-degree apparent span, so the biggest sky
+// objects reach M31 scale but never more.
 std::uint32_t galaxy_count_in_cluster(const core::Key& cluster_entity_key);
-Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32_t index);
+Dir3 galaxy_position_in_cluster(const core::Key& cluster_entity_key, std::uint32_t index,
+                                det::Real diameter_ly);
 // Entity key of any galaxy in any cluster — external galaxies need only
 // galaxy-params/v1 from this to render as impostors (T0018 WP5).
 core::Key galaxy_key_in_cluster(const core::Seed128& seed, std::int64_t cx,

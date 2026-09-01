@@ -1,9 +1,16 @@
 # infinity
 
+![The galactic band rising over a night-side ocean, a moon hanging in the
+dust lanes — rendered live, generated from the seed](docs/deep-sky.png)
+
 A fully procedural universe, computed from a single 128-bit seed — no stored
 world data, deterministic across platforms, player changes as a diff overlay.
-Current stage: prototype v0, a single planet (fly in from orbit, land, walk,
-dig).
+Current stage: planetary systems inside a procedural galaxy. Fly in from
+orbit, land, walk, dig; hold J to jump the ship to a neighbouring star and
+watch the whole sky change. The night sky above is computed, not painted:
+the Milky Way band is a line integral of the galaxy's density model, the
+dust rift is its extinction term, every star is a system you can visit, and
+HDR eye adaptation opens it all up when you fly into a planet's shadow.
 
 ## Build
 

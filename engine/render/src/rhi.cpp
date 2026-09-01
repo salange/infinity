@@ -158,6 +158,26 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     out.mat_blend = 0.0;
     return out;
   }
+  if (mode == 7u) {
+    // Resolved star billboard (T0018 WP2): one static mesh carries the
+    // whole field. position = unit direction (galactic frame), normal.xy
+    // = quad corner scaled by the star's size, normal.z = HDR peak flux,
+    // mat_pack = packed 8-bit rgb, mat_blend = twinkle phase. w = 0
+    // makes the transform rotation-only (the field sits at infinity);
+    // depth is forced just above the sky dome so terrain and planets
+    // occlude stars but the dome never does. extra.xy = NDC per corner
+    // unit (from the viewport size).
+    var clip = u.mvp * vec4<f32>(position, 0.0);
+    let corner = normal.xy;
+    let half_len = max(max(abs(corner.x), abs(corner.y)), 1.0e-4);
+    out.pos = vec4<f32>(clip.xy + corner * vec2<f32>(u.extra.x, u.extra.y) * clip.w,
+                        clip.w * 3.0e-22, clip.w);
+    out.opos = vec3<f32>(corner.x / half_len, corner.y / half_len, 0.0);
+    out.normal = vec3<f32>(normal.z, 0.0, 0.0);
+    out.mat_pack = mat_pack;
+    out.mat_blend = mat_blend;
+    return out;
+  }
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = normal;
   out.opos = position;
@@ -334,8 +354,19 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
   var c = sky * day + frame.sun_color.rgb * mie * (0.25 + 0.75 * day);
   // Night floor: faint cold airglow instead of dead black.
   c += tint * 0.004 * (1.0 - day);
+  // T0018 WP3: the deep sky behind everything — the baked galaxy band
+  // cube map (luminance in the height plane, chromaticity in the
+  // material plane; extra.x = gain). The atmosphere ADDS scattered light
+  // on top instead of replacing space: at night the band shines through,
+  // by day the scattered blue washes it out via exposure, and in space
+  // (density -> 0) the bake stands alone.
+  let fuv = cube_face_uv(view);
+  let layer = i32(fuv.z);
+  let deep = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb *
+             textureSampleLevel(planet_height, planet_sampler, fuv.xy, layer, 0.0).r *
+             u.extra.x;
   let space = vec3<f32>(0.00004, 0.00005, 0.0001);
-  return mix(space, c, density);
+  return deep + space + c * density;
 }
 
 @fragment
@@ -355,6 +386,30 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   }
   if (mode == 4u) {
     return vec4<f32>(sky_dome(in.opos.xy), 1.0);
+  }
+  if (mode == 7u) {
+    // Star billboard: a tight gaussian core with a faint skirt. The flux
+    // (normal.x) is the calibrated HDR peak; bloom gives bright stars
+    // their presence. Twinkle only inside an atmosphere — scintillation
+    // is an atmospheric effect and doubles as an arrival cue; in vacuum
+    // the field is rock-steady.
+    let r2 = dot(in.opos.xy, in.opos.xy);
+    // No +0.5 here: packed rgb ints are exactly representable in f32,
+    // and adding 0.5 above 2^23 creates a round-to-even tie that bumps
+    // the integer — wrapping a 255 blue byte to 0 (blue-white stars
+    // rendered yellow until this was found the hard way).
+    let pack = u32(in.mat_pack);
+    let tint = vec3<f32>(f32(pack >> 16u), f32((pack >> 8u) & 255u),
+                         f32(pack & 255u)) / 255.0;
+    var flux = in.normal.x;
+    let atmo_depth = clamp(1.0 - frame.cam_fwd.w, 0.0, 1.0);
+    if (atmo_depth > 0.0) {
+      let tw = sin(time * (7.0 + in.mat_blend * 9.0) + in.mat_blend * 251.0) *
+               sin(time * 13.7 + in.mat_blend * 617.0);
+      flux *= 1.0 - 0.45 * atmo_depth * (0.5 + 0.5 * tw);
+    }
+    let shape = exp(-r2 * 9.0) + exp(-r2 * 2.2) * 0.06;
+    return vec4<f32>(tint * flux * shape, 1.0);
   }
   if (mode == 6u) {
     // Textured planet impostor: albedo from the material map, shading
@@ -569,8 +624,12 @@ fn fs_composite(in: FSIn) -> @location(0) vec4<f32> {
   // Milky Way goes grey.
   let rod_lum = dot(c, vec3<f32>(0.15, 0.55, 0.65));
   let rod = rod_lum * vec3<f32>(0.82, 0.95, 1.16);
-  let cone_keep = smoothstep(0.06, 0.5, dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)));
-  c = mix(c, rod, pp.a.y * (1.0 - cone_keep));
+  // Deliberately WEAK Purkinje (2026-09-01, Sascha): the sky should read
+  // like the astrophoto, not the fully rod-limited eye — the band and
+  // nebulae keep most of their colour, only the very faintest features
+  // drift toward rod grey.
+  let cone_keep = smoothstep(0.015, 0.22, dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)));
+  c = mix(c, rod, pp.a.y * 0.4 * (1.0 - cone_keep));
   return vec4<f32>(aces_post(c), 1.0);
 }
 )";
@@ -1620,10 +1679,12 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     impl_->exposure_last_time = frame.time_s;
     const float avg = impl_->avg_luminance > 2.0e-5f ? impl_->avg_luminance : 2.0e-5f;
     float target = 0.22f / avg;
-    // The rod gain ceiling: low enough that a starless night stays DIM
-    // instead of normalizing to mid-grey; bright stars (T0018 WP2) will
-    // still punch through at this gain.
-    target = target < 0.15f ? 0.15f : (target > 80.0f ? 80.0f : target);
+    // The rod gain ceiling: low enough that the deep sky keeps its
+    // contrast (the band at ~0.2-0.4 display, off-plane sky near black)
+    // instead of auto-exposure normalizing space to mid-grey. Was 80
+    // before the WP3 band existed; with a luminous sky, 80 washed the
+    // whole sphere to grey.
+    target = target < 0.15f ? 0.15f : (target > 35.0f ? 35.0f : target);
     const float tau = target < impl_->exposure ? 0.35f : 5.0f;
     impl_->exposure += (target - impl_->exposure) * (1.0f - std::exp(-dt / tau));
     // Scotopic fraction: rods take over as the adapted scene dims (scene
@@ -1667,7 +1728,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       if (items[i].overlay != overlay) {
         continue;
       }
-      const Pass item_pass = items[i].mode == 2 || items[i].mode == 3
+      const Pass item_pass = items[i].mode == 2 || items[i].mode == 3 ||
+                                     items[i].mode == 7
                                  ? Pass::Additive
                              : items[i].translucent ? Pass::Blend
                                                     : Pass::Opaque;

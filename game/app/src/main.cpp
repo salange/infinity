@@ -605,8 +605,28 @@ int main(int argc, char** argv) {
   std::uint32_t sky_texture = 0;
   constexpr std::uint32_t kSkyFaceSize = 512;
   const auto rebuild_deep_sky = [&](const SVec3& gal_pos) {
-    const inf::gen::Dir3 eye{inf::det::Real(gal_pos.x), inf::det::Real(gal_pos.y),
-                             inf::det::Real(gal_pos.z)};
+    inf::app::SkyView view;
+    view.eye_m = inf::gen::Dir3{inf::det::Real(gal_pos.x), inf::det::Real(gal_pos.y),
+                                inf::det::Real(gal_pos.z)};
+    // Sun direction and ecliptic (WP5) from the anchor's orbit at bake
+    // time: the zodiacal wedge drifts with the planet's year, but at the
+    // compressed periods that is ~1 deg/hour — a per-arrival bake holds.
+    {
+      const auto& orbit = system.planets[static_cast<std::size_t>(anchor->slot)].orbit;
+      const inf::core::LocalClock clock;
+      const auto pv = inf::core::Ephemeris::evaluate(orbit, clock.now());
+      const SVec3 planet_sys{pv.x.to_double(), pv.y.to_double(), pv.z.to_double()};
+      const SVec3 to_sun = inf::sim::normalize(planet_sys * -1.0);
+      view.sun_dir = inf::gen::Dir3{inf::det::Real(to_sun.x), inf::det::Real(to_sun.y),
+                                    inf::det::Real(to_sun.z)};
+      const double i = orbit.i_rad.to_double();
+      const double raan = orbit.raan_rad.to_double();
+      view.ecliptic_normal =
+          inf::gen::Dir3{inf::det::Real(std::sin(raan) * std::sin(i)),
+                         inf::det::Real(-std::cos(raan) * std::sin(i)),
+                         inf::det::Real(std::cos(i))};
+    }
+    const inf::gen::Dir3& eye = view.eye_m;
     if (star_field_mesh != 0) {
       rhi->destroy_mesh(star_field_mesh);
       star_field_mesh = 0;
@@ -626,8 +646,8 @@ int main(int argc, char** argv) {
     const int threads =
         std::max(2U, std::thread::hardware_concurrency()) - 1;
     const inf::app::SkyBakeResult bake = inf::app::bake_deep_sky(
-        galaxy_octree.density(), nebula_field, cluster_field, eye, kSkyFaceSize,
-        threads);
+        galaxy_octree.density(), nebula_field, cluster_field, *seed, view,
+        kSkyFaceSize, threads);
     if (sky_texture == 0) {
       sky_texture = rhi->create_planet_texture(kSkyFaceSize);
     }
@@ -802,6 +822,7 @@ int main(int argc, char** argv) {
   bool script_land = false;
   bool script_map = false;   // scripted M press (map captures)
   bool script_jump = false;  // scripted J select + instant confirm
+  bool script_hud = true;    // scripted HUD visibility (clean captures)
 
   // --- map mode state (T0013, design/map-mode.md) -----------------------
   enum class MapPhase { Off, Entering, On, Exiting };
@@ -1387,6 +1408,12 @@ int main(int argc, char** argv) {
         // together while the player is suspended (the map-mode lesson —
         // never interpolate across a frame change).
         jump_swapped = true;
+        // Attitude survives the jump: the ship keeps looking exactly
+        // where it looked (all system frames are galaxy-aligned, so the
+        // vectors carry over verbatim) — arrival feels like translation,
+        // not a cut.
+        const SVec3 keep_fwd = player.forward();
+        const SVec3 keep_up = player.up();
         save_anchor_edits(*anchor);
         for (auto& [addr, chunk] : loaded) {
           rhi->destroy_mesh(chunk.mesh_id);
@@ -1404,14 +1431,32 @@ int main(int argc, char** argv) {
         anchor = make_anchor(*seed, seed_text, system, current_cell, arrival_slot, -1,
                              std::nullopt, nullptr);
         galactic_pos = jump_target.pos_gal;
-        const SVec3 arrive_pos =
-            inf::sim::normalize(SVec3{1.0, 0.15, 0.3}) * (anchor->radius * 2.2);
-        player.rebase(*anchor->effective, arrive_pos);
-        {
-          const SVec3 to_planet = inf::sim::normalize(arrive_pos * -1.0);
-          SVec3 up_ref{0.0, 0.0, 1.0};
-          player.set_attitude(to_planet, up_ref);
+        // Arrival point: on the approach side of the system (the ship
+        // was flying toward this star), at a radius that puts ~2/3 of
+        // the planets sunward of it and ~1/3 outside.
+        std::vector<double> orbit_radii;
+        for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+          const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+          if (entry.occupied) {
+            orbit_radii.push_back(entry.orbit.a_m.to_double());
+          }
         }
+        std::sort(orbit_radii.begin(), orbit_radii.end());
+        const std::size_t n_orbits = orbit_radii.size();
+        const std::size_t split = (2 * n_orbits + 2) / 3;  // ceil(2n/3)
+        const double arrive_r =
+            split >= n_orbits
+                ? orbit_radii.back() * 1.25
+                : 0.5 * (orbit_radii[split - 1] + orbit_radii[split]);
+        const SVec3 ship_sys = keep_fwd * (-arrive_r);  // star dead ahead
+        const auto& arrival_orbit =
+            system.planets[static_cast<std::size_t>(arrival_slot)].orbit;
+        const auto arrival_pv = inf::core::Ephemeris::evaluate(arrival_orbit, now);
+        const SVec3 arrival_planet_sys{arrival_pv.x.to_double(),
+                                       arrival_pv.y.to_double(),
+                                       arrival_pv.z.to_double()};
+        player.rebase(*anchor->effective, ship_sys - arrival_planet_sys);
+        player.set_attitude(keep_fwd, keep_up);
         rebuild_sea();
         hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(),
                                               anchor->planet);
@@ -1573,6 +1618,22 @@ int main(int argc, char** argv) {
         } else if (cmd.args[0] == "dir" && cmd.args.size() >= 4) {
           aim_at(inf::sim::normalize(SVec3{arg_d(1), arg_d(2), arg_d(3)}));
         }
+      } else if (cmd.op == "aimhorizon" && !cmd.args.empty()) {
+        // Frame the sky over the local horizon: look along the galactic
+        // plane, dipped <deg> toward the planet — the limb sits at the
+        // bottom of frame with the band above it (capture composition).
+        const SVec3 up_ref = inf::sim::normalize(player.position());
+        SVec3 tangent = inf::sim::cross(SVec3{0.0, 0.0, 1.0}, up_ref);
+        if (inf::sim::length(tangent) < 0.05) {
+          tangent = SVec3{1.0, 0.0, 0.0};
+        }
+        tangent = inf::sim::normalize(tangent);
+        const double dip = arg_d(0) * 3.14159265358979323846 / 180.0;
+        const SVec3 fwd = inf::sim::normalize(tangent * std::cos(dip) -
+                                              up_ref * std::sin(dip));
+        player.set_attitude(fwd, up_ref);
+      } else if (cmd.op == "hud" && !cmd.args.empty()) {
+        script_hud = arg_d(0) != 0.0;  // clean-frame captures
       } else if (cmd.op == "speed" && !cmd.args.empty()) {
         player.set_speed(arg_d(0));
       } else if (cmd.op == "thrust" && !cmd.args.empty()) {
@@ -2160,15 +2221,21 @@ int main(int argc, char** argv) {
           continue;
         }
         const double cos_ang = inf::sim::dot(inf::sim::normalize(cam_fwd_v), dir);
-        // Veil: a modest off-axis floor while the star is UP, but zero
-        // when it is occluded — under HDR auto-exposure (T0018) any fake
-        // luminance floor gets amplified into a full-screen wash on the
-        // night side.
+        // Veil: glare that HUGS the sun direction (pow-5 falloff: full
+        // when staring, ~5% at 60 deg off-axis, zero behind) and zero
+        // when occluded. The old near-flat 0.06+0.94*cos washed the
+        // whole frame beige anywhere in an inner system — jump arrivals
+        // now face the star dead-on, which made that permanent.
         const double veil = closeness * closeness *
-                            (0.06 + 0.94 * std::max(cos_ang, 0.0)) * visibility;
+                            std::pow(std::max(cos_ang, 0.0), 5.0) * visibility;
         if (veil > 0.004) {
           float warm[3] = {star.tint[0], star.tint[1], star.tint[2]};
-          glare_sprite(0.0, 0.0, 3.0 * input.aspect, 3.0, warm, veil * 0.38, 0.55);
+          // Size 2.0 + falloff 3.0 (was 3.0 / 0.55): at 3x screen size
+          // the frame corners sat at r~0.38 of the sprite where any
+          // falloff barely bites, so a sun-stare painted the whole
+          // frame beige. Now the glare grades to ~0.08 at the corners —
+          // hard glow at center, sky survives at the rim.
+          glare_sprite(0.0, 0.0, 2.0 * input.aspect, 2.0, warm, veil * 0.30, 3.0);
         }
         if (visibility <= 0.0 || cos_ang <= 0.0) {
           continue;
@@ -2618,7 +2685,7 @@ int main(int argc, char** argv) {
       target.eta_s = -1.0;
     }
 
-    if (map_phase == MapPhase::Off) {
+    if (map_phase == MapPhase::Off && script_hud) {
       const std::string& location_name =
           anchor->moon >= 0 ? moon_names[static_cast<std::size_t>(anchor->slot)]
                                         [static_cast<std::size_t>(anchor->moon)]

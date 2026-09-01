@@ -67,6 +67,9 @@ BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cel
 // The home galaxy's entity key (galaxy-params/v1 and the octree hang off
 // it).
 core::Key home_galaxy_key(const core::Seed128& seed);
+// The home cluster's entity key (galaxy count/positions hang off it —
+// T0018 WP4 renders the neighbour galaxies from here).
+core::Key home_cluster_key(const core::Seed128& seed);
 // The home galaxy's params, with the morphology FORCED to Barred (T0018,
 // 2026-09-01): every seed's starting sky is a grand-design barred spiral
 // — arms, dust rift, nebulae — instead of gambling the game's signature

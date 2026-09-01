@@ -6,6 +6,8 @@
 #include <cstring>
 #include <thread>
 
+#include "gen/universe.hpp"
+
 namespace inf::app {
 namespace {
 
@@ -274,7 +276,8 @@ V3 face_dir(int face, double u, double v) {
   }
 }
 
-// One bounded deep-sky splat: a nebula or cluster projected to a cone.
+// One bounded deep-sky splat: a nebula, cluster, or (kind 7) an external
+// galaxy impostor projected to a cone.
 struct Splat {
   V3 dir;
   double cos_bound{1.0};   // cone half-angle (with margin)
@@ -283,7 +286,13 @@ struct Splat {
   double intensity{0.0};
   double noise_seed{0.0};
   int kind{0};  // 0 emission, 1 reflection, 2 dark, 3 planetary, 4 snr,
-                // 5 open cluster, 6 globular
+                // 5 open cluster, 6 globular, 7 external galaxy
+  // kind 7 only: apparent ellipse (tangent-plane axes in radians) plus
+  // the bulge tint; `sub` is the GalaxyType.
+  V3 axis_a, axis_b;
+  double inv_ang_a{0.0}, inv_ang_b{0.0};
+  float color2[3]{1.0f, 1.0f, 1.0f};
+  int sub{0};
 };
 
 double splat_profile(const Splat& s, const V3& dir, double x) {
@@ -330,8 +339,8 @@ double splat_profile(const Splat& s, const V3& dir, double x) {
 SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
                             const gen::NebulaField& nebulae,
                             const gen::StarClusterField& clusters,
-                            const gen::Dir3& eye_m, std::uint32_t face_size,
-                            int thread_count) {
+                            const core::Seed128& seed, const SkyView& view,
+                            std::uint32_t face_size, int thread_count) {
   SkyBakeResult result;
   result.face_size = face_size;
   const std::size_t texels = static_cast<std::size_t>(face_size) * face_size;
@@ -340,7 +349,10 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
     result.chroma_rgba[face].assign(texels * 4, 0);
   }
 
+  const gen::Dir3& eye_m = view.eye_m;
   const V3 eye = to_v3(eye_m);
+  const V3 sun_dir = normalize(to_v3(view.sun_dir));
+  const V3 ecl_normal = normalize(to_v3(view.ecliptic_normal));
   const double galaxy_r = density.radius_m().to_double();
 
   // --- gather the bounded splats around the eye -------------------------
@@ -403,6 +415,88 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
       s.intensity = 6.0e-5 * std::sqrt(stars_total);
       s.noise_seed = static_cast<double>(cluster.seed % 8192U);
       splats.push_back(s);
+    }
+
+    // WP4: the home cluster's neighbour galaxies as impostor splats —
+    // type-driven shape from galaxy-params/v1 macros only, no stars, no
+    // structure (the M31 deal: a small, faint, extended smudge, with a
+    // handful of close ones as showpieces). Surface brightness is
+    // distance-independent (extended sources), so intensity is constant
+    // per solid angle and distance only sets the apparent size.
+    {
+      const core::Key cluster_key = gen::home_cluster_key(seed);
+      const std::uint32_t n_gal = gen::galaxy_count_in_cluster(cluster_key);
+      std::vector<Splat> gals;
+      for (std::uint32_t gi = 1; gi < n_gal; ++gi) {
+        const V3 rel = to_v3(gen::galaxy_position_in_cluster(cluster_key, gi)) - eye;
+        const double d = length(rel);
+        if (d <= 0.0) {
+          continue;
+        }
+        const gen::GalaxyParams gp =
+            gen::derive_galaxy_params(gen::galaxy_key_in_cluster(seed, 0, 0, 0, gi));
+        const double radius_m = gp.diameter_ly.to_double() * 0.5 * gen::kLightYearM;
+        const double ang = std::asin(std::min(radius_m / d, 0.85));
+        if (ang < 0.005) {
+          continue;  // sub-texel smudge
+        }
+        Splat s;
+        s.dir = rel * (1.0 / d);
+        s.kind = 7;
+        s.sub = static_cast<int>(gp.type);
+        s.ang_radius = ang;
+        s.cos_bound = std::cos(std::min(ang * 1.4 + 0.01, 1.5));
+        // Deterministic random orientation from the index.
+        std::uint64_t h = (static_cast<std::uint64_t>(gi) + 0x9e3779b97f4a7c15ULL);
+        h ^= h >> 30;
+        h *= 0xbf58476d1ce4e5b9ULL;
+        h ^= h >> 27;
+        const double az = static_cast<double>(h & 0xFFFFU) / 65536.0 * 6.2831853;
+        const double cz = static_cast<double>((h >> 16) & 0xFFFFU) / 32768.0 - 1.0;
+        const double sz = std::sqrt(std::max(0.0, 1.0 - cz * cz));
+        const V3 spin{sz * std::cos(az), sz * std::sin(az), cz};
+        V3 a{spin.y * s.dir.z - spin.z * s.dir.y, spin.z * s.dir.x - spin.x * s.dir.z,
+             spin.x * s.dir.y - spin.y * s.dir.x};
+        const double al = length(a);
+        a = al > 1.0e-6 ? a * (1.0 / al) : V3{-s.dir.y, s.dir.x, 0.0};
+        const V3 b{s.dir.y * a.z - s.dir.z * a.y, s.dir.z * a.x - s.dir.x * a.z,
+                   s.dir.x * a.y - s.dir.y * a.x};
+        // Apparent minor axis: discs flatten with inclination (|spin.dir|
+        // face-on = round), ellipticals keep their intrinsic c/a.
+        const double face_on = std::abs(dot(spin, s.dir));
+        double flat = 0.18 + 0.82 * face_on;
+        if (gp.type == gen::GalaxyType::Elliptical) {
+          flat = gp.ellipticity.to_double();
+        }
+        s.axis_a = a;
+        s.axis_b = b;
+        s.inv_ang_a = 1.0 / ang;
+        s.inv_ang_b = 1.0 / (ang * std::max(flat, 0.12));
+        // Disc tint cool, bulge/elliptical tint warm; irregulars blue.
+        const bool disc_type = gp.type == gen::GalaxyType::Spiral ||
+                               gp.type == gen::GalaxyType::Barred ||
+                               gp.type == gen::GalaxyType::Lenticular;
+        if (gp.type == gen::GalaxyType::Elliptical) {
+          s.color[0] = 1.0f; s.color[1] = 0.84f; s.color[2] = 0.66f;
+        } else if (disc_type) {
+          s.color[0] = 0.78f; s.color[1] = 0.85f; s.color[2] = 1.0f;
+        } else {
+          s.color[0] = 0.70f; s.color[1] = 0.82f; s.color[2] = 1.0f;
+        }
+        s.color2[0] = 1.0f; s.color2[1] = 0.87f; s.color2[2] = 0.70f;
+        s.intensity = 2.2e-3;
+        s.noise_seed = static_cast<double>(h % 8192U);
+        gals.push_back(s);
+      }
+      // Cap the impostor count on apparent size — the far tail is texel
+      // noise that costs cone tests without reading as anything.
+      std::sort(gals.begin(), gals.end(), [](const Splat& x, const Splat& y) {
+        return x.ang_radius > y.ang_radius;
+      });
+      if (gals.size() > 48) {
+        gals.resize(48);
+      }
+      splats.insert(splats.end(), gals.begin(), gals.end());
     }
   }
 
@@ -536,6 +630,38 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
           if (cos_a < s.cos_bound) {
             continue;
           }
+          if (s.kind == 7) {
+            // External galaxy (WP4): apparent ellipse in the tangent
+            // plane (small-angle projection), exponential disc + compact
+            // warm bulge; ellipticals get a rounder Sersic-ish falloff,
+            // irregulars a clumpy blob. No stars, no arms — an impostor.
+            const V3 off{dir.x - s.dir.x * cos_a, dir.y - s.dir.y * cos_a,
+                         dir.z - s.dir.z * cos_a};
+            const double xa = dot(off, s.axis_a) * s.inv_ang_a;
+            const double xb = dot(off, s.axis_b) * s.inv_ang_b;
+            const double e2 = xa * xa + xb * xb;
+            if (e2 > 2.0) {
+              continue;
+            }
+            const double e = std::sqrt(e2);
+            double body = 0.0;
+            double bulge = 0.0;
+            if (s.sub == static_cast<int>(gen::GalaxyType::Elliptical)) {
+              body = std::exp(-std::pow(e, 0.7) * 3.4);
+            } else if (s.sub == static_cast<int>(gen::GalaxyType::Irregular)) {
+              const V3 np = dir * (10.0 * s.inv_ang_a * 0.35) +
+                            V3{s.noise_seed, s.noise_seed * 1.7, s.noise_seed * 0.6};
+              body = std::exp(-e2 * 3.0) * (0.35 + 1.5 * fbm(np, 3));
+            } else {
+              body = std::exp(-e * 2.8);
+              bulge = std::exp(-e2 * 16.0) * 1.4;
+            }
+            for (int c = 0; c < 3; ++c) {
+              emission[c] +=
+                  s.intensity * (body * s.color[c] + bulge * s.color2[c]);
+            }
+            continue;
+          }
           const double ang = std::acos(std::min(cos_a, 1.0));
           const double xr = ang / s.ang_radius;
           if (xr > 1.15) {
@@ -553,6 +679,24 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
               emission[c] += s.intensity * profile * s.color[c];
             }
           }
+        }
+        // WP5: zodiacal light — sunlight on interplanetary dust, a warm
+        // wedge hugging the arrival planet's orbital plane, brightening
+        // toward the sun — and the gegenschein, its faint antisolar
+        // counterglow. Both analytic in (elongation, ecliptic latitude).
+        {
+          const double cs = dot(dir, sun_dir);
+          const double sin_beta = std::abs(dot(dir, ecl_normal));
+          const double plane = std::exp(-5.0 * sin_beta);
+          const double g = 0.5 * (1.0 + cs);
+          const double zodiacal =
+              5.0e-3 * (0.12 * g * g + 1.6 * std::pow(g, 7.0)) * plane;
+          const double gegenschein =
+              4.0e-4 * std::pow(std::max(-cs, 0.0), 14.0) * plane;
+          const double glow = zodiacal + gegenschein;
+          emission[0] += glow * 1.00;
+          emission[1] += glow * 0.94;
+          emission[2] += glow * 0.82;
         }
         // Contrast curve pivoted at the band reference (chroma
         // preserved): the model's off-plane/in-plane column ratio is

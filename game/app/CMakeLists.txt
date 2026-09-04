@@ -14,3 +14,12 @@ add_custom_command(TARGET game_app POST_BUILD
 if(NOT WIN32)
   set_target_properties(game_app PROPERTIES BUILD_RPATH "$ORIGIN;@loader_path")
 endif()
+
+# Standalone macOS distribution: Infinity.app + drag-to-Applications DMG
+# (see ci/package-mac.sh — runs its own Release build in build-dist/).
+if(APPLE)
+  add_custom_target(package-mac
+    COMMAND bash ${CMAKE_SOURCE_DIR}/ci/package-mac.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    USES_TERMINAL)
+endif()

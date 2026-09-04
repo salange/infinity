@@ -281,10 +281,24 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
       cell.is_home() ? std::string()
                      : "-g" + std::to_string(cell.level) + "_" + std::to_string(cell.x) +
                            "_" + std::to_string(cell.y) + "_" + std::to_string(cell.z);
+  // Default edits location: a per-user data dir, not the CWD — an app
+  // bundle launched from the Finder runs with cwd "/" where writes fail
+  // silently. --diff still overrides with an explicit path.
+  std::string diff_dir;
+#if defined(__APPLE__)
+  if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+    diff_dir = std::string(home) + "/Library/Application Support/Infinity/";
+    std::error_code ec;
+    std::filesystem::create_directories(diff_dir, ec);
+    if (ec) {
+      diff_dir.clear();  // fall back to the CWD (dev shells)
+    }
+  }
+#endif
   anchor->diff_path =
       diff_override != nullptr
           ? std::string(diff_override)
-          : std::string("infinity-") + seed_text + cell_tag + "-s" + std::to_string(slot) +
+          : diff_dir + "infinity-" + seed_text + cell_tag + "-s" + std::to_string(slot) +
                 (moon >= 0 ? "m" + std::to_string(moon) : std::string()) + ".edits";
   anchor->edits = std::make_unique<inf::world::CsgEditStore>();
   if (anchor->edits->load(anchor->diff_path)) {

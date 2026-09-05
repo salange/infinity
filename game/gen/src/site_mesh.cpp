@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "core/det/mix.hpp"
+#include "core/det/trig.hpp"
 #include "gen/material.hpp"
 #include "gen/names.hpp"
 
@@ -14,6 +15,36 @@ namespace {
 // Nearest-LOD terminal ranges from the focus (site-local metres).
 constexpr double kPartsRangeM = 350.0;
 constexpr double kGrammarRangeM = 900.0;
+constexpr double kMidFocusM = 4000.0;  // big sites at the near LOD: mid content out to here
+
+// The lot lattice of grid-like families is rotated by the site axis
+// (sites.cpp lots_in_block): block indices live in LATTICE space, lot
+// footprints and the focus in site-local (world) space.
+struct Lattice {
+  bool rotated{false};
+  double ca{1.0};
+  double sa{0.0};
+  void to_world(double lx, double ly, double* wx, double* wy) const {
+    *wx = rotated ? lx * ca - ly * sa : lx;
+    *wy = rotated ? lx * sa + ly * ca : ly;
+  }
+  void to_lattice(double wx, double wy, double* lx, double* ly) const {
+    *lx = rotated ? wx * ca + wy * sa : wx;
+    *ly = rotated ? -wx * sa + wy * ca : wy;
+  }
+};
+Lattice lattice_of(const Site& site) {
+  Lattice l;
+  l.rotated = site.family == LayoutFamily::Grid || site.family == LayoutFamily::Linear ||
+              site.family == LayoutFamily::Terraced || site.family == LayoutFamily::Lattice;
+  if (l.rotated) {
+    det::Real sn(0.0), cs(0.0);
+    det::fast_sin_cos(det::Real(site.axis_rad), &sn, &cs);
+    l.ca = cs.to_double();
+    l.sa = sn.to_double();
+  }
+  return l;
+}
 
 // Vertex writer: position (site-local metres, planet-local later via the
 // origin), normal, palette weights (one-hot over the site palette).
@@ -88,6 +119,10 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
     return field.elevation_m(site.frame.to_dir(x, y)).to_double() - site.datum_m;
   };
   const int reach = static_cast<int>(std::ceil(site.radius_m / site.block_m)) + 1;
+  const Lattice lattice = lattice_of(site);
+  double focus_lx = 0.0;
+  double focus_ly = 0.0;
+  lattice.to_lattice(params.focus_x, params.focus_y, &focus_lx, &focus_ly);
   // Superblock masses (the far LOD, and the base of the mid LOD on big
   // sites): k x k blocks merged into one box whose height is the ring's
   // typical lot height — no lot generation at all, so a 12 km capital
@@ -109,21 +144,24 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
     out.triangle_count += building.triangle_count;
     ++out.lot_count;
   };
-  const auto superblocks = [&](int k, bool landmarks_only) {
+  const auto superblocks = [&](int k, bool landmarks_only, double exclude_r) {
     const int sreach = (reach + k - 1) / k + 1;
     for (int sy = -sreach; sy <= sreach; ++sy) {
       for (int sx = -sreach; sx <= sreach; ++sx) {
-        const double x0 = sx * k * site.block_m;
+        const double x0 = sx * k * site.block_m;  // lattice space
         const double y0 = sy * k * site.block_m;
-        const double cx = x0 + 0.5 * k * site.block_m;
-        const double cy = y0 + 0.5 * k * site.block_m;
-        const double dist = std::sqrt(cx * cx + cy * cy);
+        const double lcx = x0 + 0.5 * k * site.block_m;
+        const double lcy = y0 + 0.5 * k * site.block_m;
+        const double dist = std::sqrt(lcx * lcx + lcy * lcy);
         if (dist > site.radius_m * 0.97) continue;
-        if (params.focus_radius_m > 0.0) {
-          const double fx = cx - params.focus_x;
-          const double fy = cy - params.focus_y;
-          if (fx * fx + fy * fy <= params.focus_radius_m * params.focus_radius_m) continue;  // the focus builds its own
+        if (exclude_r > 0.0) {
+          const double fx = lcx - focus_lx;
+          const double fy = lcy - focus_ly;
+          if (fx * fx + fy * fy <= exclude_r * exclude_r) continue;  // the focus builds its own
         }
+        double cx = 0.0;
+        double cy = 0.0;
+        lattice.to_world(lcx, lcy, &cx, &cy);
         // Typical lot height of the ring that created this ground.
         const int ring = std::min(7, Site::ring_of(dist));
         const double r_out = ring_radius_m(ring);
@@ -147,10 +185,15 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
         // Merged superblocks stand for whole neighbourhoods: no street
         // gap between them (the gaps read as a waffle from 20 km).
         const double inset = k > 1 ? 0.0 : 0.5 * site.street_m;
-        block.footprint[0][0] = static_cast<float>(x0 + inset); block.footprint[0][1] = static_cast<float>(y0 + inset);
-        block.footprint[1][0] = static_cast<float>(x0 + k * site.block_m - inset); block.footprint[1][1] = static_cast<float>(y0 + inset);
-        block.footprint[2][0] = static_cast<float>(x0 + k * site.block_m - inset); block.footprint[2][1] = static_cast<float>(y0 + k * site.block_m - inset);
-        block.footprint[3][0] = static_cast<float>(x0 + inset); block.footprint[3][1] = static_cast<float>(y0 + k * site.block_m - inset);
+        const double lxs[4] = {x0 + inset, x0 + k * site.block_m - inset, x0 + k * site.block_m - inset, x0 + inset};
+        const double lys[4] = {y0 + inset, y0 + inset, y0 + k * site.block_m - inset, y0 + k * site.block_m - inset};
+        for (int c = 0; c < 4; ++c) {
+          double wx = 0.0;
+          double wy = 0.0;
+          lattice.to_world(lxs[c], lys[c], &wx, &wy);
+          block.footprint[c][0] = static_cast<float>(wx);
+          block.footprint[c][1] = static_cast<float>(wy);
+        }
         block.height_budget_m = static_cast<float>(height);
         block.style = site.style;
         block.style.construction = 1.0f;
@@ -164,27 +207,33 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
     }
   };
   if (params.detail >= 2) {
-    superblocks(std::max(1, merge), true);
+    superblocks(std::max(1, merge), true, 0.0);
     return out;
   }
-  const bool big = site.tier >= 6;  // Capital/Metropolis: block masses outside the focus; a City gets every lot as a mass
-  if (params.detail == 1 && big) {
-    superblocks(merge_mid, false);  // outside the focus (or everywhere without one)
-  } else if (params.detail == 0 && params.focus_radius_m > 0.0) {
-    superblocks(merge, false);  // the far ground beyond the focus
+  // Capital/Metropolis: block masses outside the focus (a per-lot pass
+  // over 100k+ lots is seconds); a City and smaller gets every lot.
+  const bool big = site.tier >= 6;
+  // The near LOD is the mid LOD plus parts/grammar inside its focus, so
+  // nothing changes outside the focus when the player comes close. On
+  // big sites the mid content itself is bounded by a wider radius, with
+  // superblocks beyond.
+  const double mid_radius = big ? (params.detail == 0 ? kMidFocusM : params.focus_radius_m) : 0.0;
+  if (big) {
+    superblocks(merge_mid, false, mid_radius);  // beyond the mid radius (all of it without a focus)
   }
   std::vector<Lot> lots;
   for (int by = -reach; by <= reach; ++by) {
     for (int bx = -reach; bx <= reach; ++bx) {
-      if (params.focus_radius_m > 0.0) {
-        const double cx = (bx + 0.5) * site.block_m - params.focus_x;
-        const double cy = (by + 0.5) * site.block_m - params.focus_y;
-        if (cx * cx + cy * cy > params.focus_radius_m * params.focus_radius_m) {
-          continue;
-        }
-      } else if (params.detail == 1 && big) {
-        continue;  // no focus: the superblocks carry the whole site
+      const double lcx = (bx + 0.5) * site.block_m - focus_lx;  // lattice space
+      const double lcy = (by + 0.5) * site.block_m - focus_ly;
+      const double fd2 = lcx * lcx + lcy * lcy;
+      const bool in_focus = params.focus_radius_m > 0.0 && fd2 <= params.focus_radius_m * params.focus_radius_m;
+      if (big) {
+        if (mid_radius <= 0.0) continue;          // superblocks carry it
+        if (fd2 > mid_radius * mid_radius) continue;  // beyond the mid radius: superblocks
       }
+      // Near methods only inside the focus; the mid content elsewhere.
+      const bool near_here = params.detail == 0 && (params.focus_radius_m <= 0.0 || in_focus);
       lots.clear();
       sites.lots_in_block(site, bx, by, &lots);
       if (lots.empty()) {
@@ -193,9 +242,9 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
       double mean_h = 0.0;
       for (const Lot& lot : lots) mean_h += lot.height_budget_m;
       mean_h /= static_cast<double>(lots.size());
-      // Mid LOD inside the focus of a big site: the block mass plus the
-      // lots that rise above it.
-      if (params.detail == 1 && big) {
+      // Mid content on a big site: the block mass plus the lots that
+      // rise above it.
+      if (!near_here && big) {
         double minx = 1e300, miny = 1e300, maxx = -1e300, maxy = -1e300, top = 0.0;
         for (const Lot& lot : lots) {
           for (int k = 0; k < lot.vertex_count; ++k) {
@@ -222,7 +271,7 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
       for (const Lot& lot : lots) {
         const double h_full = static_cast<double>(lot.height_budget_m);
         const bool is_block = lot.id == 0xB10C0000u;
-        if (params.detail == 1 && big && !is_block && h_full < 1.5 * mean_h) {
+        if (!near_here && big && !is_block && h_full < 1.5 * mean_h) {
           continue;  // the block mass carries the rest
         }
         double cx = 0.0;
@@ -241,7 +290,7 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
         BuildingParams bp;
         if (is_block) {
           bp.method = BuildingMethod::Mass;
-        } else if (params.detail == 1) {
+        } else if (!near_here) {
           bp.method = (big || h_full >= 1.5 * mean_h) ? BuildingMethod::Grammar : BuildingMethod::Mass;
         } else {
           const double fdx = cx - params.focus_x;

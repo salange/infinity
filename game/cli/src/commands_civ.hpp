@@ -18,8 +18,11 @@ int cmd_civ_state(const core::Seed128& seed, const long long* cell_xyzl, const c
 int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text, int min_level = 0);
 int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot, int moon,
                 const char* time_text, const char* out_path);
+// at_m: planet-local metres of a point; picks the site under it (or the
+// nearest) and reports what the app would build around that point.
 int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot, int moon,
-                 const char* tier_text, int site_index, const char* time_text, const char* out_path);
+                 const char* tier_text, int site_index, const char* time_text, const char* out_path,
+                 const double* at_m = nullptr);
 int cmd_hash_civ();
 
 }  // namespace inf::cli

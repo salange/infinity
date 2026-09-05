@@ -12,6 +12,8 @@
 
 #include "core/time/world_clock.hpp"
 #include "gen/civ_census.hpp"
+#include "core/det/trig.hpp"
+#include "gen/names.hpp"
 #include "gen/ecumenopolis.hpp"
 #include "gen/planet_texture.hpp"
 #include "gen/civ_time.hpp"
@@ -528,7 +530,7 @@ int describe_ecumenopolis(const core::Key& entity, gen::TerrainField& field, con
 
 int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot_arg, int moon_arg,
                  const char* tier_text, int site_index, const char* time_text,
-                 const char* out_path) {
+                 const char* out_path, const double* at_m) {
   const core::Key galaxy_key = gen::home_galaxy_key(seed);
   const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
   const gen::CivilizationParams civ = gen::derive_civilization(galaxy_key, galaxy, true);
@@ -592,7 +594,66 @@ int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot
     }
   }
   const gen::Site* site = nullptr;
-  if (site_index >= 0 && site_index < static_cast<int>(sites.sites().size())) {
+  double at_x = 0.0;
+  double at_y = 0.0;
+  if (at_m != nullptr) {
+    // The site under (or nearest to) a planet-local point.
+    const double len = std::sqrt(at_m[0] * at_m[0] + at_m[1] * at_m[1] + at_m[2] * at_m[2]);
+    const gen::Dir3 dir{det::Real(at_m[0] / len), det::Real(at_m[1] / len), det::Real(at_m[2] / len)};
+    double best = 1e300;
+    for (const gen::Site& s : sites.sites()) {
+      double x = 0.0;
+      double y = 0.0;
+      s.frame.to_local(dir, &x, &y);
+      const double d = std::sqrt(x * x + y * y);
+      if (d < best) {
+        best = d;
+        site = &s;
+        at_x = x;
+        at_y = y;
+      }
+    }
+    if (site != nullptr) {
+      std::printf("point at %.1f m from the centre of site %u (%s, radius %.0f m), site-local (%.1f, %.1f), altitude above nominal %.1f m, terrain %.1f m\n",
+                  best, site->province, gen::to_string(static_cast<gen::SettlementTier>(site->tier)), site->radius_m,
+                  at_x, at_y, len - field.planet().radius_m.to_double(), field.elevation_m(dir).to_double());
+      gen::SiteMeshParams mp;
+      mp.detail = 0;
+      mp.focus_x = at_x;
+      mp.focus_y = at_y;
+      mp.focus_radius_m = 1200.0;
+      const gen::SiteMesh mesh = gen::build_site_mesh(sites, *site, field, mp);
+      std::vector<gen::Lot> lots;
+      // Block under the point: lattice space (rotated by the site axis for
+      // grid-like families).
+      double lx = at_x;
+      double ly = at_y;
+      if (site->family == gen::LayoutFamily::Grid || site->family == gen::LayoutFamily::Linear ||
+          site->family == gen::LayoutFamily::Terraced || site->family == gen::LayoutFamily::Lattice) {
+        det::Real sn(0.0), cs(0.0);
+        det::fast_sin_cos(det::Real(site->axis_rad), &sn, &cs);
+        lx = at_x * cs.to_double() + at_y * sn.to_double();
+        ly = -at_x * sn.to_double() + at_y * cs.to_double();
+      }
+      const int bx = static_cast<int>(std::floor(lx / site->block_m));
+      const int by = static_cast<int>(std::floor(ly / site->block_m));
+      sites.lots_in_block(*site, bx, by, &lots);
+      std::printf("near LOD focused there: %u lots/masses, %u triangles; the block under the point (%d, %d) holds %zu lots\n",
+                  mesh.lot_count, mesh.triangle_count, bx, by, lots.size());
+      for (const gen::Lot& lot : lots) {
+        double cx = 0.0, cy = 0.0;
+        for (int k = 0; k < lot.vertex_count; ++k) { cx += lot.footprint[k][0]; cy += lot.footprint[k][1]; }
+        cx /= lot.vertex_count; cy /= lot.vertex_count;
+        gen::BuildingParams bp;
+        const core::Key key = core::derive_child(core::derive_named(site->key, gen::name::BuildingsV1), gen::kind::Lot, static_cast<std::int64_t>(lot.id));
+        const gen::BuildingMesh a = gen::build_building(lot, key, bp);
+        bp.method = gen::BuildingMethod::Mass;
+        const gen::BuildingMesh m = gen::build_building(lot, key, bp);
+        std::printf("  lot %u at (%.0f, %.0f) %s h %.1f construction %.2f: parts %u tris, mass %u tris\n", lot.id, cx, cy,
+                    gen::to_string(lot.usage), lot.height_budget_m, lot.style.construction, a.triangle_count, m.triangle_count);
+      }
+    }
+  } else if (site_index >= 0 && site_index < static_cast<int>(sites.sites().size())) {
     site = &sites.sites()[static_cast<std::size_t>(site_index)];
   } else {
     // First site of the tier by rank; a site still filling its ring is
@@ -611,6 +672,20 @@ int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot
   }
   std::printf("body slot %d%s %s L%d: %zu sites; plan %s\n", body.slot, body.moon >= 0 ? " (moon)" : "",
               gen::to_string(params.type), state.level, sites.sites().size(), plan.to_json().c_str());
+  {
+    const gen::PlanetTexture bake = gen::bake_planet_texture(field, 64, nullptr);
+    std::size_t texels = 0;
+    std::size_t lit = 0;
+    std::size_t urban = 0;
+    for (const auto& face : bake.faces) {
+      for (std::size_t i = 3; i < face.rgba.size(); i += 4) {
+        ++texels;
+        lit += face.rgba[i] > 8 ? 1 : 0;
+      }
+    }
+    (void)urban;
+    std::printf("bake 64: night alpha > 0.03 on %.2f%% of %zu texels\n", texels > 0 ? 100.0 * lit / texels : 0.0, texels);
+  }
   int per_tier[9] = {};
   for (const gen::Site& s : sites.sites()) ++per_tier[s.tier];
   std::printf("sites by tier:");

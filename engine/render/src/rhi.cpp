@@ -576,7 +576,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Settlement lights (T0020): the bake's alpha is the night-light
     // mask; warm sodium glow that fades in as the sun sets over it.
     let night6 = 1.0 - smoothstep(-0.05, 0.12, dot(n, light));
-    c6 += vec3<f32>(1.0, 0.72, 0.38) * alb4.a * night6 * 0.5;
+    c6 += vec3<f32>(1.0, 0.72, 0.38) * alb4.a * night6 * 0.06;
     return vec4<f32>(c6, 1.0);
   }
   if (mode == 1u) {
@@ -724,7 +724,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       rough = clamp(s1.rough * pw.x + s2.rough * pw.y, 0.05, 1.0);
       let aux_v = s1.aux * pw.x + s2.aux * pw.y;
       if (emis_amt > 0.0) {
-        emissive = base * 0.0 + aux_v * emis_amt * (s1.albedo * pw.x + s2.albedo * pw.y) * 3.0;
+        // Lit windows and glowing crusts: a night-light level (a lit
+        // window is far dimmer than sunlit ground), fading in as the sun
+        // sets over the planet surface below the fragment.
+        let dusk = 1.0 - smoothstep(-0.05, 0.15, dot(n_geo, light));
+        emissive = aux_v * emis_amt * (s1.albedo * pw.x + s2.albedo * pw.y) * (0.003 + 0.03 * dusk);
       } else {
         ao = 0.35 + 0.65 * aux_v;
       }
@@ -768,7 +772,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       // fading in as the sun sets over it.
       let night_far = 1.0 - smoothstep(-0.05, 0.12, dot(n_geo, light));
       emissive = emissive * (1.0 - k_far) +
-                 vec3<f32>(1.0, 0.72, 0.38) * far4.a * night_far * k_far * 0.5;
+                 vec3<f32>(1.0, 0.72, 0.38) * far4.a * night_far * k_far * 0.06;
       rough = mix(rough, 0.9, k_far);
     }
   }

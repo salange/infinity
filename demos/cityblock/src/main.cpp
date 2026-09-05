@@ -36,6 +36,12 @@ struct Args {
   int debug{0};
   float ev{0.0f};
   std::uint32_t tex_size{1024};
+  bool vsync{true};
+  int rings{2};
+  int bench{0};
+  int context_detail{-1};
+  bool no_ssao{false};
+  bool no_shadows{false};
 };
 
 bool parse_vec3(const char* s, cb::Vec3* v) {
@@ -69,6 +75,12 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--debug")) a.debug = std::atoi(next("--debug"));
     else if (!std::strcmp(argv[i], "--ev")) a.ev = static_cast<float>(std::atof(next("--ev")));
     else if (!std::strcmp(argv[i], "--tex-size")) a.tex_size = static_cast<std::uint32_t>(std::atoi(next("--tex-size")));
+    else if (!std::strcmp(argv[i], "--no-vsync")) a.vsync = false;
+    else if (!std::strcmp(argv[i], "--no-ssao")) a.no_ssao = true;
+    else if (!std::strcmp(argv[i], "--no-shadows")) a.no_shadows = true;
+    else if (!std::strcmp(argv[i], "--rings")) a.rings = std::atoi(next("--rings"));
+    else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
+    else if (!std::strcmp(argv[i], "--context-detail")) a.context_detail = std::atoi(next("--context-detail"));
     else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
       std::printf("cityblock [--seed S] [--width W --height H] [--hidden] [--capture out.png --frames N]\n"
                   "          [--sky day|night|sunset|file.hdr] [--sky-yaw deg] [--night] [--assets dir]\n"
@@ -122,6 +134,7 @@ int main(int argc, char** argv) {
   glfwSetMouseButtonCallback(window, mouse_cb);
 
   cb::Gpu gpu;
+  gpu.vsync = args.vsync;
   std::string error;
   if (!cb::Gpu::create(window, &gpu, &error)) {
     std::fprintf(stderr, "GPU init failed: %s\n", error.c_str());
@@ -136,6 +149,8 @@ int main(int argc, char** argv) {
   cb::SceneParams sp;
   sp.seed = args.seed;
   sp.context_buildings = !args.no_context;
+  sp.context_rings = args.rings;
+  sp.context_detail = args.context_detail;
   cb::Scene scene = cb::generate_scene(sp);
   std::printf("  scene: %zu opaque + %zu foliage triangles, %zu lights (%.2f s)\n", scene.opaque.triangle_count(),
               scene.foliage.triangle_count(), scene.lights.size(), elapsed());
@@ -164,6 +179,8 @@ int main(int argc, char** argv) {
   settings.msaa = args.msaa;
   settings.debug_view = args.debug;
   settings.exposure_bias = args.ev;
+  settings.ssao = !args.no_ssao;
+  settings.shadows = !args.no_shadows;
   cb::Renderer renderer;
   if (!renderer.init(&gpu, shaders, settings, &error)) {
     std::fprintf(stderr, "renderer init failed: %s\n", error.c_str());
@@ -178,6 +195,24 @@ int main(int argc, char** argv) {
   cam.position = args.have_cam ? args.cam_pos : scene.camera_position;
   cam.look_at_point(args.have_cam ? args.cam_target : scene.camera_target);
 
+  if (args.bench > 0) {
+    // Offscreen benchmark: render N frames without presenting, wait for the
+    // GPU, report the average. Independent of vsync and window visibility.
+    for (int i = 0; i < 5; ++i) renderer.render(cam, 0.0f, nullptr);
+    gpu.poll(true);
+    const double b0 = elapsed();
+    for (int i = 0; i < args.bench; ++i) renderer.render(cam, static_cast<float>(i) * 0.016f, nullptr);
+    gpu.poll(true);
+    const double b1 = elapsed();
+    std::printf("  bench: %d frames, %.2f ms/frame, %u triangles, %ux%u, msaa %u, ssao %d, shadows %d\n", args.bench,
+                (b1 - b0) * 1000.0 / args.bench, renderer.triangles(), gpu.width, gpu.height, settings.msaa,
+                settings.ssao ? 1 : 0, settings.shadows ? 1 : 0);
+    renderer.shutdown();
+    gpu.destroy();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+  }
   double last = elapsed();
   const double fps_first = last;
   int frame = 0;

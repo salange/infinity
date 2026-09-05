@@ -55,6 +55,8 @@ struct Scene {
 struct SceneParams {
   std::string seed{"83"};
   bool context_buildings{true};
+  int context_rings{2};  // rings of context towers around the block
+  int context_detail{-1};  // -1 = by ring (1 near, 0 far); 0..2 forces one level
   int detail{2};  // 0 coarse … 2 full
 };
 

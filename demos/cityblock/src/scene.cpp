@@ -498,19 +498,20 @@ namespace {
 
 // Context: parametric variants of the hero families around the block, at
 // reduced detail, so the city outside the centre shares the vocabulary.
-void gen_context(Scene& sc, Rng rng, const BlockDims& b) {
+void gen_context(Scene& sc, Rng rng, const BlockDims& b, int rings, int force_detail) {
   const float start_x = b.hx + b.road_w + b.walk_w + 30.0f;
   const float start_z = b.hz + b.road_w + b.walk_w + 30.0f;
   struct Slot { Vec2 c; float half; int detail; };
   std::vector<Slot> slots;
-  for (int ring = 0; ring < 2; ++ring) {
+  for (int ring = 0; ring < rings; ++ring) {
     const float rx = start_x + 120.0f * static_cast<float>(ring), rz = start_z + 120.0f * static_cast<float>(ring);
-    const int detail = ring == 0 ? 1 : 0;
-    for (int i = -2; i <= 2; ++i) {
+    const int detail = force_detail >= 0 ? force_detail : (ring == 0 ? 1 : 0);
+    const int n = 2 + ring;
+    for (int i = -n; i <= n; ++i) {
       slots.push_back({Vec2{static_cast<float>(i) * 95.0f, -(rz + 32.0f)}, 15.0f, detail});
       slots.push_back({Vec2{static_cast<float>(i) * 95.0f, (rz + 32.0f)}, 15.0f, detail});
     }
-    for (int i = -1; i <= 1; ++i) {
+    for (int i = -(n - 1); i <= n - 1; ++i) {
       slots.push_back({Vec2{-(rx + 32.0f), static_cast<float>(i) * 95.0f}, 15.0f, detail});
       slots.push_back({Vec2{(rx + 32.0f), static_cast<float>(i) * 95.0f}, 15.0f, detail});
     }
@@ -651,7 +652,7 @@ Scene generate_scene(const SceneParams& params) {
     Emit bol(&sc.opaque, M_SILVER);
     for (float x = -110.0f; x <= 110.0f; x += 4.0f) bol.tube(Vec3{x, 0.14f, -97.0f}, Vec3{x, 1.0f, -97.0f}, 0.09f, 8, true);
   }
-  if (params.context_buildings) gen_context(sc, root.child(30), dims);
+  if (params.context_buildings) gen_context(sc, root.child(30), dims, params.context_rings, params.context_detail);
   sc.camera_position = Vec3{-150.0f, 26.0f, 165.0f};
   sc.camera_target = Vec3{-8.0f, 46.0f, -24.0f};
   return sc;

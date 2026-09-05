@@ -208,7 +208,7 @@ void Gpu::configure_surface() {
   config.width = width;
   config.height = height;
   config.alphaMode = WGPUCompositeAlphaMode_Auto;
-  config.presentMode = WGPUPresentMode_Fifo;
+  config.presentMode = vsync ? WGPUPresentMode_Fifo : WGPUPresentMode_Immediate;
   wgpuSurfaceConfigure(surface, &config);
 }
 

@@ -4,8 +4,10 @@
 #include <cmath>
 #include <cstdio>
 
+#include "city.hpp"
 #include "materials.hpp"
 #include "rng.hpp"
+#include "site.hpp"
 #include "towers.hpp"
 
 namespace cb {
@@ -29,8 +31,10 @@ std::vector<MaterialDesc> make_materials() {
   set(M_LANE_WHITE, "lane_white", {0.85f, 0.85f, 0.82f}, 0.7f, 0, "", 1.0f);
   set(M_LANE_YELLOW, "lane_yellow", {0.85f, 0.65f, 0.15f}, 0.7f, 0, "", 1.0f);
   set(M_CURB, "curb", {0.85f, 0.85f, 0.85f}, 0.75f, 0, "concrete_smooth", 3.0f, kMatTriplanar);
-  set(M_SIDEWALK, "sidewalk", {0.95f, 0.95f, 0.95f}, 0.7f, 0, "paving_slabs", 3.0f, kMatPlanarXZ);
-  set(M_PLAZA, "plaza", {0.82f, 0.82f, 0.80f}, 0.65f, 0, "pavement_light", 4.0f, kMatPlanarXZ);
+  set(M_SIDEWALK, "sidewalk", {0.9f, 0.9f, 0.9f}, 0.85f, 0, "paving_slabs", 3.0f, kMatPlanarXZ);
+  m[M_SIDEWALK].normal_strength = 0.6f;
+  set(M_PLAZA, "plaza", {0.74f, 0.75f, 0.74f}, 0.8f, 0, "pavement_light", 4.0f, kMatPlanarXZ);
+  m[M_PLAZA].normal_strength = 0.6f;
   set(M_TERRAZZO, "terrazzo", {1.0f, 1.0f, 1.0f}, 0.35f, 0, "terrazzo", 3.0f, kMatPlanarXZ);
   set(M_GRASS, "grass", {0.95f, 1.0f, 0.9f}, 0.9f, 0, "grass", 3.0f, kMatPlanarXZ);
   set(M_SOIL, "soil", {0.9f, 0.9f, 0.9f}, 0.95f, 0, "soil", 2.0f, kMatPlanarXZ);
@@ -62,6 +66,20 @@ std::vector<MaterialDesc> make_materials() {
   set(M_GLASS_GREEN, "glass_green", {0.55f, 0.72f, 0.66f}, 0.06f, 0, "", 1.0f, kMatGlass);
   m[M_GLASS_GREEN].tint2 = Vec3{0.58f, 0.76f, 0.68f};
   m[M_GLASS_GREEN].room_w = 3.0f; m[M_GLASS_GREEN].room_h = 3.8f; m[M_GLASS_GREEN].room_d = 6.5f;
+  set(M_HEDGE, "hedge", {0.42f, 0.62f, 0.32f}, 0.92f, 0, "grass", 1.2f, kMatTriplanar);
+  set(M_MARBLE_WHITE, "marble_white", {0.84f, 0.84f, 0.82f}, 0.25f, 0, "marble", 4.0f, kMatTriplanar);
+  set(M_PAD, "pad", {0.82f, 0.82f, 0.81f}, 0.4f, 0, "concrete_white", 6.0f, kMatPlanarXZ);
+  set(M_CHROME, "chrome", {0.95f, 0.95f, 0.95f}, 0.22f, 1.0f, "metal_silver", 1.0f, kMatTriplanar);
+  set(M_WALL_LIGHT, "wall_light", {0.88f, 0.87f, 0.84f}, 0.65f, 0, "concrete_smooth", 3.0f, kMatTriplanar);
+  set(M_PANEL_WARM, "panel_warm", {0.92f, 0.86f, 0.78f}, 0.6f, 0, "concrete_white", 3.0f, kMatTriplanar);
+  set(M_PANEL_DARK, "panel_dark", {0.55f, 0.56f, 0.58f}, 0.6f, 0, "concrete_panels", 3.0f, kMatTriplanar);
+  set(M_ROOF_METAL, "roof_metal", {0.8f, 0.8f, 0.82f}, 0.55f, 1.0f, "metal_silver", 2.0f, kMatTriplanar);
+  set(M_GLASS_STD, "glass_std", {0.6f, 0.72f, 0.82f}, 0.07f, 0, "", 1.0f, kMatGlass);
+  m[M_GLASS_STD].tint2 = Vec3{0.62f, 0.74f, 0.84f};
+  m[M_GLASS_STD].room_w = 3.2f; m[M_GLASS_STD].room_h = 3.6f; m[M_GLASS_STD].room_d = 6.0f; m[M_GLASS_STD].lit_probability = 0.6f;
+  set(M_PAD_LIGHT, "pad_light", {0.9f, 0.9f, 0.9f}, 0.5f, 0, "", 1.0f, kMatEmissive | kMatNightOnly);
+  m[M_PAD_LIGHT].emissive = 4.0f; m[M_PAD_LIGHT].tint2 = Vec3{0.4f, 0.8f, 1.0f};
+  set(M_MEDIAN, "median", {0.9f, 0.9f, 0.88f}, 0.7f, 0, "pavement_light", 3.0f, kMatPlanarXZ);
   set(M_GLASS_BRONZE, "glass_bronze", {0.45f, 0.36f, 0.28f}, 0.06f, 0, "", 1.0f, kMatGlass);
   m[M_GLASS_BRONZE].tint2 = Vec3{0.5f, 0.4f, 0.3f};
   m[M_GLASS_BRONZE].room_w = 4.8f; m[M_GLASS_BRONZE].room_h = 3.8f; m[M_GLASS_BRONZE].room_d = 6.0f;
@@ -100,10 +118,8 @@ Mat glass_for_floor_height(float floor_h) {
   return M_GLASS_CONTEXT;
 }
 
-namespace {
-
 // 5. Folded pavilion: a faceted white shell with triangulated glazing.
-void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
+void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height, float y) {
   Mesh& mesh = sc.opaque;
   std::vector<Vec2> base;
   const int n = 5;
@@ -112,7 +128,7 @@ void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
     const float r = radius * rng.range(0.8f, 1.15f);
     base.push_back(centre + Vec2{std::cos(a), std::sin(a)} * r);
   }
-  const Vec3 apex = P3(centre + Vec2{rng.range(-0.25f, 0.25f), rng.range(-0.25f, 0.25f)} * radius, height);
+  const Vec3 apex = P3(centre + Vec2{rng.range(-0.25f, 0.25f), rng.range(-0.25f, 0.25f)} * radius, y + height);
   Emit shell(&mesh, M_WHITE_METAL);
   Emit glass(&mesh, M_GLASS_CLEAR);
   glass.element_random = rng.next();
@@ -120,7 +136,7 @@ void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
   Emit rib(&mesh, M_WHITE_METAL);
   // each face: triangle (base_i, base_j, apex) subdivided into 4
   for (int i = 0; i < n; ++i) {
-    const Vec3 A = P3(base[i], 0.0f), B = P3(base[(i + 1) % n], 0.0f), C = apex;
+    const Vec3 A = P3(base[i], y), B = P3(base[(i + 1) % n], y), C = apex;
     const Vec3 AB = (A + B) * 0.5f, BC = (B + C) * 0.5f, CA = (C + A) * 0.5f;
     const Vec3 tris[4][3] = {{A, AB, CA}, {AB, B, BC}, {CA, BC, C}, {AB, BC, CA}};
     for (int k = 0; k < 4; ++k) {
@@ -158,20 +174,18 @@ void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
   }
   // glass base band + floor
   Emit floor(&mesh, M_TERRAZZO);
-  floor.polygon(plan_offset(base, 0.5f), 0.03f, true);
+  floor.polygon(plan_offset(base, 0.5f), y + 0.03f, true);
   Emit light(&mesh, M_LOBBY_LIGHT);
-  light.polygon(plan_offset(base, -2.0f), 3.0f, false);
+  light.polygon(plan_offset(base, -2.0f), y + 3.0f, false);
   // plinth
   Emit plinth(&mesh, M_CONCRETE_WHITE);
-  plinth.wall(plan_offset(base, 1.2f), -0.3f, 0.35f, true, true);
-  plinth.polygon(plan_offset(base, 1.2f), 0.35f, true);
+  plinth.wall(plan_offset(base, 1.2f), y - 0.3f, y + 0.35f, true, true);
+  plinth.polygon(plan_offset(base, 1.2f), y + 0.35f, true);
 }
 
 // ---------------------------------------------------------------------------
 // Landscape and street furniture
 // ---------------------------------------------------------------------------
-
-}  // namespace
 
 void gen_tree(Scene& sc, Rng rng, Vec3 base, float height) {
   Mesh& mesh = sc.opaque;
@@ -265,7 +279,7 @@ std::vector<Vec2> ribbon(const std::vector<Vec2>& line, float half_width) {
   return poly;
 }
 
-void gen_park(Scene& sc, Rng rng, Vec2 centre) {
+void gen_park(Scene& sc, Rng rng, Vec2 centre, float y_base) {
   Mesh& mesh = sc.opaque;
   // Terraces: arcs around a sunken plaza, stepping up to the south.
   const Vec2 pc = centre;
@@ -287,11 +301,11 @@ void gen_park(Scene& sc, Rng rng, Vec2 centre) {
     std::vector<Vec2> fan = arc(r0, 40, false);
     fan.push_back(pc);
     if (plan_area(fan) < 0) std::reverse(fan.begin(), fan.end());
-    p.polygon(fan, 0.01f, true);
+    p.polygon(fan, y_base + 0.01f, true);
   }
   for (int k = 0; k < levels; ++k) {
     const float ri = r0 + dr * static_cast<float>(k), ro = ri + dr;
-    const float y = dh * static_cast<float>(k + 1);
+    const float y = y_base + dh * static_cast<float>(k + 1);
     std::vector<Vec2> ring = arc(ro, 48, false);
     std::vector<Vec2> inner = arc(ri, 48, true);
     ring.insert(ring.end(), inner.begin(), inner.end());
@@ -315,13 +329,13 @@ void gen_park(Scene& sc, Rng rng, Vec2 centre) {
   {
     Emit w(&mesh, M_CONCRETE_WHITE);
     const float ro = r0 + dr * levels;
-    w.wall(arc(ro, 48, false), 0.0f, dh * levels + 0.6f, false, true);
-    w.wall(arc(ro, 48, false), dh * levels, dh * levels + 0.6f, false, false);
+    w.wall(arc(ro, 48, false), y_base, y_base + dh * levels + 0.6f, false, true);
+    w.wall(arc(ro, 48, false), y_base + dh * levels, y_base + dh * levels + 0.6f, false, false);
   }
   // Lawn around: handled by the plaza generator (ground). Trees on the terraces.
   for (int k = 0; k < levels; k += 2) {
     const float ri = r0 + dr * static_cast<float>(k) + dr * 0.5f;
-    const float y = dh * static_cast<float>(k + 1);
+    const float y = y_base + dh * static_cast<float>(k + 1);
     for (int i = 0; i < 4 + k; ++i) {
       const float a = a0 + (a1 - a0) * (static_cast<float>(i) + 0.5f) / static_cast<float>(4 + k);
       const Vec2 p = pc + Vec2{std::cos(a), std::sin(a)} * ri;
@@ -332,133 +346,16 @@ void gen_park(Scene& sc, Rng rng, Vec2 centre) {
   for (int i = 0; i < 5; ++i) {
     const float a = a0 + (a1 - a0) * (static_cast<float>(i) + 0.5f) / 5.0f;
     const Vec2 p = pc + Vec2{std::cos(a), std::sin(a)} * (r0 + dr * 1.5f);
-    gen_bench(sc, P3(p, dh * 2.0f), a + kPi * 0.5f);  // along the arc, facing inward
+    gen_bench(sc, P3(p, y_base + dh * 2.0f), a + kPi * 0.5f);  // along the arc, facing inward
   }
   // Water feature in the plaza centre
   {
     Emit rim(&mesh, M_CONCRETE_WHITE);
     const std::vector<Vec2> pool = plan_circle(5.0f, 40, pc + Vec2{0, 4.0f});
-    rim.wall(pool, 0.0f, 0.45f, true, true);
-    rim.polygon(plan_offset(pool, 0.0f), 0.45f, true);
+    rim.wall(pool, y_base, y_base + 0.45f, true, true);
+    rim.polygon(plan_offset(pool, 0.0f), y_base + 0.45f, true);
     Emit w(&mesh, M_WATER);
-    w.polygon(plan_circle(4.6f, 40, pc + Vec2{0, 4.0f}), 0.38f, true);
-  }
-}
-
-// Ground: plaza, sidewalks, streets, curbs, lane paint, context.
-struct BlockDims {
-  float hx{120.0f}, hz{100.0f};  // lot half extents (curb line)
-  float road_w{16.0f};
-  float walk_w{6.0f};
-};
-
-void gen_ground_and_streets(Scene& sc, Rng rng, const BlockDims& b) {
-  Mesh& mesh = sc.opaque;
-  const float curb_h = 0.14f;
-  // Block plaza (raised by the curb) — whole lot area
-  {
-    Emit p(&mesh, M_PLAZA);
-    p.polygon(plan_rect(b.hx, b.hz), curb_h, true);
-    Emit c(&mesh, M_CURB);
-    c.wall(plan_rect(b.hx, b.hz), 0.0f, curb_h, true, true);
-  }
-  // Streets ring: asphalt from the curb to the far sidewalk
-  {
-    Emit a(&mesh, M_ASPHALT);
-    const float ox = b.hx + b.road_w, oz = b.hz + b.road_w;
-    // four rectangles
-    a.polygon(plan_rect(ox, b.road_w * 0.5f, Vec2{0, -(b.hz + b.road_w * 0.5f)}), 0.0f, true);
-    a.polygon(plan_rect(ox, b.road_w * 0.5f, Vec2{0, (b.hz + b.road_w * 0.5f)}), 0.0f, true);
-    a.polygon(plan_rect(b.road_w * 0.5f, oz, Vec2{-(b.hx + b.road_w * 0.5f), 0}), 0.0f, true);
-    a.polygon(plan_rect(b.road_w * 0.5f, oz, Vec2{(b.hx + b.road_w * 0.5f), 0}), 0.0f, true);
-    // far sidewalks and the outer ground
-    Emit s(&mesh, M_SIDEWALK);
-    const float sx = ox + b.walk_w, sz = oz + b.walk_w;
-    s.polygon(plan_rect(sx, b.walk_w * 0.5f, Vec2{0, -(oz + b.walk_w * 0.5f)}), curb_h, true);
-    s.polygon(plan_rect(sx, b.walk_w * 0.5f, Vec2{0, (oz + b.walk_w * 0.5f)}), curb_h, true);
-    s.polygon(plan_rect(b.walk_w * 0.5f, sz, Vec2{-(ox + b.walk_w * 0.5f), 0}), curb_h, true);
-    s.polygon(plan_rect(b.walk_w * 0.5f, sz, Vec2{(ox + b.walk_w * 0.5f), 0}), curb_h, true);
-    Emit c(&mesh, M_CURB);
-    c.wall(plan_rect(ox, oz), 0.0f, curb_h, true, false);
-    // ground beyond (context lots), slightly below the sidewalk
-    Emit g(&mesh, M_ASPHALT);
-    const float far = 1600.0f;
-    g.polygon({{-far, -far}, {far, -far}, {far, -sz}, {-far, -sz}}, -0.02f, true);
-    g.polygon({{-far, sz}, {far, sz}, {far, far}, {-far, far}}, -0.02f, true);
-    g.polygon({{-far, -sz}, {-sx, -sz}, {-sx, sz}, {-far, sz}}, -0.02f, true);
-    g.polygon({{sx, -sz}, {far, -sz}, {far, sz}, {sx, sz}}, -0.02f, true);
-  }
-  // Lane paint: centre double yellow + dashed white per direction; crosswalks
-  {
-    Emit w(&mesh, M_LANE_WHITE);
-    Emit yl(&mesh, M_LANE_YELLOW);
-    const float y = 0.006f;
-    auto road_strip = [&](Vec2 a, Vec2 bpt, float width, Emit& e, bool dashed) {
-      const Vec2 d = normalize(bpt - a);
-      const Vec2 n{d.y, -d.x};
-      const float len = length(bpt - a);
-      if (!dashed) {
-        e.quad_metric(P3(a - n * width * 0.5f, y), P3(bpt - n * width * 0.5f, y), P3(bpt + n * width * 0.5f, y), P3(a + n * width * 0.5f, y));
-        return;
-      }
-      for (float t = 0.0f; t + 3.0f <= len; t += 9.0f) {
-        const Vec2 p0 = a + d * t, p1 = a + d * (t + 3.0f);
-        e.quad_metric(P3(p0 - n * width * 0.5f, y), P3(p1 - n * width * 0.5f, y), P3(p1 + n * width * 0.5f, y), P3(p0 + n * width * 0.5f, y));
-      }
-    };
-    const float ox = b.hx + b.road_w, oz = b.hz + b.road_w;
-    const float cz_n = -(b.hz + b.road_w * 0.5f), cz_s = (b.hz + b.road_w * 0.5f);
-    const float cx_w = -(b.hx + b.road_w * 0.5f), cx_e = (b.hx + b.road_w * 0.5f);
-    for (float cz : {cz_n, cz_s}) {
-      road_strip(Vec2{-ox + 6.0f, cz - 0.12f}, Vec2{ox - 6.0f, cz - 0.12f}, 0.12f, yl, false);
-      road_strip(Vec2{-ox + 6.0f, cz + 0.12f}, Vec2{ox - 6.0f, cz + 0.12f}, 0.12f, yl, false);
-      road_strip(Vec2{-ox + 6.0f, cz - 4.0f}, Vec2{ox - 6.0f, cz - 4.0f}, 0.12f, w, true);
-      road_strip(Vec2{-ox + 6.0f, cz + 4.0f}, Vec2{ox - 6.0f, cz + 4.0f}, 0.12f, w, true);
-    }
-    for (float cx : {cx_w, cx_e}) {
-      road_strip(Vec2{cx - 0.12f, -oz + 6.0f}, Vec2{cx - 0.12f, oz - 6.0f}, 0.12f, yl, false);
-      road_strip(Vec2{cx + 0.12f, -oz + 6.0f}, Vec2{cx + 0.12f, oz - 6.0f}, 0.12f, yl, false);
-      road_strip(Vec2{cx - 4.0f, -oz + 6.0f}, Vec2{cx - 4.0f, oz - 6.0f}, 0.12f, w, true);
-      road_strip(Vec2{cx + 4.0f, -oz + 6.0f}, Vec2{cx + 4.0f, oz - 6.0f}, 0.12f, w, true);
-    }
-    // crosswalks at the block corners (across each road at the ends)
-    auto zebra = [&](Vec2 start, Vec2 dir, Vec2 across, float across_len) {
-      for (int i = 0; i < 12; ++i) {
-        const Vec2 p = start + dir * (0.6f + 1.2f * static_cast<float>(i));
-        const Vec2 q = p + across * across_len;
-        const Vec2 n = dir * 0.3f;
-        w.quad_metric(P3(p - n, y), P3(q - n, y), P3(q + n, y), P3(p + n, y));
-      }
-    };
-    for (float sx : {-1.0f, 1.0f}) {
-      for (float sz : {-1.0f, 1.0f}) {
-        // across the east-west road near the corner
-        zebra(Vec2{sx * (b.hx - 16.0f), sz * b.hz}, Vec2{sx, 0}, Vec2{0, sz}, b.road_w);
-        zebra(Vec2{sx * b.hx, sz * (b.hz - 16.0f)}, Vec2{0, sz}, Vec2{sx, 0}, b.road_w);
-      }
-    }
-  }
-  // Street lamps along the block curb + far sidewalk, trees along the far sidewalk
-  {
-    const float lx = b.hx - 1.2f, lz = b.hz - 1.2f;
-    for (float x = -lx + 12.0f; x < lx; x += 26.0f) {
-      gen_lamp(sc, Vec3{x, curb_h, -lz}, -kPi * 0.5f);
-      gen_lamp(sc, Vec3{x, curb_h, lz}, kPi * 0.5f);
-    }
-    for (float z = -lz + 14.0f; z < lz - 6.0f; z += 26.0f) {
-      gen_lamp(sc, Vec3{-lx, curb_h, z}, kPi);
-      gen_lamp(sc, Vec3{lx, curb_h, z}, 0.0f);
-    }
-    const float tx = b.hx + b.road_w + b.walk_w * 0.55f, tz = b.hz + b.road_w + b.walk_w * 0.55f;
-    int i = 0;
-    for (float x = -tx + 10.0f; x < tx - 6.0f; x += 13.0f, ++i) {
-      gen_tree(sc, rng.child(300 + i), Vec3{x, curb_h, -tz}, rng.range(6.5f, 9.0f));
-      gen_tree(sc, rng.child(400 + i), Vec3{x, curb_h, tz}, rng.range(6.5f, 9.0f));
-    }
-    for (float z = -tz + 10.0f; z < tz - 6.0f; z += 13.0f, ++i) {
-      gen_tree(sc, rng.child(500 + i), Vec3{-tx, curb_h, z}, rng.range(6.5f, 9.0f));
-      gen_tree(sc, rng.child(600 + i), Vec3{tx, curb_h, z}, rng.range(6.5f, 9.0f));
-    }
+    w.polygon(plan_circle(4.6f, 40, pc + Vec2{0, 4.0f}), y_base + 0.38f, true);
   }
 }
 
@@ -494,43 +391,6 @@ void gen_planter(Scene& sc, Rng rng, Vec2 centre, float hx, float hz, float y) {
 }
 
 
-namespace {
-
-// Context: parametric variants of the hero families around the block, at
-// reduced detail, so the city outside the centre shares the vocabulary.
-void gen_context(Scene& sc, Rng rng, const BlockDims& b, int rings, int force_detail) {
-  const float start_x = b.hx + b.road_w + b.walk_w + 30.0f;
-  const float start_z = b.hz + b.road_w + b.walk_w + 30.0f;
-  struct Slot { Vec2 c; float half; int detail; };
-  std::vector<Slot> slots;
-  for (int ring = 0; ring < rings; ++ring) {
-    const float rx = start_x + 120.0f * static_cast<float>(ring), rz = start_z + 120.0f * static_cast<float>(ring);
-    const int detail = force_detail >= 0 ? force_detail : (ring == 0 ? 1 : 0);
-    const int n = 2 + ring;
-    for (int i = -n; i <= n; ++i) {
-      slots.push_back({Vec2{static_cast<float>(i) * 95.0f, -(rz + 32.0f)}, 15.0f, detail});
-      slots.push_back({Vec2{static_cast<float>(i) * 95.0f, (rz + 32.0f)}, 15.0f, detail});
-    }
-    for (int i = -(n - 1); i <= n - 1; ++i) {
-      slots.push_back({Vec2{-(rx + 32.0f), static_cast<float>(i) * 95.0f}, 15.0f, detail});
-      slots.push_back({Vec2{(rx + 32.0f), static_cast<float>(i) * 95.0f}, 15.0f, detail});
-    }
-  }
-  int idx = 0;
-  for (const Slot& s : slots) {
-    Rng r = rng.child(idx++);
-    if (r.chance(0.12f)) continue;
-    if (r.chance(0.18f)) {
-      build_tower_group(sc, r.child(1), s.c, r.range(0, kPi), s.detail);
-      continue;
-    }
-    const int max_floors = length(s.c) > 330.0f ? r.irange(20, 48) : r.irange(10, 30);
-    TowerSpec spec = random_tower(r, s.half * r.range(0.75f, 1.1f), max_floors);
-    build_tower(sc, spec, s.c, 0.0f, r.child(2), s.detail);
-  }
-}
-
-}  // namespace
 
 std::vector<TextureSetSpec> Scene::texture_sets() const {
   std::vector<TextureSetSpec> sets;
@@ -563,98 +423,24 @@ Scene generate_scene(const SceneParams& params) {
   Scene sc;
   sc.materials = make_materials();
   Rng root = root_rng(params.seed);
-  BlockDims dims;
-  gen_ground_and_streets(sc, root.child(1), dims);
-  // Hero lots (x east, z south) — the named families with their parameters.
-  build_tower(sc, spec_diagrid(17.5f, 42), Vec2{-68.0f, -52.0f}, 0.0f, root.child(10), 2);
-  {
-    // twin lens towers on a shared podium
-    const float rot = radians(-12.0f);
-    const Vec2 centre{62.0f, -48.0f};
-    const Vec2 dir{-std::sin(rot), std::cos(rot)};
-    TowerSpec lens = spec_lens(31.0f, 12.0f, 34, rot);
-    lens.base = BaseKind::Lobby; lens.base_floors = 1;
-    lens.random = 0.31f;
-    // shared podium
-    const std::vector<Vec2> pod = plan_transform(plan_rounded_rect(40.0f, 34.0f, 8.0f, 6), centre, rot);
-    Emit g(&sc.opaque, M_GLASS_CLEAR);
-    g.element_random = 0.7f;
-    float u = 0.0f;
-    const std::vector<Vec2> inner = plan_offset(pod, -0.3f);
-    for (std::size_t i = 0; i < inner.size(); ++i) {
-      const std::size_t j = (i + 1) % inner.size();
-      const float w = length(inner[j] - inner[i]);
-      g.quad(P3(inner[j], 0.0f), P3(inner[i], 0.0f), P3(inner[i], 5.5f), P3(inner[j], 5.5f), QuadUV{{u + w, 0}, {u, 0}, {u, 5.5f}, {u + w, 5.5f}});
-      u += w;
-    }
-    slab(sc.opaque, pod, 5.5f, 0.8f, M_CONCRETE_WHITE);
-    Emit deck(&sc.opaque, M_TERRAZZO);
-    deck.polygon(plan_offset(pod, -0.35f), 5.52f, true);
-    parapet(sc.opaque, pod, 5.5f, 1.1f, 0.3f, M_WHITE_METAL);
-    for (int side = 0; side < 2; ++side) {
-      const float sgn = side == 0 ? 1.0f : -1.0f;
-      TowerSpec t = lens;
-      t.random = 0.31f + 0.2f * side;
-      t.floors = side == 0 ? 34 : 30;
-      build_tower(sc, t, centre + dir * (sgn * 15.0f), 5.5f, root.child(11 + side), 2);
-    }
-    // sky bridge
-    const float y = 5.5f + 3.9f * 18.0f;
-    Emit m(&sc.opaque, M_WHITE_METAL);
-    const Vec2 side = perp(dir) * 4.0f;
-    m.box(P3(centre, y - 0.4f), Vec3{4.0f, 0.4f, 9.0f}, Vec3{perp(dir).x, 0, perp(dir).y}, Vec3{0, 1, 0}, Vec3{dir.x, 0, dir.y});
-    m.box(P3(centre, y + 4.2f), Vec3{4.0f, 0.3f, 9.0f}, Vec3{perp(dir).x, 0, perp(dir).y}, Vec3{0, 1, 0}, Vec3{dir.x, 0, dir.y});
-    Emit bg(&sc.opaque, M_GLASS_CLEAR);
-    const Vec2 a = centre - dir * 9.0f, b2 = centre + dir * 9.0f;
-    bg.quad_metric(P3(a + side, y), P3(b2 + side, y), P3(b2 + side, y + 3.9f), P3(a + side, y + 3.9f));
-    bg.quad_metric(P3(b2 - side, y), P3(a - side, y), P3(a - side, y + 3.9f), P3(b2 - side, y + 3.9f));
+  CitySize size = city_size_for(root);
+  if (params.size >= 0) size = static_cast<CitySize>(params.size);
+  const CityStats st = generate_city(sc, root.child(100), size);
+  sc.city_size = to_string(size);
+  sc.city_radius = st.radius;
+  sc.stats_blocks = st.blocks;
+  sc.stats_towers = st.towers;
+  sc.stats_standards = st.standards;
+  sc.stats_plazas = st.plazas;
+  // keep at most 64 point lights: the ones nearest the centre
+  if (sc.lights.size() > 64) {
+    std::sort(sc.lights.begin(), sc.lights.end(), [](const PointLight& a, const PointLight& b) {
+      return a.position.x * a.position.x + a.position.z * a.position.z < b.position.x * b.position.x + b.position.z * b.position.z;
+    });
+    sc.lights.resize(64);
   }
-  build_tower(sc, spec_finweave(17.0f, 26), Vec2{-74.0f, 52.0f}, 0.0f, root.child(12), 2);
-  build_tower(sc, spec_xframe(30.0f, 14.0f, 12), Vec2{72.0f, 58.0f}, 0.0f, root.child(13), 2);
-  gen_pavilion(sc, root.child(14), Vec2{0.0f, 66.0f}, 16.0f, 21.0f);
-  gen_park(sc, root.child(15), Vec2{0.0f, -6.0f});
-  // planters between lots
-  gen_planter(sc, root.child(20), Vec2{-20.0f, -75.0f}, 9.0f, 3.0f, 0.14f);
-  gen_planter(sc, root.child(21), Vec2{-30.0f, -20.0f}, 4.0f, 10.0f, 0.14f);
-  gen_planter(sc, root.child(22), Vec2{30.0f, 10.0f}, 3.0f, 12.0f, 0.14f);
-  gen_planter(sc, root.child(23), Vec2{-40.0f, 88.0f}, 12.0f, 3.0f, 0.14f);
-  gen_planter(sc, root.child(24), Vec2{40.0f, 88.0f}, 10.0f, 3.0f, 0.14f);
-  gen_planter(sc, root.child(25), Vec2{100.0f, 0.0f}, 3.0f, 14.0f, 0.14f);
-  gen_planter(sc, root.child(26), Vec2{-104.0f, 0.0f}, 3.0f, 14.0f, 0.14f);
-  // tree groves on grass circles in the plaza corners, and paths
-  {
-    Rng g = root.child(40);
-    const Vec2 groves[4] = {{-28.0f, -88.0f}, {28.0f, -88.0f}, {-100.0f, -6.0f}, {104.0f, 14.0f}};
-    for (int k = 0; k < 4; ++k) {
-      const float r = g.range(7.0f, 9.5f);
-      Emit lawn(&sc.opaque, M_GRASS);
-      const std::vector<Vec2> circle = plan_circle(r, 40, groves[k]);
-      lawn.polygon(circle, 0.16f, true);
-      Emit rim(&sc.opaque, M_CONCRETE_WHITE);
-      rim.wall(circle, 0.14f, 0.34f, true, true);
-      rim.polygon(plan_circle(r, 40, groves[k]), 0.34f, true);
-      lawn.polygon(plan_circle(r - 0.25f, 40, groves[k]), 0.36f, true);
-      for (int i = 0; i < 5; ++i) {
-        const float a = g.range(0, 2 * kPi), rr = g.range(1.5f, r - 2.0f);
-        gen_tree(sc, g.child(k * 10 + i), P3(groves[k] + Vec2{std::cos(a), std::sin(a)} * rr, 0.36f), g.range(7.5f, 11.0f));
-      }
-      for (int i = 0; i < 3; ++i) {
-        const float a = static_cast<float>(i) / 3.0f * 2.0f * kPi + 0.4f;
-        gen_bench(sc, P3(groves[k] + Vec2{std::cos(a), std::sin(a)} * (r + 1.2f), 0.14f), a + kPi * 0.5f);
-      }
-    }
-    Emit path(&sc.opaque, M_SIDEWALK);
-    const Vec2 corners[4] = {{-118.0f, -98.0f}, {118.0f, -98.0f}, {-118.0f, 98.0f}, {118.0f, 98.0f}};
-    for (int k = 0; k < 4; ++k) {
-      const std::vector<Vec2> ctrl = {corners[k], corners[k] * 0.55f + Vec2{g.range(-15.0f, 15.0f), g.range(-15.0f, 15.0f)}, Vec2{0.0f, -6.0f} + normalize(corners[k]) * 24.0f};
-      path.polygon(ribbon(spline(ctrl, 10), 2.2f), 0.155f, true);
-    }
-    Emit bol(&sc.opaque, M_SILVER);
-    for (float x = -110.0f; x <= 110.0f; x += 4.0f) bol.tube(Vec3{x, 0.14f, -97.0f}, Vec3{x, 1.0f, -97.0f}, 0.09f, 8, true);
-  }
-  if (params.context_buildings) gen_context(sc, root.child(30), dims, params.context_rings, params.context_detail);
-  sc.camera_position = Vec3{-150.0f, 26.0f, 165.0f};
-  sc.camera_target = Vec3{-8.0f, 46.0f, -24.0f};
+  sc.camera_position = Vec3{-st.radius * 0.18f, 28.0f, st.radius * 0.62f};
+  sc.camera_target = Vec3{0.0f, 40.0f, 0.0f};
   return sc;
 }
 

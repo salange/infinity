@@ -241,6 +241,51 @@ void Emit::sphere(Vec3 c, float radius, int rings, int sides) {
   }
 }
 
+void Emit::torus(Vec3 c, Vec3 axis, float R, float r, int segments, int sides) {
+  axis = normalize(axis);
+  Vec3 t, b;
+  basis(axis, t, b);
+  const std::uint32_t base = static_cast<std::uint32_t>(mesh->vertices.size());
+  for (int i = 0; i <= segments; ++i) {
+    const float a = static_cast<float>(i) / segments * 2.0f * kPi;
+    const Vec3 radial = t * std::cos(a) + b * std::sin(a);
+    const Vec3 ring_c = c + radial * R;
+    const Vec3 tangent = normalize(cross(axis, radial));
+    for (int k = 0; k <= sides; ++k) {
+      const float ph = static_cast<float>(k) / sides * 2.0f * kPi;
+      const Vec3 n = radial * std::cos(ph) + axis * std::sin(ph);
+      Vertex v;
+      v.position = ring_c + n * r;
+      v.normal = n;
+      v.tangent = Vec4{tangent, 1.0f};
+      v.uv = Vec2{a * R, ph * r};
+      v.material = material;
+      v.aux = Vec4{v.uv.x, v.uv.y, element_random, occlusion};
+      mesh->add_vertex(v);
+    }
+  }
+  const std::uint32_t stride = static_cast<std::uint32_t>(sides + 1);
+  for (int i = 0; i < segments; ++i) {
+    for (int k = 0; k < sides; ++k) {
+      const std::uint32_t i0 = base + static_cast<std::uint32_t>(i) * stride + static_cast<std::uint32_t>(k);
+      mesh->add_triangle(i0, i0 + stride, i0 + stride + 1);
+      mesh->add_triangle(i0, i0 + stride + 1, i0 + 1);
+    }
+  }
+}
+
+void Emit::ring_cap(const std::vector<Vec2>& outer, const std::vector<Vec2>& inner, float y, bool up) {
+  const std::size_t n = std::min(outer.size(), inner.size());
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t j = (i + 1) % n;
+    const Vec3 a{outer[i].x, y, outer[i].y}, b{outer[j].x, y, outer[j].y};
+    const Vec3 c{inner[j].x, y, inner[j].y}, d{inner[i].x, y, inner[i].y};
+    // (b, a, d, c) faces up for ccw-on-paper rings (see wall())
+    if (up) quad_metric(b, a, d, c);
+    else quad_metric(a, b, c, d);
+  }
+}
+
 void Emit::polygon(const std::vector<Vec2>& xz, float y, bool up, Vec2 uv_scale) {
   if (xz.size() < 3) return;
   const std::vector<std::uint32_t> tris = triangulate(xz);
@@ -493,6 +538,87 @@ std::vector<Vec2> spline(const std::vector<Vec2>& ctrl, int per_seg) {
   }
   out.push_back(ctrl.back());
   return out;
+}
+
+}  // namespace cb
+
+namespace cb {
+
+std::vector<Vec2> clip_halfplane(const std::vector<Vec2>& poly, Vec2 p, Vec2 n) {
+  std::vector<Vec2> out;
+  const std::size_t m = poly.size();
+  for (std::size_t i = 0; i < m; ++i) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % m];
+    const float da = dot(a - p, n), db = dot(b - p, n);
+    if (da >= 0.0f) out.push_back(a);
+    if ((da >= 0.0f) != (db >= 0.0f)) {
+      const float t = da / (da - db);
+      out.push_back(a + (b - a) * t);
+    }
+  }
+  return out;
+}
+
+Vec2 plan_centroid(const std::vector<Vec2>& poly) {
+  Vec2 c{0, 0};
+  float area = 0.0f;
+  for (std::size_t i = 0; i < poly.size(); ++i) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    const float cr = a.x * b.y - b.x * a.y;
+    area += cr;
+    c = c + (a + b) * cr;
+  }
+  if (std::fabs(area) < 1e-6f) {
+    Vec2 s{0, 0};
+    for (const Vec2& q : poly) s = s + q;
+    return s * (1.0f / static_cast<float>(std::max<std::size_t>(poly.size(), 1)));
+  }
+  return c * (1.0f / (3.0f * area));
+}
+
+void plan_bounds(const std::vector<Vec2>& poly, Vec2* lo, Vec2* hi) {
+  *lo = Vec2{1e30f, 1e30f};
+  *hi = Vec2{-1e30f, -1e30f};
+  for (const Vec2& p : poly) {
+    lo->x = std::min(lo->x, p.x); lo->y = std::min(lo->y, p.y);
+    hi->x = std::max(hi->x, p.x); hi->y = std::max(hi->y, p.y);
+  }
+}
+
+void plan_extent(const std::vector<Vec2>& poly, Vec2 dir, float* lo, float* hi) {
+  *lo = 1e30f;
+  *hi = -1e30f;
+  for (const Vec2& p : poly) {
+    const float d = dot(p, dir);
+    *lo = std::min(*lo, d);
+    *hi = std::max(*hi, d);
+  }
+}
+
+Vec2 plan_long_axis(const std::vector<Vec2>& poly) {
+  float best = -1.0f;
+  Vec2 dir{1, 0};
+  for (std::size_t i = 0; i < poly.size(); ++i) {
+    const Vec2 e = poly[(i + 1) % poly.size()] - poly[i];
+    const float l = length(e);
+    if (l > best) {
+      best = l;
+      dir = e * (1.0f / l);
+    }
+  }
+  return dir;
+}
+
+float plan_inradius(const std::vector<Vec2>& poly) {
+  const Vec2 c = plan_centroid(poly);
+  float best = 1e30f;
+  for (std::size_t i = 0; i < poly.size(); ++i) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    const Vec2 d = normalize(b - a);
+    const Vec2 n{d.y, -d.x};
+    best = std::min(best, std::fabs(dot(c - a, n)));
+  }
+  return best;
 }
 
 }  // namespace cb

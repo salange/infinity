@@ -49,6 +49,9 @@ struct Scene {
   std::vector<PointLight> lights;  // on at night
   Vec3 camera_position{0, 40, 200};
   Vec3 camera_target{0, 60, 0};
+  std::string city_size;
+  float city_radius{0.0f};
+  int stats_blocks{0}, stats_towers{0}, stats_standards{0}, stats_plazas{0};
   std::vector<TextureSetSpec> texture_sets() const;
 };
 
@@ -57,6 +60,7 @@ struct SceneParams {
   bool context_buildings{true};
   int context_rings{2};  // rings of context towers around the block
   int context_detail{-1};  // -1 = by ring (1 near, 0 far); 0..2 forces one level
+  int size{-1};  // -1 = from the seed; 0 small, 1 medium, 2 large, 3 metropolis
   int detail{2};  // 0 coarse … 2 full
 };
 

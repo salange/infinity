@@ -10,6 +10,9 @@ add_executable(cityblock
   src/geometry.cpp
   src/scene.cpp
   src/towers.cpp
+  src/props.cpp
+  src/standards.cpp
+  src/city.cpp
   src/renderer.cpp
   src/stb_impl.cpp)
 target_compile_features(cityblock PRIVATE cxx_std_20)

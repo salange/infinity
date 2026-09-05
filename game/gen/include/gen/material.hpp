@@ -66,7 +66,13 @@ enum class Material : std::uint8_t {
   ResinFloor = 39,
   CrystalFloor = 40,
   DisturbedSoil = 41,
-  Count = 42,
+  // T0020 WP6 building surfaces: lit and dark window glass, a wall tile
+  // with a window grid (mid LOD facades), scrap metal (outlaws).
+  WindowGlass = 42,
+  WindowDark = 43,
+  FacadeWindows = 44,
+  ScrapMetal = 45,
+  Count = 46,
 };
 
 // Which per-planet tint a material takes (SurfacePalette below).

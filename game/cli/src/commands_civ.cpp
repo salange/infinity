@@ -524,6 +524,53 @@ int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot
     std::printf("pos %.1f %.1f %.1f\naim dir %.5f %.5f %.5f   # %.0f m\n", px, py, pz, tx / len, ty / len,
                 tz / len, range);
   }
+  // One lot for the building comparison: the first residential lot
+  // within 0.3 R of the centre — camera lines at 200 m and 20 m looking
+  // at it from the south-west, 30 degrees down.
+  {
+    const gen::Lot* pick_lot = nullptr;
+    double best_h = -1.0;
+    for (const gen::Lot& lot : lots) {
+      if (lot.usage != gen::LotUsage::Residential || lot.style.construction < 1.0f) continue;
+      const double lx = lot.footprint[0][0];
+      const double ly = lot.footprint[0][1];
+      const double d = std::sqrt(lx * lx + ly * ly);
+      if (d < 0.3 * site->radius_m && lot.height_budget_m > best_h) {
+        best_h = lot.height_budget_m;
+        pick_lot = &lot;
+      }
+    }
+    if (pick_lot != nullptr) {
+      double lx = 0.0;
+      double ly = 0.0;
+      for (int k = 0; k < pick_lot->vertex_count; ++k) {
+        lx += pick_lot->footprint[k][0];
+        ly += pick_lot->footprint[k][1];
+      }
+      lx /= pick_lot->vertex_count;
+      ly /= pick_lot->vertex_count;
+      const double lot_z = field.elevation_m(site->frame.to_dir(lx, ly)).to_double();
+      std::printf("# lot %u (%s, budget %.1f m) capture lines:\n", pick_lot->id, gen::to_string(pick_lot->usage),
+                  static_cast<double>(pick_lot->height_budget_m));
+      for (const double range : {200.0, 20.0}) {
+        const double back = range * 0.87;
+        const double up = range * 0.5 + 0.5 * pick_lot->height_budget_m;
+        const double ex = site->frame.east.x.to_double(), ey = site->frame.east.y.to_double(), ez = site->frame.east.z.to_double();
+        const double nx = site->frame.north.x.to_double(), ny = site->frame.north.y.to_double(), nz = site->frame.north.z.to_double();
+        const double ux = site->frame.up.x.to_double(), uy = site->frame.up.y.to_double(), uz = site->frame.up.z.to_double();
+        const gen::Dir3 ld = site->frame.to_dir(lx, ly);
+        const double tx0 = ld.x.to_double() * (r + lot_z + 0.5 * pick_lot->height_budget_m);
+        const double ty0 = ld.y.to_double() * (r + lot_z + 0.5 * pick_lot->height_budget_m);
+        const double tz0 = ld.z.to_double() * (r + lot_z + 0.5 * pick_lot->height_budget_m);
+        const double px = tx0 - (ex + nx) * 0.7071 * back + ux * up;
+        const double py = ty0 - (ey + ny) * 0.7071 * back + uy * up;
+        const double pz = tz0 - (ez + nz) * 0.7071 * back + uz * up;
+        const double dx = tx0 - px, dy = ty0 - py, dz = tz0 - pz;
+        const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+        std::printf("pos %.1f %.1f %.1f\naim dir %.5f %.5f %.5f   # lot at %.0f m\n", px, py, pz, dx / len, dy / len, dz / len, range);
+      }
+    }
+  }
   // Top-down PNG: 1024 px across 2.2 R; lots by usage, arterials ochre,
   // construction hatched, ground shade from the civil elevation.
   constexpr int kSize = 1024;

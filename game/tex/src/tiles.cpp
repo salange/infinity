@@ -145,7 +145,8 @@ enum class Kind {
   SoilDry, SoilMud, Loam, ForestFloor, DeadLeaves, Grass, Meadow, Moss, Snow, SnowDrift,
   SnowDirty, Ice, Permafrost, Lava, MicrobialMat, LichenCrust, Crystal, Sulfur, Tholin, RedBed,
   SaltFlat, Slush, Seabed, MossyCliff,
-  Paving, Plating, Resin, CrystalFloor, Disturbed
+  Paving, Plating, Resin, CrystalFloor, Disturbed,
+  WindowGlass, WindowDark, FacadeWindows, ScrapMetal
 };
 
 struct NameKind {
@@ -174,7 +175,9 @@ constexpr NameKind kNames[] = {
     {"ammonia_slush", Kind::Slush},     {"seabed", Kind::Seabed},
     {"paving", Kind::Paving},           {"plating", Kind::Plating},
     {"resin_floor", Kind::Resin},       {"crystal_floor", Kind::CrystalFloor},
-    {"disturbed_soil", Kind::Disturbed},
+    {"disturbed_soil", Kind::Disturbed}, {"window_glass", Kind::WindowGlass},
+    {"window_dark", Kind::WindowDark},   {"facade_windows", Kind::FacadeWindows},
+    {"scrap_metal", Kind::ScrapMetal},
 };
 
 const char* kNameList[sizeof(kNames) / sizeof(kNames[0])] = {};
@@ -552,6 +555,70 @@ Texel generic(Kind kind, std::uint64_t seed, double u, double v) {
       t.emissive = facet * 0.5;
       return t;
     }
+    case Kind::WindowGlass:
+    case Kind::WindowDark: {
+      // A pane with slim mullions; lit panes glow warm at night (the
+      // emissive mask), dark ones do not. Per-pane hash: some lit, some
+      // off, curtains drawn on a few.
+      const int n = 2;
+      const double gx = u * n;
+      const double gy = v * n;
+      const double fx = gx - std::floor(gx);
+      const double fy = gy - std::floor(gy);
+      const double mullion = std::min(std::min(fx, 1.0 - fx), std::min(fy, 1.0 - fy)) < 0.035 ? 1.0 : 0.0;
+      const double pane = hash01(seed, static_cast<std::int64_t>(std::floor(gx)), static_cast<std::int64_t>(std::floor(gy)), 0x91);
+      const bool lit = kind == Kind::WindowGlass && pane > 0.35;
+      const double curtain = pane < 0.15 ? 1.0 : 0.0;
+      Texel t;
+      t.color = lit ? Rgb{0.95, 0.82, 0.60} : Rgb{0.18, 0.22, 0.28};
+      t.color = mix(t.color, {0.62, 0.58, 0.52}, curtain);
+      t.color = mix(t.color, {0.20, 0.20, 0.22}, mullion);
+      t.height = 0.5 + 0.2 * mullion;
+      t.roughness = mullion > 0.5 ? 0.6 : 0.08;
+      t.emissive = lit ? 0.85 * (1.0 - mullion) : 0.0;
+      return t;
+    }
+    case Kind::FacadeWindows: {
+      // A wall with a window grid: 3.5 m floors, 3.2 m bays over the 4 m
+      // tile (repeats in world metres), plaster between, lit panes.
+      const double floors = 1.15;   // ~3.5 m per 4 m tile
+      const double bays = 1.25;
+      const double gx = u * bays;
+      const double gy = v * floors;
+      const double fx = gx - std::floor(gx);
+      const double fy = gy - std::floor(gy);
+      const bool window = fx > 0.3 && fx < 0.72 && fy > 0.25 && fy < 0.72;
+      const double pane = hash01(seed, static_cast<std::int64_t>(std::floor(gx)) + 7, static_cast<std::int64_t>(std::floor(gy)) * 3, 0x93);
+      const double grime = pfbm(seed ^ 0x7, u, v, 8, 3, 0.5);
+      Texel t;
+      t.color = mix({0.60, 0.57, 0.52}, {0.50, 0.47, 0.42}, 0.5 + 0.5 * grime);
+      t.height = 0.55 + 0.05 * grime;
+      t.roughness = 0.75;
+      t.emissive = 0.0;
+      if (window) {
+        const bool lit = pane > 0.4;
+        t.color = lit ? Rgb{0.92, 0.80, 0.58} : Rgb{0.16, 0.20, 0.26};
+        t.height = 0.35;
+        t.roughness = 0.1;
+        t.emissive = lit ? 0.8 : 0.0;
+      }
+      return t;
+    }
+    case Kind::ScrapMetal: {
+      // Corrugated sheets, rust blooms, rivets.
+      const double corr = 0.5 + 0.5 * std::sin(u * 6.283185307179586 * 24.0);
+      const double rust = smooth(pfbm(seed, u, v, 5, 4, 0.55), 0.05, 0.5);
+      const Worley w = pworley(seed ^ 0xA, u * 10, v * 10, 10, 0.6);
+      const double rivet = smooth(0.09 - w.f1, 0.0, 0.05);
+      Texel t;
+      t.color = mix({0.42, 0.40, 0.38}, {0.48, 0.25, 0.12}, rust);
+      t.color = scale(t.color, 0.85 + 0.15 * corr);
+      t.color = mix(t.color, {0.25, 0.22, 0.20}, rivet);
+      t.height = clamp01(0.45 + 0.15 * corr + 0.1 * rivet - 0.05 * rust);
+      t.roughness = 0.55 + 0.35 * rust;
+      t.emissive = 0.0;
+      return t;
+    }
     case Kind::Disturbed: {
       Texel t = sand_like(seed, u, v, {0.50, 0.42, 0.32}, 0.35, 0.0);
       const double tracks = smooth(std::fabs(std::sin(v * 6.283185307179586 * 6.0 + 2.0 * pfbm(seed ^ 0x5, u, v, 4, 2))), 0.8, 1.0);
@@ -604,7 +671,8 @@ Tile generate_tile(const std::string& material_name, std::uint32_t size, std::ui
   tile.size = size;
   const Kind kind = kind_for(material_name);
   tile.emissive = kind == Kind::Lava || kind == Kind::Crystal || kind == Kind::Plating ||
-                  kind == Kind::CrystalFloor;
+                  kind == Kind::CrystalFloor || kind == Kind::WindowGlass ||
+                  kind == Kind::FacadeWindows;
   const std::size_t count = static_cast<std::size_t>(size) * size;
   tile.albedo.resize(count * 4);
   tile.normal.assign(count * 4, 0);

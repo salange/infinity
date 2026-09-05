@@ -859,3 +859,91 @@ TEST_CASE("sites/v1 + civil/v1: bounded sites, additive lots, continuous plateau
   CHECK(a.triangle_count > 0);
   field.set_height_modifier(nullptr);
 }
+
+// --- WP6: the building executor -------------------------------------------
+
+#include <cstring>
+
+#include "gen/buildings.hpp"
+#include "tex/tiles.hpp"
+
+TEST_CASE("buildings/v1: determinism, budgets, ruins, construction, asset-less (WP6)") {
+  const core::Key base = core::derive_named(core::universe_key(core::Seed128{0, 0x83}), gen::name::BuildingsV1);
+  std::size_t names_count = 0;
+  const char* const* names = tex::known_tile_names(&names_count);
+  const auto tile_known = [&](gen::Material id) {
+    const char* name = gen::material_info(id).name;
+    for (std::size_t i = 0; i < names_count; ++i) {
+      if (std::strcmp(names[i], name) == 0) return true;
+    }
+    return false;
+  };
+  int lot_index = 0;
+  for (int race = 0; race < static_cast<int>(gen::RaceType::Count); ++race) {
+    for (int faction = 0; faction < static_cast<int>(gen::FactionType::Count); ++faction) {
+      gen::Lot lot;
+      lot.id = static_cast<std::uint32_t>(++lot_index);
+      lot.vertex_count = 4;
+      lot.footprint[0][0] = -7.0f; lot.footprint[0][1] = -5.0f;
+      lot.footprint[1][0] = 7.0f; lot.footprint[1][1] = -5.0f;
+      lot.footprint[2][0] = 7.0f; lot.footprint[2][1] = 5.0f;
+      lot.footprint[3][0] = -7.0f; lot.footprint[3][1] = 5.0f;
+      lot.height_budget_m = 14.0f;
+      lot.usage = gen::LotUsage::Residential;
+      lot.style.race_type = static_cast<gen::RaceType>(race);
+      lot.style.faction_type = static_cast<gen::FactionType>(faction);
+      lot.style.material_family = static_cast<std::uint8_t>(gen::race_type_info(static_cast<gen::RaceType>(race)).material_family);
+      lot.style.tech_tier = 4;
+      lot.style.light_density = 0.7f;
+      const core::Key key = core::derive_child(base, gen::kind::Lot, lot.id);
+      CAPTURE(race);
+      CAPTURE(faction);
+      // Every palette material has a procedural tile: the asset-less
+      // build renders every settlement.
+      std::uint8_t palette[4];
+      gen::building_palette(lot.style, palette);
+      for (int k = 0; k < 4; ++k) {
+        CHECK(tile_known(static_cast<gen::Material>(palette[k])));
+      }
+      // Determinism and the height budget (roofs, spires and masts may
+      // exceed the budget by a bounded allowance).
+      gen::BuildingParams bp;
+      const gen::BuildingMesh a = gen::build_building(lot, key, bp);
+      const gen::BuildingMesh b = gen::build_building(lot, key, bp);
+      CHECK(a.vertices == b.vertices);
+      CHECK(a.triangle_count > 0);
+      CHECK(a.vertices.size() == a.triangle_count * 21);
+      CHECK(a.top_z <= 1.6 * lot.height_budget_m + 8.0);
+      CHECK(a.top_z > 0.5);
+      // Every method produces something; masses are the cheapest.
+      gen::BuildingParams mass = bp;
+      mass.method = gen::BuildingMethod::Mass;
+      const gen::BuildingMesh m = gen::build_building(lot, key, mass);
+      CHECK(m.triangle_count <= a.triangle_count);
+      // Construction stages: triangles and height never shrink as the
+      // building goes up.
+      std::uint32_t last_tris = 0;
+      float last_top = 0.0f;
+      for (const float stage : {0.1f, 0.4f, 0.75f, 0.95f, 1.0f}) {
+        gen::Lot staged = lot;
+        staged.style.construction = stage;
+        const gen::BuildingMesh s = gen::build_building(staged, key, bp);
+        CAPTURE(stage);
+        CHECK(s.top_z >= last_top - 1e-3f);
+        CHECK(s.triangle_count + 4 >= last_tris);  // roofs replace frames: small slack
+        last_tris = s.triangle_count;
+        last_top = s.top_z;
+      }
+      // Ruins: no emissive glass in the palette, lower than the intact
+      // building.
+      gen::Lot ruin = lot;
+      ruin.style.ruined = true;
+      ruin.style.construction = 1.0f;
+      gen::building_palette(ruin.style, palette);
+      CHECK(palette[2] != static_cast<std::uint8_t>(gen::Material::WindowGlass));
+      const gen::BuildingMesh r = gen::build_building(ruin, key, bp);
+      CHECK(!r.emissive_windows);
+      CHECK(r.top_z <= a.top_z);  // stilt decks and plinths keep their height
+    }
+  }
+}

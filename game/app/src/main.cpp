@@ -269,6 +269,7 @@ struct CivSetup {
   const inf::gen::RaceRegistry* registry{nullptr};
   const inf::gen::ColonyResolver* resolver{nullptr};
   inf::core::WorldTime now;
+  inf::gen::BuildingMethod method{inf::gen::BuildingMethod::GrammarParts};
 };
 
 std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* seed_text,
@@ -314,6 +315,7 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
   if (civ != nullptr && civ->registry != nullptr && !forced.has_value()) {
     anchor->civ = inf::app::build_civ_anchor(seed, *civ->registry, *civ->resolver, cell, slot, moon,
                                              anchor->keys.entity, anchor->field.get(), civ->now);
+    if (anchor->civ) anchor->civ->method = civ->method;
   }
   anchor->sampler =
       std::make_unique<inf::gen::TerrainSampler>(*anchor->field, anchor->edits.get());
@@ -461,6 +463,7 @@ int main(int argc, char** argv) {
   inf::gen::SystemCell start_cell{};  // --system: the starting octree cell (T0020)
   double civ_time_offset_years = 0.0; // --civ-time: civilization clock offset (T0020)
   long long clock_offset_s = 0;       // --clock-offset-s: world clock offset (captures)
+  inf::gen::BuildingMethod building_method = inf::gen::BuildingMethod::GrammarParts;  // --buildings
   const char* assets_text = nullptr;  // --assets <dir>: tile library root
   std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
   int spawn_slot = -1;                // --slot N: spawn on this system slot
@@ -497,6 +500,12 @@ int main(int argc, char** argv) {
       start_cell = inf::gen::SystemCell{std::atoll(argv[i + 1]), std::atoll(argv[i + 2]),
                                         std::atoll(argv[i + 3]), std::atoi(argv[i + 4])};
       i += 4;
+    } else if (std::strcmp(argv[i], "--buildings") == 0 && i + 1 < argc) {
+      // T0020 WP6 comparison: mass | grammar | parts (the decision).
+      const char* m = argv[++i];
+      building_method = std::strcmp(m, "mass") == 0      ? inf::gen::BuildingMethod::Mass
+                        : std::strcmp(m, "grammar") == 0 ? inf::gen::BuildingMethod::Grammar
+                                                         : inf::gen::BuildingMethod::GrammarParts;
     } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
       // Shift the world clock (planet rotation, orbits): capture aid to
       // put a site into daylight. A per-save constant offset is exactly
@@ -630,7 +639,7 @@ int main(int argc, char** argv) {
   const auto civ_now = [&](inf::core::WorldTime t) {
     return inf::core::WorldTime::from_ns(t.ns_since_epoch + inf::gen::real_years_to_ns(civ_time_offset_years));
   };
-  const CivSetup civ_setup{&civ_registry, &civ_resolver, civ_now(civ_clock.now())};
+  const CivSetup civ_setup{&civ_registry, &civ_resolver, civ_now(civ_clock.now()), building_method};
   std::unique_ptr<Anchor> anchor =
       make_anchor(*seed, seed_text, system, current_cell, home_slot,
                   spawn_moon >= 0 &&
@@ -985,7 +994,7 @@ int main(int argc, char** argv) {
   const inf::core::SyncedClock world_clock(std::make_shared<inf::core::LocalClock>(),
                                            clock_offset_s * 1'000'000'000LL);
   refresh_civ(current_cell, civ_now(world_clock.now()));
-  CivSetup civ_setup_now{&civ_registry, &civ_resolver, civ_now(world_clock.now())};
+  CivSetup civ_setup_now{&civ_registry, &civ_resolver, civ_now(world_clock.now()), building_method};
   inf::core::WorldTime last_time = world_clock.now();
   double fps_accum = 0.0;
   int fps_frames = 0;

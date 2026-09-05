@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "gen/material.hpp"
+#include "gen/names.hpp"
 
 namespace inf::gen {
 
@@ -28,50 +29,21 @@ struct Writer {
 
 }  // namespace
 
-void site_palette(const Site& site, std::uint8_t out[4]) {
-  // Walls / roof / base / accent by material family.
-  switch (site.style.material_family) {
-    case 1:  // metal and glass
-      out[0] = static_cast<std::uint8_t>(Material::Plating);
-      out[1] = static_cast<std::uint8_t>(Material::RockShale);
-      out[2] = static_cast<std::uint8_t>(Material::Paving);
-      out[3] = static_cast<std::uint8_t>(Material::Plating);
-      break;
-    case 2:  // resin (hives)
-      out[0] = static_cast<std::uint8_t>(Material::ResinFloor);
-      out[1] = static_cast<std::uint8_t>(Material::SoilDry);
-      out[2] = static_cast<std::uint8_t>(Material::ResinFloor);
-      out[3] = static_cast<std::uint8_t>(Material::RockSandstone);
-      break;
-    case 3:  // crystal
-      out[0] = static_cast<std::uint8_t>(Material::CrystalField);
-      out[1] = static_cast<std::uint8_t>(Material::CrystalFloor);
-      out[2] = static_cast<std::uint8_t>(Material::CrystalFloor);
-      out[3] = static_cast<std::uint8_t>(Material::IceSheet);
-      break;
-    case 4:  // grown
-      out[0] = static_cast<std::uint8_t>(Material::Moss);
-      out[1] = static_cast<std::uint8_t>(Material::LichenCrust);
-      out[2] = static_cast<std::uint8_t>(Material::SoilLoam);
-      out[3] = static_cast<std::uint8_t>(Material::ForestFloor);
-      break;
-    default:  // stone
-      out[0] = static_cast<std::uint8_t>(Material::RockSandstone);
-      out[1] = static_cast<std::uint8_t>(Material::RockShale);
-      out[2] = static_cast<std::uint8_t>(Material::Paving);
-      out[3] = static_cast<std::uint8_t>(Material::RockGranite);
-      break;
-  }
-  if (site.ruined) {
-    out[0] = static_cast<std::uint8_t>(Material::RockShale);
-    out[1] = static_cast<std::uint8_t>(Material::Scree);
+void site_palette(const Site& site, int detail, std::uint8_t out[4]) {
+  building_palette(site.style, out);
+  if (detail == 1 && !site.ruined && site.style.material_family <= 1 &&
+      site.style.faction_type != FactionType::Outlaw) {
+    // Mid LOD: the triplanar tiling paints a window grid on every wall
+    // in world metres — windows for free where geometric bays are too
+    // expensive.
+    out[0] = static_cast<std::uint8_t>(Material::FacadeWindows);
   }
 }
 
 SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const TerrainField& field,
                          const SiteMeshParams& params) {
   SiteMesh out;
-  site_palette(site, out.mesh.palette);
+  site_palette(site, params.detail, out.mesh.palette);
   const double R = site.frame.radius_m;
   // Origin: the centre on the plateau.
   const Dir3 up = site.frame.up;
@@ -149,16 +121,9 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
       mean_h /= static_cast<double>(lots.size());
       for (const Lot& lot : lots) {
         const double h_full = static_cast<double>(lot.height_budget_m);
-        if (params.detail == 1 && h_full < 1.5 * mean_h) {
-          continue;
+        if (params.detail == 1 && h_full < 1.5 * mean_h && site.tier >= 5) {
+          continue;  // big sites at mid range: the tall lots only
         }
-        // Construction: a foundation slab, then the frame rising.
-        const double stage = lot.style.construction;
-        double h = h_full * (stage < 0.3 ? 0.08 : (stage < 1.0 ? 0.08 + (stage - 0.3) / 0.7 * 0.92 : 1.0));
-        if (site.ruined) {
-          h = h_full * 0.35;  // collapsed to a stub
-        }
-        if (h < 0.5) h = 0.5;
         double cx = 0.0;
         double cy = 0.0;
         for (int k = 0; k < lot.vertex_count; ++k) {
@@ -167,61 +132,26 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
         }
         cx /= lot.vertex_count;
         cy /= lot.vertex_count;
-        const double base = ground_z(cx, cy) - 0.8;  // sunk into the ground
-        const double top = base + 0.8 + h;
-        const int wall_mat = 0;
-        const int roof_mat = 1;
-        const int accent_mat = lot.usage == LotUsage::Civic || lot.usage == LotUsage::Monument ? 3 : 0;
-        const int n = lot.vertex_count;
-        // Walls: outward normals from the footprint edges (footprints are
-        // counter-clockwise in the local frame).
-        for (int k = 0; k < n; ++k) {
-          const double ax = lot.footprint[k][0];
-          const double ay = lot.footprint[k][1];
-          const double bx2 = lot.footprint[(k + 1) % n][0];
-          const double by2 = lot.footprint[(k + 1) % n][1];
-          double nx = by2 - ay;
-          double nyv = -(bx2 - ax);
-          const double len = std::sqrt(nx * nx + nyv * nyv);
-          if (len < 1e-9) continue;
-          nx /= len;
-          nyv /= len;
-          // Ensure outward: the normal must point away from the centre.
-          if ((0.5 * (ax + bx2) - cx) * nx + (0.5 * (ay + by2) - cy) * nyv < 0.0) {
-            nx = -nx;
-            nyv = -nyv;
-          }
-          double wn[3];
-          normal(nx, nyv, 0.0, &wn[0], &wn[1], &wn[2]);
-          double p0[3], p1[3], p2[3], p3[3];
-          place(ax, ay, base, &p0[0], &p0[1], &p0[2]);
-          place(bx2, by2, base, &p1[0], &p1[1], &p1[2]);
-          place(bx2, by2, top, &p2[0], &p2[1], &p2[2]);
-          place(ax, ay, top, &p3[0], &p3[1], &p3[2]);
-          const int m = accent_mat != 0 ? accent_mat : wall_mat;
-          // Two triangles, winding so the face's outward normal matches.
-          w.vertex(p0[0], p0[1], p0[2], wn[0], wn[1], wn[2], m);
-          w.vertex(p1[0], p1[1], p1[2], wn[0], wn[1], wn[2], m);
-          w.vertex(p2[0], p2[1], p2[2], wn[0], wn[1], wn[2], m);
-          w.vertex(p0[0], p0[1], p0[2], wn[0], wn[1], wn[2], m);
-          w.vertex(p2[0], p2[1], p2[2], wn[0], wn[1], wn[2], m);
-          w.vertex(p3[0], p3[1], p3[2], wn[0], wn[1], wn[2], m);
-          out.triangle_count += 2;
+        // buildings/v1: the executor in the lot's frame (ground = the
+        // civil-modified surface under the lot centre).
+        BuildingParams bp;
+        bp.method = params.detail >= 2 ? BuildingMethod::Mass
+                    : (params.detail == 1 ? BuildingMethod::Grammar : params.method);
+        bp.ground_z = ground_z(cx, cy);
+        const core::Key lot_key = core::derive_child(
+            core::derive_named(site.key, name::BuildingsV1), kind::Lot, static_cast<std::int64_t>(lot.id));
+        const BuildingMesh building = build_building(lot, lot_key, bp);
+        // Site-local -> planet-local relative to the origin.
+        const std::size_t count = building.vertices.size() / 7;
+        for (std::size_t v = 0; v < count; ++v) {
+          const float* in = building.vertices.data() + v * 7;
+          double px, py, pz;
+          place(in[0], in[1], in[2], &px, &py, &pz);
+          double nx, nyv, nz;
+          normal(in[3], in[4], in[5], &nx, &nyv, &nz);
+          w.vertex(px, py, pz, nx, nyv, nz, static_cast<int>(in[6]));
         }
-        // Roof: a fan from the centroid.
-        double rn[3];
-        normal(0.0, 0.0, 1.0, &rn[0], &rn[1], &rn[2]);
-        double c[3];
-        place(cx, cy, top, &c[0], &c[1], &c[2]);
-        for (int k = 0; k < n; ++k) {
-          double p0[3], p1[3];
-          place(lot.footprint[k][0], lot.footprint[k][1], top, &p0[0], &p0[1], &p0[2]);
-          place(lot.footprint[(k + 1) % n][0], lot.footprint[(k + 1) % n][1], top, &p1[0], &p1[1], &p1[2]);
-          w.vertex(c[0], c[1], c[2], rn[0], rn[1], rn[2], roof_mat);
-          w.vertex(p0[0], p0[1], p0[2], rn[0], rn[1], rn[2], roof_mat);
-          w.vertex(p1[0], p1[1], p1[2], rn[0], rn[1], rn[2], roof_mat);
-          ++out.triangle_count;
-        }
+        out.triangle_count += building.triangle_count;
         ++out.lot_count;
       }
     }

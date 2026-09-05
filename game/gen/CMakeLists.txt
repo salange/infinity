@@ -20,6 +20,7 @@ add_library(game_gen STATIC
   src/sites.cpp
   src/civil.cpp
   src/site_mesh.cpp
+  src/buildings.cpp
   src/human.cpp
   src/golden_civ.cpp
   src/caves.cpp

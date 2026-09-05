@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstdio>
 
+#include "core/det/trig.hpp"
 #include "core/ephem/ephemeris.hpp"
 #include "core/golden.hpp"
 #include "core/tree/tree.hpp"
@@ -201,7 +202,40 @@ const char* to_string(SystemArchetype archetype) {
   return "?";
 }
 
-StarSystemParams generate_system(const core::Key& system_entity_key) {
+core::StarPhys system_star(const core::Key& system_entity_key) {
+  return draw_star(core::derive_named(system_entity_key, name::StellarV1));
+}
+
+int home_slot_for(const StarSystemParams& system, double preferred_flux) {
+  const double lum = system.star.luminosity_solar.to_double();
+  int best = -1;
+  double best_score = 1.0e300;
+  int first_occupied = -1;
+  for (int slot = 0; slot < kMaxPlanetSlots; ++slot) {
+    const SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
+    if (!planet.occupied) {
+      continue;
+    }
+    if (first_occupied < 0) {
+      first_occupied = slot;
+    }
+    const bool terrestrial =
+        planet.phys.cls == PlanetClass::Rocky || planet.phys.cls == PlanetClass::SuperEarth;
+    const double a_au = planet.orbit.a_m.to_double() / kAuGame;
+    const double flux = lum / (a_au * a_au);
+    const double ln_ratio = det::fast_log(Real(flux / preferred_flux)).to_double();
+    // Giants only as a last resort: a large penalty, not an exclusion.
+    const double score = ln_ratio * ln_ratio + (terrestrial ? 0.0 : 100.0);
+    if (score < best_score) {
+      best_score = score;
+      best = slot;
+    }
+  }
+  return best >= 0 ? best : first_occupied;
+}
+
+StarSystemParams generate_system(const core::Key& system_entity_key,
+                                 const HomeSlotOverride* home_override) {
   StarSystemParams system;
 
   // stellar/v1
@@ -322,6 +356,41 @@ StarSystemParams generate_system(const core::Key& system_entity_key) {
   }
   // Every archetype draws >= 1 planet and every planet is landable, so
   // the default-spawn contract holds by construction.
+
+  // T0020: race home world — force, not search (design civilization
+  // section 6.4). Applied before moons/v1 so the home's satellites see
+  // its final mass; systems without an override never enter here.
+  if (home_override != nullptr) {
+    const int slot = home_slot_for(system, home_override->preferred_flux);
+    if (slot >= 0) {
+      SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
+      const bool terrestrial =
+          planet.phys.cls == PlanetClass::Rocky || planet.phys.cls == PlanetClass::SuperEarth;
+      if (!terrestrial) {
+        planet.phys.cls = PlanetClass::Rocky;
+        planet.phys.radius_m = Real(0.9 * kEarthRadiusGame);
+      }
+      if (home_override->habitat == PlanetType::EarthLike &&
+          planet.phys.radius_m.to_double() < kAtmosphereMinRadiusM) {
+        planet.phys.radius_m = Real(kAtmosphereMinRadiusM * 1.05);
+      }
+      planet.phys.mass_earth = mass_earth_for(planet.phys.cls, planet.phys.radius_m);
+      planet.phys.mu = Real(3.986004418e13 * planet.phys.mass_earth.to_double());
+      planet.phys.g_surface = surface_gravity(planet.phys.mass_earth, planet.phys.radius_m, 1.0);
+      planet.surface_type = home_override->habitat;
+      planet.phys.surface_type = static_cast<std::uint32_t>(planet.surface_type);
+      double atmosphere_m = 0.0;
+      switch (planet.surface_type) {
+        case PlanetType::EarthLike: atmosphere_m = 11'000.0; break;
+        case PlanetType::Desert: atmosphere_m = 6'000.0; break;
+        case PlanetType::Ice: atmosphere_m = 7'000.0; break;
+        case PlanetType::Barren: atmosphere_m = 0.0; break;
+      }
+      planet.phys.atmosphere.height_m = Real(atmosphere_m);
+      planet.race_home = true;
+      planet.race_home_biosphere = home_override->force_biosphere;
+    }
+  }
 
   // moons/v1: recursive mini-systems within the Hill sphere.
   const core::Key moons_key = core::derive_named(system_entity_key, name::MoonsV1);
@@ -487,6 +556,7 @@ PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
   params.pressure_rel = sys_planet.surface_type == PlanetType::Barren
                             ? Real(0.0)
                             : sys_planet.phys.atmosphere.pressure_rel;
+  params.forced_biosphere = sys_planet.race_home && sys_planet.race_home_biosphere;
   return params;
 }
 

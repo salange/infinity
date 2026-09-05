@@ -42,6 +42,21 @@ if grep -rn --include='*.hpp' --include='*.cpp' -E 'system_clock|steady_clock|gl
   echo "FORBIDDEN: OS clock read outside core/time" >&2
   exit 1
 fi
+# Civilization is a post-terrain layer (T0020): no terrain-side generator
+# may include or read anything civ. civil/v1 hooks in from above.
+if grep -rn --include='*.hpp' --include='*.cpp' -E '#include "gen/(civ|civil|colony|settlements|sites|buildings|ecumenopolis)' \
+    game/gen/src/terrain.cpp game/gen/src/macro.cpp game/gen/src/drainage.cpp \
+    game/gen/src/features.cpp game/gen/src/caves.cpp game/gen/src/provinces.cpp \
+    game/gen/src/climate.cpp game/gen/src/life.cpp game/gen/src/biome.cpp \
+    game/gen/include/gen/terrain.hpp game/gen/include/gen/macro.hpp \
+    game/gen/include/gen/drainage.hpp game/gen/include/gen/features.hpp \
+    game/gen/include/gen/caves.hpp game/gen/include/gen/provinces.hpp \
+    game/gen/include/gen/climate.hpp game/gen/include/gen/life.hpp \
+    game/gen/include/gen/biome.hpp engine/; then
+  echo "FORBIDDEN: terrain-side generator reads civilization" >&2
+  exit 1
+fi
+
 # Engine self-containment: nothing in engine/ includes game headers.
 if grep -rn --include='*.hpp' --include='*.cpp' -E '#include "(gen|sim)/' engine/; then
   echo "FORBIDDEN: engine includes game headers" >&2
@@ -79,6 +94,8 @@ echo "=== golden hashes ==="
   || { echo "FAIL: hash-system diverges from goldens" >&2; exit 1; }
 "$CLI" hash-edits | diff - game/tests/goldens/hash-edits.txt \
   || { echo "FAIL: hash-edits diverges from goldens" >&2; exit 1; }
+"$CLI" hash-civ | diff - game/tests/goldens/hash-civ.txt \
+  || { echo "FAIL: hash-civ diverges from goldens" >&2; exit 1; }
 
 echo "=== payload determinism ==="
 "$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-a.json

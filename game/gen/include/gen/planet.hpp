@@ -92,6 +92,12 @@ struct PlanetParams {
   det::Real pressure_rel{1.0};    // surface pressure relative to Earth's
   bool tidally_locked{false};
 
+  // T0020: a race home world carries a FORCED full biosphere (design
+  // civilization section 6.4, the forced_type idiom). Set by planets/v1
+  // through planet_params_for_slot; life/v1 obeys. Default false, so no
+  // pre-existing body changes.
+  bool forced_biosphere{false};
+
   // Serializable inter-stage payload (NMS lesson, T0004): stable,
   // human-readable, byte-reproducible.
   std::string to_json() const;

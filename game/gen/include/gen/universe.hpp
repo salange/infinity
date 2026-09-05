@@ -64,6 +64,17 @@ BodyHandle body_for_system_slot(const core::Seed128& seed, const SystemCell& cel
                                 int slot);
 BodyHandle body_for_system_moon(const core::Seed128& seed, const SystemCell& cell,
                                 int slot, int moon_index);
+// Direct key derivation along the address (T0020): the same keys the
+// tree materializes — systems axis under the galaxy's children key,
+// planets/moons axes under the system's/body's — without building a
+// tree per query. Asserted equal to the tree path in tests.
+core::Key system_key_in_galaxy(const core::Key& galaxy_entity_key, const SystemCell& cell);
+struct BodyKeys {
+  core::Key entity;
+  core::Key params;
+};
+BodyKeys body_keys_in_system(const core::Key& system_entity_key, int slot);
+BodyKeys moon_keys_in_system(const core::Key& system_entity_key, int slot, int moon_index);
 // The home galaxy's entity key (galaxy-params/v1 and the octree hang off
 // it).
 core::Key home_galaxy_key(const core::Seed128& seed);

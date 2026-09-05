@@ -2,9 +2,11 @@
 
 #include <array>
 #include <bit>
+#include <vector>
 
 #include "core/golden.hpp"
 #include "gen/civilization.hpp"
+#include "gen/colony.hpp"
 #include "gen/human.hpp"
 #include "gen/universe.hpp"
 
@@ -114,6 +116,55 @@ std::uint64_t hash_human_script(const core::Seed128& seed) {
   return hash.value();
 }
 
+// WP3: owners and body states of the home system and of the nearest
+// occupied systems at fixed ManualClock offsets from the launch
+// reference (before and after the first flips).
+std::uint64_t hash_state_script(const core::Seed128& seed) {
+  core::GoldenHash hash;
+  const core::Key galaxy_key = home_galaxy_key(seed);
+  const GalaxyParams galaxy = home_galaxy_params(seed);
+  const CivilizationParams civ = derive_civilization(galaxy_key, galaxy, true);
+  RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(human_race(galaxy_key, galaxy));
+  const ColonyResolver resolver(registry);
+  std::vector<SystemCell> cells;
+  cells.push_back(SystemCell{});
+  {
+    std::vector<GalaxyOctree::CellId> near;
+    registry.octree().systems_in_ball(home_system_position_m(galaxy), det::Real(40.0 * kLightYearM),
+                                      6, &near);
+    for (const auto& c : near) {
+      cells.push_back(SystemCell{c.x, c.y, c.z, c.level});
+    }
+  }
+  static constexpr double kOffsetsYears[] = {-5.0, 0.0, 0.0192, 3.0, 10.0};
+  for (const SystemCell& cell : cells) {
+    const SystemCivContext context = gather_system_context(seed, registry, cell, true);
+    for (const double years : kOffsetsYears) {
+      const core::WorldTime t =
+          core::WorldTime::from_ns(kLaunchReference.ns_since_epoch + real_years_to_ns(years));
+      const Owner owner = resolver.owner(context, t);
+      hash.feed(owner.owned ? 1U : 0U);
+      if (owner.owned) {
+        feed_key(hash, owner.race_key);
+        hash.feed(static_cast<std::uint64_t>(owner.t_claim.ns_since_epoch));
+      }
+      for (const CivState& s : resolver.system_states(context, owner, t)) {
+        hash.feed(s.settled ? 1U : 0U);
+        if (!s.settled) continue;
+        hash.feed(static_cast<std::uint64_t>(s.level));
+        hash.feed(static_cast<std::uint64_t>(s.max_level));
+        hash.feed(static_cast<std::uint64_t>(static_cast<std::int64_t>(s.faction_index)));
+        hash.feed(s.ruined ? 1U : 0U);
+        hash.feed(s.domed ? 1U : 0U);
+        hash.feed(static_cast<std::uint64_t>(s.settled_at.ns_since_epoch));
+        feed_double(hash, s.growth);
+      }
+    }
+  }
+  return hash.value();
+}
+
 }  // namespace
 
 std::string hash_civ_report() {
@@ -132,6 +183,11 @@ std::string hash_civ_report() {
   for (const core::Seed128& seed : kSeeds) {
     report += "human seed=" + core::to_hex(seed) + " fnv=";
     append_hex(&report, hash_human_script(seed));
+    report += "\n";
+  }
+  for (const core::Seed128& seed : kSeeds) {
+    report += "state seed=" + core::to_hex(seed) + " fnv=";
+    append_hex(&report, hash_state_script(seed));
     report += "\n";
   }
   return report;

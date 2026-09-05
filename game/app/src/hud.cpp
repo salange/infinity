@@ -189,6 +189,7 @@ struct Hud::Impl {
   TextLine location_line;     // planet name under the radar when near it
   TextLine target_name_line;  // crosshair target readout (flight)
   TextLine target_info_line;
+  TextLine target_civ_line;
   TextLine letter_n, letter_s, letter_e, letter_w;
   std::vector<TextLine> card_lines;  // map-mode info card (lazy)
 
@@ -568,9 +569,16 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
                    Color{1.0f, 0.85f, 0.45f}, aspect, true);
     impl.text_item(items, impl.target_info_line, 0.0, -0.13, 0.0038,
                    Color{0.85f, 0.95f, 1.0f}, aspect, true);
+    // T0020: who lives there.
+    impl.target_civ_line.set(impl.rhi, target.civ_line);
+    if (!target.civ_line.empty()) {
+      impl.text_item(items, impl.target_civ_line, 0.0, -0.17, 0.0036,
+                     Color{0.75f, 0.95f, 0.75f}, aspect, true);
+    }
   } else {
     impl.target_name_line.set(impl.rhi, "");
     impl.target_info_line.set(impl.rhi, "");
+    impl.target_civ_line.set(impl.rhi, "");
   }
 }
 

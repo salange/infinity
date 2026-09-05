@@ -169,7 +169,10 @@ aliasing — shimmer, moiré, crawling edges. It prints the mean residual,
 the ten materials that contribute most (via the material-id debug view),
 and writes `name-heat.png` (amplified residual, dark = stable) and
 `name-frame.png`. `--no-taa` measures the MSAA-only path for comparison.
-`--bench N` renders N offscreen frames and prints ms/frame.
+`--bench N` renders N offscreen frames and prints ms/frame. `--showcase`
+replaces the city with the asset catalog: all tower families, the five
+standard types and the ground kit arranged for one camera. A metropolis
+always places every tower family in its core.
 
 ## Layout
 

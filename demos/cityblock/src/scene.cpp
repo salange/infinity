@@ -461,6 +461,12 @@ Scene generate_scene(const SceneParams& params) {
   Scene sc;
   sc.materials = make_materials();
   Rng root = root_rng(params.seed);
+  if (params.showcase) {
+    generate_showcase(sc, root.child(200));
+    sc.city_size = "showcase";
+    sc.finalize_draws();
+    return sc;
+  }
   CitySize size = city_size_for(root);
   if (params.size >= 0) size = static_cast<CitySize>(params.size);
   const CityStats st = generate_city(sc, root.child(100), size);

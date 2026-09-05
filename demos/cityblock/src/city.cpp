@@ -401,6 +401,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
   std::vector<std::vector<Vec2>> plaza_polys;
   Rng br = root.child(3);
   int idx = 0;
+  int forced_family = 0;
   const float gov_rot = rot;  // government faces "south" of the grid
   for (const Block& b : blocks) {
     Rng r = br.child(idx++);
@@ -482,6 +483,19 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
         st.towers += 2;
       } else {
         spec = random_tower(r, half, max_floors);
+        if (size == CitySize::Metropolis && forced_family < 6 && b.t < 0.45f) {
+          // a metropolis shows every family in its core, in a fixed order
+          switch (forced_family) {
+            case 0: spec = spec_diagrid(half, max_floors); break;
+            case 1: spec = spec_lens(half * 1.35f, half * 0.55f, max_floors - 4, r.range(0, kPi)); spec.base = BaseKind::Lobby; break;
+            case 2: spec = spec_finweave(half * 0.95f, max_floors - 8); break;
+            case 3: spec = spec_xframe(half * 1.3f, half * 0.7f, 16); break;
+            case 4: spec = spec_hex(half, max_floors - 6); break;
+            default: spec = spec_sail(half * 1.3f, half * 0.6f, max_floors - 2, r.range(0, kPi)); spec.base = BaseKind::Podium; break;
+          }
+          spec.random = r.next();
+          ++forced_family;
+        }
         if (!R.heroes && (spec.facade == FacadeKind::Diagrid || spec.facade == FacadeKind::XFrame || spec.facade == FacadeKind::HexLattice)) {
           spec.facade = r.chance(0.5f) ? FacadeKind::Curtain : FacadeKind::Ribbon;
           spec.crown = CrownKind::Parapet;
@@ -554,6 +568,84 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
   }
   st.trees += tree_budget;  // remaining budget unused; report placed count
   return st;
+}
+void generate_showcase(Scene& sc, Rng root) {
+  Mesh& mesh = sc.opaque;
+  const float y = kCurb;
+  // ground: a wide marble plaza on a raised plate, asphalt beyond
+  {
+    Emit g(&mesh, M_ASPHALT);
+    g.polygon({{-900.0f, -900.0f}, {900.0f, -900.0f}, {900.0f, 900.0f}, {-900.0f, 900.0f}}, -0.02f, true);
+    const std::vector<Vec2> plate = plan_rect(330.0f, 150.0f, Vec2{0, 0});
+    Emit s(&mesh, M_SIDEWALK);
+    s.polygon(plate, y, true);
+    Emit c(&mesh, M_CURB);
+    c.wall(plate, 0.0f, y, true, true);
+    Emit m(&mesh, M_MARBLE_WHITE);
+    m.polygon(plan_rect(320.0f, 60.0f, Vec2{0, 60.0f}), y + 0.01f, true);
+  }
+  // back row: the tower families, tallest in the middle, on a gentle arc
+  struct Entry { TowerSpec spec; float x; };
+  std::vector<Entry> row;
+  TowerSpec t;
+  t = spec_xframe(24.0f, 12.0f, 14); row.push_back({t, -270.0f});
+  t = spec_hex(15.0f, 30); row.push_back({t, -200.0f});
+  t = spec_finweave(16.0f, 28); row.push_back({t, -130.0f});
+  t = spec_lens(30.0f, 12.0f, 34, radians(90.0f)); t.base = BaseKind::Lobby; row.push_back({t, -50.0f});
+  t = spec_diagrid(17.5f, 42); row.push_back({t, 45.0f});
+  t = spec_sail(28.0f, 12.0f, 36, radians(90.0f)); t.base = BaseKind::Podium; row.push_back({t, 135.0f});
+  t = TowerSpec{}; t.plan = PlanKind::RoundedRect; t.a = 17.0f; t.b = 13.0f; t.floors = 26; t.floor_h = 4.0f; t.facade = FacadeKind::Curtain;
+  t.glass = M_GLASS_BLUE; t.spandrel_h = 0.9f; t.setback_floor = 17; t.base = BaseKind::Plinth; t.crown = CrownKind::Mast; row.push_back({t, 210.0f});
+  t = TowerSpec{}; t.plan = PlanKind::Circle; t.a = t.b = 14.0f; t.floors = 22; t.floor_h = 3.8f; t.facade = FacadeKind::Louvre;
+  t.glass = M_GLASS_CONTEXT; t.member = M_WHITE_METAL; t.fin_depth = 0.45f; t.module_w = 2.4f; t.base = BaseKind::Colonnade; t.crown = CrownKind::Louvres; row.push_back({t, 275.0f});
+  int k = 0;
+  for (Entry& e : row) {
+    e.spec.random = root.child(static_cast<std::uint32_t>(k)).next();
+    const float z = -20.0f + 0.0006f * e.x * e.x;  // arc bulging away in the middle
+    build_tower(sc, e.spec, Vec2{e.x, z}, y, root.child(static_cast<std::uint32_t>(10 + k)), 2);
+    ++k;
+  }
+  // middle row: the five standard types with different entrances and roofs
+  const StdType types[5] = {StdType::Office, StdType::Residential, StdType::Mixed, StdType::Civic, StdType::Lab};
+  for (int i = 0; i < 5; ++i) {
+    Rng r = root.child(static_cast<std::uint32_t>(30 + i));
+    StandardSpec s = random_standard(r, 700.0f, 0.5f);
+    s.type = types[i];
+    s.entrance = static_cast<EntranceKind>(i % 4);
+    s.roof = static_cast<RoofKind>(i % 4);
+    s.storeys = 4 + (i % 3);
+    if (s.type == StdType::Civic) { s.wall = M_MARBLE_WHITE; s.floor_h = 4.4f; }
+    if (s.type == StdType::Residential) { s.wall = M_PANEL_WARM; s.floor_h = 3.2f; s.balconies = true; }
+    if (s.type == StdType::Mixed) { s.retail_ground = true; }
+    if (s.type == StdType::Lab) { s.wall = M_PANEL_DARK; }
+    const float x = -240.0f + 120.0f * static_cast<float>(i);
+    build_standard(sc, s, plan_rect(16.0f, 11.0f, Vec2{x, 95.0f}), y, r, 2);
+  }
+  // front row: the ground kit
+  Rng pr = root.child(50);
+  build_government(sc, Vec2{0.0f, 40.0f}, 0.0f, 26.0f, y, pr, 2);
+  build_unification_ring(sc, Vec2{0.0f, 118.0f}, y, 12.0f, kPi * 0.5f, 2);
+  build_fountain(sc, Vec2{-120.0f, 60.0f}, 8.0f, y, pr, 2);
+  build_basin(sc, Vec2{120.0f, 60.0f}, 14.0f, 4.0f, false, y, 0.45f);
+  build_basin(sc, Vec2{160.0f, 60.0f}, 6.0f, 6.0f, true, y, 0.45f);
+  build_monument(sc, MonumentKind::Pillar, Vec2{-300.0f, 80.0f}, y, 1.2f, pr, 2);
+  build_monument(sc, MonumentKind::Ribbon, Vec2{-300.0f, 120.0f}, y, 1.2f, pr, 2);
+  build_monument(sc, MonumentKind::Weave, Vec2{300.0f, 80.0f}, y, 1.2f, pr, 2);
+  build_monument(sc, MonumentKind::Obelisk, Vec2{300.0f, 120.0f}, y, 1.2f, pr, 2);
+  build_landing_pad(sc, Vec2{-230.0f, 135.0f}, 14.0f, y, pr, 2);
+  build_foundation(sc, plan_rect(16.0f, 12.0f, Vec2{230.0f, 130.0f}), y, 2.0f, 2, 2);
+  build_monument(sc, MonumentKind::Weave, Vec2{230.0f, 130.0f}, y + 2.0f, 0.8f, pr, 2);
+  build_hedge_ring(sc, plan_rect(300.0f, 25.0f, Vec2{0, 80.0f}), 0.0f, 0.9f, 0.9f, y, 22.0f, pr);
+  build_low_wall(sc, plan_rect(320.0f, 60.0f, Vec2{0, 60.0f}), 0.5f, 0.5f, 0.3f, y, M_CONCRETE_WHITE, 30.0f, pr);
+  build_overpass(sc, {Vec2{-90.0f, 140.0f}, Vec2{-40.0f, 128.0f}, Vec2{40.0f, 136.0f}, Vec2{90.0f, 140.0f}}, y + 6.5f, y, pr, 2);
+  gen_planter(sc, pr.child(1), Vec2{-60.0f, 60.0f}, 6.0f, 2.5f, y);
+  gen_planter(sc, pr.child(2), Vec2{60.0f, 60.0f}, 6.0f, 2.5f, y);
+  for (int i = 0; i < 6; ++i) gen_lamp(sc, P3(Vec2{-250.0f + 100.0f * static_cast<float>(i), 145.0f}, y), kPi * 0.5f);
+  for (int i = 0; i < 8; ++i) gen_tree(sc, pr.child(static_cast<std::uint32_t>(100 + i)), P3(Vec2{-280.0f + 80.0f * static_cast<float>(i), 148.0f}, y), 8.0f);
+  gen_park(sc, pr.child(7), Vec2{-190.0f, 55.0f}, y);
+  gen_pavilion(sc, pr.child(8), Vec2{200.0f, 90.0f}, 12.0f, 15.0f, y);
+  sc.camera_position = Vec3{-40.0f, 60.0f, 330.0f};
+  sc.camera_target = Vec3{0.0f, 55.0f, 20.0f};
 }
 
 }  // namespace cb

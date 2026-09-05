@@ -18,8 +18,16 @@ namespace inf::app {
 // centre. Everything the renderer keeps is cosmetic: mesh handles and
 // per-frame draw items.
 struct CityUpload {
-  std::uint32_t opaque{0};
-  std::uint32_t foliage{0};
+  // The scene's meshes: the generators emit unshared vertices, so a big
+  // scene is split at lot boundaries into pieces under the renderer's
+  // buffer guard (opaque pieces first, then foliage).
+  struct Piece {
+    std::uint32_t mesh{0};
+    bool foliage{false};
+    std::uint32_t triangles{0};
+  };
+  std::vector<Piece> pieces;
+  bool drawable() const { return !pieces.empty(); }
   double origin[3]{0.0, 0.0, 0.0};  // planet-local metres of the scene's (0, datum, 0)
   struct Light {
     double position[3];
@@ -46,5 +54,8 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
 // The frame's point lights, camera-relative, nearest first (at most 64).
 void city_lights_for_frame(const CityUpload& upload, const render::Vec3& camera_pos, bool night,
                            std::vector<render::Rhi::CityLight>* out);
+// The nearest 64 lights over several uploads (appends to `out`).
+void city_lights_select(const std::vector<const CityUpload*>& uploads, const render::Vec3& camera_pos,
+                        std::vector<render::Rhi::CityLight>* out);
 
 }  // namespace inf::app

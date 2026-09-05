@@ -16,6 +16,8 @@
 #include "render/math.hpp"
 #include "render/rhi.hpp"
 
+#include "city_render.hpp"
+
 namespace inf::app {
 
 // T0020 WP5: the civilization view of the anchored body — its plan, its
@@ -45,8 +47,14 @@ struct CivAnchor {
     double origin[3]{0.0, 0.0, 0.0};
     std::uint8_t palette[4]{0, 0, 0, 0};
     double focus_x{0.0}, focus_y{0.0};
+    // T0021 WP3: at the near and mid levels the site's buildings come from
+    // the city system (one scene per site, streamed by focus).
+    CityUpload city;
+    int city_detail{-1};
+    double city_focus_x{0.0}, city_focus_y{0.0};
   };
   std::vector<SiteMeshEntry> meshes;
+  bool city_materials{false};  // the city material table is on the renderer
 
   struct TileEntry {
     gen::EcumenopolisField::TileId id;
@@ -79,6 +87,11 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
 
 // Releases the meshes (on re-anchoring).
 void release_civ_meshes(CivAnchor* civ, render::Rhi* rhi);
+
+// The point lights of every streamed city scene for this frame
+// (camera-relative, nearest first, at most 64; none by day).
+void civ_city_lights(const CivAnchor* civ, const render::Vec3& camera_pos, bool night,
+                     std::vector<render::Rhi::CityLight>* out);
 
 // --- the far-view bake (WP7) --------------------------------------------------
 // The orbit impostor is baked from the live generators on a background

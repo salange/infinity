@@ -75,35 +75,61 @@ CityUpload upload_city_scene(render::Rhi& rhi, const city::Scene& scene, const g
     out[1] = static_cast<float>(ex[1] * x - ny[1] * z + uz[1] * y);
     out[2] = static_cast<float>(ex[2] * x - ny[2] * z + uz[2] * y);
   };
-  const auto convert = [&](const city::Mesh& mesh) -> std::uint32_t {
-    if (mesh.indices.empty()) return 0;
-    std::vector<render::Rhi::CityVertex> verts(mesh.vertices.size());
-    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
-      const city::Vertex& v = mesh.vertices[i];
-      render::Rhi::CityVertex& o = verts[i];
-      double p[3];
-      place(v.position.x, v.position.y, v.position.z, p);
-      o.position[0] = static_cast<float>(p[0]);
-      o.position[1] = static_cast<float>(p[1]);
-      o.position[2] = static_cast<float>(p[2]);
-      rotate(v.normal.x, v.normal.y, v.normal.z, o.normal);
-      rotate(v.tangent.x, v.tangent.y, v.tangent.z, o.tangent);
-      o.tangent[3] = v.tangent.w;
-      o.uv[0] = v.uv.x;
-      o.uv[1] = v.uv.y;
-      o.material = v.material;
-      o.aux[0] = v.aux.x;
-      o.aux[1] = v.aux.y;
-      o.aux[2] = v.aux.z;
-      o.aux[3] = v.aux.w;
-    }
-    // Winding: the frame mapping (x, y, z) -> (east, up, north*-1) is a
-    // proper rotation (east x north = up), so triangle orientation is
-    // preserved.
-    return rhi.create_city_mesh(verts.data(), verts.size(), mesh.indices.data(), mesh.indices.size());
+  const auto convert_vertex = [&](const city::Vertex& v, render::Rhi::CityVertex* o) {
+    double p[3];
+    place(v.position.x, v.position.y, v.position.z, p);
+    o->position[0] = static_cast<float>(p[0]);
+    o->position[1] = static_cast<float>(p[1]);
+    o->position[2] = static_cast<float>(p[2]);
+    rotate(v.normal.x, v.normal.y, v.normal.z, o->normal);
+    rotate(v.tangent.x, v.tangent.y, v.tangent.z, o->tangent);
+    o->tangent[3] = v.tangent.w;
+    o->uv[0] = v.uv.x;
+    o->uv[1] = v.uv.y;
+    o->material = v.material;
+    o->aux[0] = v.aux.x;
+    o->aux[1] = v.aux.y;
+    o->aux[2] = v.aux.z;
+    o->aux[3] = v.aux.w;
   };
-  up.opaque = convert(scene.opaque);
-  up.foliage = convert(scene.foliage);
+  // Pieces: triangles are appended lot by lot with their own vertices,
+  // so walking the index buffer in order and cutting whenever the
+  // referenced vertex span would exceed the cap yields contiguous spans.
+  constexpr std::size_t kMaxPieceVertices = 1400000;  // ~95 MB of city vertices
+  const auto convert = [&](const city::Mesh& mesh, bool foliage) {
+    if (mesh.indices.empty()) return;
+    std::size_t tri = 0;
+    const std::size_t tri_count = mesh.indices.size() / 3;
+    while (tri < tri_count) {
+      std::uint32_t vmin = 0xFFFFFFFFu;
+      std::uint32_t vmax = 0;
+      std::size_t end = tri;
+      for (; end < tri_count; ++end) {
+        std::uint32_t lo = vmin;
+        std::uint32_t hi = vmax;
+        for (int k = 0; k < 3; ++k) {
+          const std::uint32_t idx = mesh.indices[end * 3 + k];
+          lo = std::min(lo, idx);
+          hi = std::max(hi, idx);
+        }
+        if (end > tri && static_cast<std::size_t>(hi - lo) + 1 > kMaxPieceVertices) break;
+        vmin = lo;
+        vmax = hi;
+      }
+      std::vector<render::Rhi::CityVertex> verts(static_cast<std::size_t>(vmax - vmin) + 1);
+      for (std::uint32_t v = vmin; v <= vmax; ++v) convert_vertex(mesh.vertices[v], &verts[v - vmin]);
+      std::vector<std::uint32_t> indices((end - tri) * 3);
+      for (std::size_t i = 0; i < indices.size(); ++i) indices[i] = mesh.indices[tri * 3 + i] - vmin;
+      // Winding: the frame mapping (x, y, z) -> (east, up, north*-1) is a
+      // proper rotation (east x north = up), so triangle orientation is
+      // preserved.
+      const std::uint32_t id = rhi.create_city_mesh(verts.data(), verts.size(), indices.data(), indices.size());
+      if (id != 0) up.pieces.push_back(CityUpload::Piece{id, foliage, static_cast<std::uint32_t>(end - tri)});
+      tri = end;
+    }
+  };
+  convert(scene.opaque, false);
+  convert(scene.foliage, true);
   up.triangles = static_cast<std::uint32_t>((scene.opaque.indices.size() + scene.foliage.indices.size()) / 3);
   for (const city::PointLight& l : scene.lights) {
     CityUpload::Light out;
@@ -124,9 +150,8 @@ CityUpload upload_city_scene(render::Rhi& rhi, const city::Scene& scene, const g
 }
 
 void release_city_upload(render::Rhi& rhi, CityUpload* upload) {
-  if (upload->opaque != 0) rhi.destroy_mesh(upload->opaque);
-  if (upload->foliage != 0) rhi.destroy_mesh(upload->foliage);
-  upload->opaque = upload->foliage = 0;
+  for (const CityUpload::Piece& piece : upload->pieces) rhi.destroy_mesh(piece.mesh);
+  upload->pieces.clear();
   upload->lights.clear();
   upload->draws.clear();
 }
@@ -138,10 +163,9 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
   const render::Mat4 model = render::translate(translation);
   const render::Mat4 mvp = render::mul(view_projection, model);
   constexpr double kTilePeriod = 256.0;
-  for (const std::uint32_t mesh : {upload.opaque, upload.foliage}) {
-    if (mesh == 0) continue;
+  for (const CityUpload::Piece& piece : upload.pieces) {
     render::Rhi::DrawItem item;
-    item.mesh = mesh;
+    item.mesh = piece.mesh;
     item.mode = 8;
     item.shadow_caster = true;
     std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
@@ -158,17 +182,24 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
 void city_lights_for_frame(const CityUpload& upload, const render::Vec3& camera_pos, bool night,
                            std::vector<render::Rhi::CityLight>* out) {
   if (!night) return;
+  const std::vector<const CityUpload*> one{&upload};
+  city_lights_select(one, camera_pos, out);
+}
+
+void city_lights_select(const std::vector<const CityUpload*>& uploads, const render::Vec3& camera_pos,
+                        std::vector<render::Rhi::CityLight>* out) {
   struct Ranked {
     double d2;
     const CityUpload::Light* light;
   };
   std::vector<Ranked> ranked;
-  ranked.reserve(upload.lights.size());
-  for (const CityUpload::Light& l : upload.lights) {
-    const double dx = l.position[0] - camera_pos.x;
-    const double dy = l.position[1] - camera_pos.y;
-    const double dz = l.position[2] - camera_pos.z;
-    ranked.push_back(Ranked{dx * dx + dy * dy + dz * dz, &l});
+  for (const CityUpload* upload : uploads) {
+    for (const CityUpload::Light& l : upload->lights) {
+      const double dx = l.position[0] - camera_pos.x;
+      const double dy = l.position[1] - camera_pos.y;
+      const double dz = l.position[2] - camera_pos.z;
+      ranked.push_back(Ranked{dx * dx + dy * dy + dz * dz, &l});
+    }
   }
   std::sort(ranked.begin(), ranked.end(), [](const Ranked& a, const Ranked& b) { return a.d2 < b.d2; });
   for (std::size_t i = 0; i < ranked.size() && out->size() < 64; ++i) {

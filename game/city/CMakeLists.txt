@@ -11,10 +11,13 @@ add_library(game_city STATIC
   src/towers.cpp
   src/standards.cpp
   src/props.cpp
-  src/showcase.cpp)
+  src/showcase.cpp
+  src/architecture.cpp
+  src/site_build.cpp
+  src/human/tech/architecture.cpp)
 add_library(game::city ALIAS game_city)
 target_include_directories(game_city PUBLIC include)
 target_compile_features(game_city PUBLIC cxx_std_20)
 target_link_libraries(game_city
-  PUBLIC engine::core
+  PUBLIC engine::core game::gen
   PRIVATE game_warnings)

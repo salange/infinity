@@ -1283,7 +1283,7 @@ int main(int argc, char** argv) {
     inf::city::generate_showcase_small(scene, inf::city::Rng(anchor->keys.entity).child(0x51));
     inf::app::upload_city_materials(*rhi, scene.materials);
     city_upload = inf::app::upload_city_scene(*rhi, scene, pick->frame, pick->datum_m);
-    city_active = city_upload.opaque != 0;
+    city_active = city_upload.drawable();
     const inf::gen::Dir3& up = pick->frame.up;
     const double r = anchor->radius + pick->datum_m;
     std::printf("city-showcase: %u triangles on site %u (%s) at planet-local (%.1f, %.1f, %.1f)\n",
@@ -3250,9 +3250,13 @@ int main(int argc, char** argv) {
       city_settings.shadows = !no_shadows;
       city_settings.taa = !no_taa;
       rhi->set_city_settings(city_settings);
-      if (city_active) {
+      {
         std::vector<inf::render::Rhi::CityLight> lights;
-        inf::app::city_lights_for_frame(city_upload, camera_pos, city_settings.night > 0.05f, &lights);
+        if (city_active) {
+          inf::app::city_lights_for_frame(city_upload, camera_pos, city_settings.night > 0.05f, &lights);
+        } else if (anchor && anchor->civ) {
+          inf::app::civ_city_lights(anchor->civ.get(), camera_pos, city_settings.night > 0.05f, &lights);
+        }
         rhi->set_city_lights(lights.data(), lights.size());
       }
     }

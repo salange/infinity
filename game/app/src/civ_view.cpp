@@ -1,5 +1,6 @@
 #include "civ_view.hpp"
 
+#include "city/site_build.hpp"
 #include "core/time/world_clock.hpp"
 
 #include <algorithm>
@@ -152,6 +153,7 @@ void release_civ_meshes(CivAnchor* civ, render::Rhi* rhi) {
       rhi->destroy_mesh(entry.mesh);
       entry.mesh = 0;
     }
+    release_city_upload(*rhi, &entry.city);
   }
   civ->meshes.clear();
   for (auto& tile : civ->tiles) {
@@ -323,6 +325,8 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
         entry.mesh = 0;
         entry.detail = -1;
       }
+      release_city_upload(*rhi, &entry.city);
+      entry.city_detail = -1;
       continue;
     }
     int detail = 2;
@@ -338,6 +342,76 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
     const bool refocus = detail <= 1 && site.radius_m > focus_radius &&
                          (std::fabs(fx - entry.focus_x) > 0.5 * focus_radius ||
                           std::fabs(fy - entry.focus_y) > 0.5 * focus_radius);
+    if (detail == 0) {
+      // Near: the site's lots through the city system (T0021 WP3) inside
+      // the focus, full detail nearest the player and the context levels
+      // beyond; on a big site the merged masses of the far level stay as
+      // the context outside the focus. The mid and far levels keep the
+      // mass path until WP5 streams the city scenes by level.
+      const bool refocus_city = site.radius_m > focus_radius &&
+                                (std::fabs(fx - entry.city_focus_x) > 0.5 * focus_radius ||
+                                 std::fabs(fy - entry.city_focus_y) > 0.5 * focus_radius);
+      if (entry.city_detail != detail || refocus_city) {
+        if (rebuilt < 1) {  // one scene per frame; the previous upload draws meanwhile
+          ++rebuilt;
+          if (entry.mesh != 0) {
+            rhi->destroy_mesh(entry.mesh);
+            entry.mesh = 0;
+            entry.detail = -1;
+          }
+          if (site.radius_m > focus_radius) {
+            gen::SiteMeshParams mp;
+            mp.detail = 1;
+            mp.context_only = true;
+            mp.focus_x = fx;
+            mp.focus_y = fy;
+            mp.focus_radius_m = focus_radius;
+            const gen::SiteMesh context = gen::build_site_mesh(*civ->sites, site, field, mp);
+            if (!context.mesh.vertices.empty()) {
+              entry.mesh = rhi->create_mesh_mat(context.mesh.vertices.data(), context.mesh.vertices.size());
+              entry.detail = detail;
+              entry.focus_x = fx;
+              entry.focus_y = fy;
+              std::memcpy(entry.origin, context.mesh.origin, sizeof(entry.origin));
+              std::memcpy(entry.palette, context.mesh.palette, sizeof(entry.palette));
+            }
+          }
+          city::SiteBuildParams bp;
+          bp.detail = 2;
+          if (site.radius_m > focus_radius) {
+            bp.focus_x = fx;
+            bp.focus_y = fy;
+            bp.focus_radius_m = focus_radius;
+          }
+          city::Scene scene;
+          city::SiteBuildStats stats;
+          city::build_site_scene(*civ->sites, site, field, bp, &scene, &stats);
+          if (!civ->city_materials) {
+            upload_city_materials(*rhi, scene.materials);
+            civ->city_materials = true;
+          }
+          release_city_upload(*rhi, &entry.city);
+          entry.city = upload_city_scene(*rhi, scene, site.frame, site.datum_m);
+          entry.city_detail = detail;
+          entry.city_focus_x = fx;
+          entry.city_focus_y = fy;
+          std::printf("city: site %u (%s) detail %d: %u lots (%u towers, %u standards, %u key), %u triangles\n",
+                      site.province, gen::to_string(static_cast<gen::SettlementTier>(site.tier)), detail,
+                      stats.lots, stats.towers, stats.standards, stats.key_buildings, stats.triangles);
+        }
+      }
+      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, items);
+      if (entry.mesh != 0) {
+        CivAnchor::TileEntry as_tile;
+        as_tile.mesh = entry.mesh;
+        std::memcpy(as_tile.origin, entry.origin, sizeof(as_tile.origin));
+        std::memcpy(as_tile.palette, entry.palette, sizeof(as_tile.palette));
+        push_item(as_tile, camera_pos, view_projection, items);
+      }
+      continue;
+    }
+    release_city_upload(*rhi, &entry.city);
+    entry.city_detail = -1;
     if (entry.mesh == 0 || entry.detail != detail || refocus) {
       if (rebuilt >= 2) {
         continue;  // spread rebuilds over frames
@@ -372,6 +446,16 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
     std::memcpy(as_tile.palette, entry.palette, sizeof(as_tile.palette));
     push_item(as_tile, camera_pos, view_projection, items);
   }
+}
+
+void civ_city_lights(const CivAnchor* civ, const render::Vec3& camera_pos, bool night,
+                     std::vector<render::Rhi::CityLight>* out) {
+  if (civ == nullptr || !night) return;
+  std::vector<const CityUpload*> uploads;
+  for (const auto& entry : civ->meshes) {
+    if (entry.city.drawable() && !entry.city.lights.empty()) uploads.push_back(&entry.city);
+  }
+  city_lights_select(uploads, camera_pos, out);
 }
 
 }  // namespace inf::app

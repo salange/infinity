@@ -218,6 +218,10 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
   // big sites the mid content itself is bounded by a wider radius, with
   // superblocks beyond.
   const double mid_radius = big ? (params.detail == 0 ? kMidFocusM : params.focus_radius_m) : 0.0;
+  if (params.context_only) {
+    if (big) superblocks(merge_mid, false, params.focus_radius_m);
+    return out;  // a small site is entirely the city system's
+  }
   if (big) {
     superblocks(merge_mid, false, mid_radius);  // beyond the mid radius (all of it without a focus)
   }

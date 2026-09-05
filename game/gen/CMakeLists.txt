@@ -11,6 +11,10 @@ configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/gen/version.
 
 add_library(game_gen STATIC
   src/biome.cpp
+  src/civ_names.cpp
+  src/civ_types.cpp
+  src/civilization.cpp
+  src/golden_civ.cpp
   src/caves.cpp
   src/climate.cpp
   src/deep_sky.cpp

@@ -34,4 +34,9 @@ std::string hash_density_report();
 // the fixed64 edit encoding, and the edit-aware ground query.
 std::string hash_edits_report();
 
+// T0020: civilization fingerprints (race registry, later owners, states,
+// plans, lots) at fixed ManualClock offsets from the launch reference.
+// Append-only sections so earlier lines stay byte-identical.
+std::string hash_civ_report();
+
 }  // namespace inf::gen

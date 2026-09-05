@@ -42,6 +42,10 @@ struct SystemPlanet {
   // Mapping to the surface generator; valid when landable.
   bool landable{false};
   PlanetType surface_type{PlanetType::Barren};
+  // T0020: this slot is a race's home world (planets/v1 forced its type);
+  // race_home_biosphere additionally forces a full biosphere on it.
+  bool race_home{false};
+  bool race_home_biosphere{false};
   std::vector<SystemMoon> moons;
 };
 
@@ -70,10 +74,32 @@ struct StarSystemParams {
 
 inline constexpr int kMaxPlanetSlots = 16;
 
+// T0020: what planets/v1 is told when the system is a race home (design
+// civilization section 6.4): the occupied terrestrial slot whose stellar
+// flux is nearest `preferred_flux` gets its surface type FORCED to
+// `habitat` (and, for organics, a full biosphere). Every other draw stays
+// keyed as-is; systems without an override are byte-identical to before.
+struct HomeSlotOverride {
+  PlanetType habitat{PlanetType::EarthLike};
+  double preferred_flux{1.0};
+  bool force_biosphere{true};
+};
+
 // Generates the whole system forever-state from the system ENTITY key
 // (layers stellar/v1, disk/v1, architecture/v1, planets/v1, moons/v1,
 // belts/v1 hang off it per the seeding contract).
-StarSystemParams generate_system(const core::Key& system_entity_key);
+StarSystemParams generate_system(const core::Key& system_entity_key,
+                                 const HomeSlotOverride* home_override = nullptr);
+
+// stellar/v1 alone: the primary star from the system entity key, without
+// generating planets. The civilization claim resolution reads this and
+// nothing else about a system (design civilization section 8).
+core::StarPhys system_star(const core::Key& system_entity_key);
+
+// The slot index generate_system would force for an override (the
+// terrestrial slot nearest the preferred flux; -1 if the system has no
+// occupied slot). Exposed so the civ layer can address the home body.
+int home_slot_for(const StarSystemParams& system, double preferred_flux);
 
 // First landable slot (guaranteed to exist by construction), for the
 // default spawn body.

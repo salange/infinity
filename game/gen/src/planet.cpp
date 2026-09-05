@@ -260,9 +260,11 @@ std::string PlanetParams::to_json() const {
   append_real(out, "pressure_rel", pressure_rel);
   char buffer[192];
   std::snprintf(buffer, sizeof(buffer),
-                "  \"tidally_locked\": %s,\n  \"sky_palette\": %u,\n  \"cells_per_face\": %u,\n"
+                "  \"tidally_locked\": %s,\n  \"forced_biosphere\": %s,\n"
+                "  \"sky_palette\": %u,\n  \"cells_per_face\": %u,\n"
                 "  \"palette_id\": %u\n",
-                tidally_locked ? "true" : "false", sky_palette, cells_per_face, palette_id);
+                tidally_locked ? "true" : "false", forced_biosphere ? "true" : "false",
+                sky_palette, cells_per_face, palette_id);
   out += buffer;
   out += "}\n";
   return out;

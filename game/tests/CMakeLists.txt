@@ -11,7 +11,8 @@ add_executable(game_tests
   test_player.cpp
   test_edits.cpp
   test_map.cpp
-  test_surface.cpp)
+  test_surface.cpp
+  test_civ.cpp)
 target_include_directories(game_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(game_tests
   PRIVATE game::gen game::sim game::tex doctest::doctest game_warnings)

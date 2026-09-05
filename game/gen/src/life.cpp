@@ -171,6 +171,18 @@ LifeParams derive_life(const core::Key& body_entity_key, const PlanetParams& pla
       }
       break;
   }
+  // T0020: a race home world is alive by decree (design civilization
+  // section 6.4). Chemistry follows the type as usual; a type with no
+  // natural candidate (a Barren machine cradle) takes the crystalline
+  // table so the world still reads as inhabited.
+  if (planet.forced_biosphere) {
+    if (candidate == LifeChemistry::None) {
+      candidate = planet.type == PlanetType::Barren || planet.type == PlanetType::Ice
+                      ? LifeChemistry::Crystalline
+                      : LifeChemistry::CarbonWater;
+    }
+    p_base = 1.0;
+  }
   life.habitable = candidate != LifeChemistry::None;
   if (!life.habitable) {
     return life;
@@ -178,7 +190,7 @@ LifeParams derive_life(const core::Key& body_entity_key, const PlanetParams& pla
 
   // --- occupancy: keyed Bernoulli, odds rising with star age -------------
   const double age_ramp = clamp01((age - 0.8) / 4.0) * 0.85 + 0.15;
-  life.occupied = u01(d0[0]) < p_base * age_ramp;
+  life.occupied = planet.forced_biosphere || u01(d0[0]) < p_base * age_ramp;
   const double jitter_roll = u01(d0[1]);
   const int jitter = jitter_roll < 0.25 ? -1 : (jitter_roll < 0.75 ? 0 : 1);
 
@@ -233,6 +245,9 @@ LifeParams derive_life(const core::Key& body_entity_key, const PlanetParams& pla
         break;
       default: break;
     }
+  }
+  if (planet.forced_biosphere) {
+    life.stage = LifeStage::FullBiosphere;
   }
   return life;
 }

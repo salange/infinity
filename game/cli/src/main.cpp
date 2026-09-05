@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 
+#include "commands_civ.hpp"
 #include "commands_planet.hpp"
 #include "commands_system.hpp"
 #include "gen/golden.hpp"
@@ -22,6 +23,7 @@ int print_usage() {
       "  hash-density         print the density-grid golden report\n"
       "  hash-system          print the planetary-system golden report\n"
       "  hash-edits           print the effective-density (player diff) golden report\n"
+      "  hash-civ             print the civilization golden report\n"
       "  goldens              print the FULL golden suite (all reports, one\n"
       "                       machine-readable document — diff across platforms)\n"
       "  dump-system --seed <hex128> [--start-ns N] [--span-ns N] [--steps N]\n"
@@ -44,6 +46,9 @@ int print_usage() {
       "                       write every procedural surface tile as PNGs\n"
       "  macro-stats [--seeds N]\n"
       "                       land-fraction + pattern report across seeds\n"
+      "  civ races [--seed <hex128>] [--at x y z]\n"
+      "                       races whose reach covers a point (galactocentric ly;\n"
+      "                       default: the home system)\n"
       "  (types: EarthLike|Barren|Desert|Ice)\n");
   return 2;
 }
@@ -93,6 +98,40 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (std::strcmp(argv[1], "hash-civ") == 0) {
+    return inf::cli::cmd_hash_civ();
+  }
+
+  if (std::strcmp(argv[1], "civ") == 0) {
+    if (argc < 3) {
+      std::fprintf(stderr, "civ needs a subcommand: races\n");
+      return 2;
+    }
+    const char* seed_text = "83";
+    double at[3] = {0.0, 0.0, 0.0};
+    bool have_at = false;
+    for (int i = 3; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+        seed_text = argv[++i];
+      } else if (std::strcmp(argv[i], "--at") == 0 && i + 3 < argc) {
+        at[0] = std::atof(argv[++i]);
+        at[1] = std::atof(argv[++i]);
+        at[2] = std::atof(argv[++i]);
+        have_at = true;
+      }
+    }
+    const std::optional<inf::core::Seed128> seed = inf::core::parse_seed(seed_text);
+    if (!seed.has_value()) {
+      std::fprintf(stderr, "invalid seed: %s\n", seed_text);
+      return 1;
+    }
+    if (std::strcmp(argv[2], "races") == 0) {
+      return inf::cli::cmd_civ_races(*seed, have_at ? at : nullptr);
+    }
+    std::fprintf(stderr, "unknown civ subcommand: %s\n", argv[2]);
+    return 2;
+  }
+
   // M8: the whole contract in one document — byte-identical across
   // platforms or the determinism promise is broken.
   if (std::strcmp(argv[1], "goldens") == 0) {
@@ -107,7 +146,8 @@ int main(int argc, char** argv) {
       return rc;
     }
     std::printf("=== suite: edits ===\n%s", inf::gen::hash_edits_report().c_str());
-    return 0;
+    std::printf("=== suite: civ ===\n");
+    return inf::cli::cmd_hash_civ();
   }
 
   if (std::strcmp(argv[1], "hash-system") == 0) {

@@ -5,6 +5,9 @@
 // F12 screenshot, +/- exposure.
 #include <GLFW/glfw3.h>
 
+#include <stb_image_write.h>
+
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -42,7 +45,11 @@ struct Args {
   int context_detail{-1};
   bool no_ssao{false};
   bool no_shadows{false};
+  bool no_taa{false};
   int size{-1};
+  int sweep{0};
+  float sweep_step{0.03f};
+  std::string sweep_out{"sweep"};
 };
 
 bool parse_vec3(const char* s, cb::Vec3* v) {
@@ -79,8 +86,12 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--no-vsync")) a.vsync = false;
     else if (!std::strcmp(argv[i], "--no-ssao")) a.no_ssao = true;
     else if (!std::strcmp(argv[i], "--no-shadows")) a.no_shadows = true;
+    else if (!std::strcmp(argv[i], "--no-taa")) a.no_taa = true;
     else if (!std::strcmp(argv[i], "--rings")) a.rings = std::atoi(next("--rings"));
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
+    else if (!std::strcmp(argv[i], "--sweep")) a.sweep = std::atoi(next("--sweep"));
+    else if (!std::strcmp(argv[i], "--sweep-step")) a.sweep_step = static_cast<float>(std::atof(next("--sweep-step")));
+    else if (!std::strcmp(argv[i], "--sweep-out")) a.sweep_out = next("--sweep-out");
     else if (!std::strcmp(argv[i], "--size")) {
       const std::string t = next("--size");
       a.size = t == "small" ? 0 : (t == "medium" ? 1 : (t == "large" ? 2 : (t == "metropolis" ? 3 : -1)));
@@ -189,6 +200,7 @@ int main(int argc, char** argv) {
   settings.exposure_bias = args.ev;
   settings.ssao = !args.no_ssao;
   settings.shadows = !args.no_shadows;
+  settings.taa = !args.no_taa;
   cb::Renderer renderer;
   if (!renderer.init(&gpu, shaders, settings, &error)) {
     std::fprintf(stderr, "renderer init failed: %s\n", error.c_str());
@@ -203,6 +215,107 @@ int main(int argc, char** argv) {
   cam.position = args.have_cam ? args.cam_pos : scene.camera_position;
   cam.look_at_point(args.have_cam ? args.cam_target : scene.camera_target);
 
+  if (args.sweep > 0) {
+    // Temporal-artifact analysis under motion. The camera slides sideways
+    // by `sweep_step` per frame; consecutive final frames are differenced,
+    // and the per-pixel screen motion (from the depth buffer and the two
+    // view-projections, exact for a static world) times the local gradient
+    // is subtracted: that is the change a band-limited image would show.
+    // The residual is temporal aliasing: shimmer, moire, crawling edges.
+    std::vector<std::uint8_t> prev, cur, ids;
+    std::vector<float> depth;
+    std::uint32_t w = 0, h = 0;
+    const int saved_debug = renderer.settings().debug_view;
+    renderer.settings().debug_view = 12;
+    renderer.render(cam, 0.0f, nullptr);
+    renderer.read_frame(&ids, &w, &h);
+    renderer.settings().debug_view = saved_debug;
+    renderer.reset_history();
+    std::vector<float> resid(static_cast<std::size_t>(w) * h, 0.0f), raw(resid.size(), 0.0f);
+    cb::Camera c2 = cam;
+    // warm-up so TAA history converges before measuring
+    for (int i = 0; i < 12; ++i) renderer.render(c2, 0.0f, nullptr);
+    renderer.render(c2, 0.0f, nullptr);
+    renderer.read_frame(&prev, &w, &h);
+    cb::Mat4 prev_vp = renderer.last_view_proj();
+    auto lum = [](const std::vector<std::uint8_t>& img, std::size_t px) {
+      return (0.299f * img[px * 4] + 0.587f * img[px * 4 + 1] + 0.114f * img[px * 4 + 2]) / 255.0f;
+    };
+    int measured = 0;
+    for (int i = 0; i < args.sweep; ++i) {
+      c2.position += c2.right() * args.sweep_step;
+      renderer.render(c2, static_cast<float>(i + 1) * 0.016f, nullptr);
+      renderer.read_frame(&cur, &w, &h);
+      renderer.read_depth(&depth, &w, &h);
+      const cb::Mat4 cur_vp = renderer.last_view_proj();
+      const cb::Mat4 inv_cur = cb::inverse(cur_vp);
+      for (std::uint32_t y = 1; y + 1 < h; ++y) {
+        for (std::uint32_t x = 1; x + 1 < w; ++x) {
+          const std::size_t px = static_cast<std::size_t>(y) * w + x;
+          const float d = std::fabs(lum(cur, px) - lum(prev, px));
+          raw[px] += d;
+          // where was this pixel's surface in the previous frame?
+          const float z = depth[px];
+          const cb::Vec4 ndc{(static_cast<float>(x) + 0.5f) / w * 2.0f - 1.0f, 1.0f - (static_cast<float>(y) + 0.5f) / h * 2.0f, z, 1.0f};
+          cb::Vec4 wp = cb::mul(inv_cur, ndc);
+          cb::Vec3 world = cb::Vec3{wp.x / wp.w, wp.y / wp.w, wp.z / wp.w};
+          cb::Vec4 pc = cb::mul(prev_vp, cb::Vec4{world, 1.0f});
+          float mx = 0.0f, my = 0.0f;
+          if (pc.w > 1e-4f) {
+            mx = (pc.x / pc.w * 0.5f + 0.5f) * w - (static_cast<float>(x) + 0.5f);
+            my = (0.5f - pc.y / pc.w * 0.5f) * h - (static_cast<float>(y) + 0.5f);
+          }
+          const float gx = 0.5f * std::fabs(lum(cur, px + 1) - lum(cur, px - 1));
+          const float gy = 0.5f * std::fabs(lum(cur, px + w) - lum(cur, px - w));
+          const float expected = std::fabs(mx) * gx + std::fabs(my) * gy;
+          resid[px] += std::max(0.0f, d - 1.5f * expected - 0.004f);
+        }
+      }
+      prev.swap(cur);
+      prev_vp = cur_vp;
+      ++measured;
+    }
+    const float norm = 1.0f / static_cast<float>(std::max(measured, 1));
+    double mat_sum[256] = {}, mat_cnt[256] = {}, total = 0.0, total_raw = 0.0;
+    std::vector<std::uint8_t> heat(static_cast<std::size_t>(w) * h * 4, 255);
+    for (std::size_t px = 0; px < resid.size(); ++px) {
+      const float f = resid[px] * norm;
+      total += f;
+      total_raw += raw[px] * norm;
+      const bool sky = ids[px * 4 + 1] > 8 || ids[px * 4 + 2] > 8;
+      const int id = sky ? 255 : ids[px * 4];
+      mat_sum[id] += f;
+      mat_cnt[id] += 1.0;
+      const float v = std::min(1.0f, f * 10.0f);
+      heat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
+      heat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
+      heat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+    }
+    std::printf("  sweep: %d steps of %.3f m, taa %s; mean temporal residual %.5f (raw frame difference %.5f)\n", measured,
+                args.sweep_step, renderer.settings().taa ? "on" : "off", total / static_cast<double>(resid.size()),
+                total_raw / static_cast<double>(resid.size()));
+    struct Row { int id; double mean; double share; };
+    std::vector<Row> rows;
+    for (int id = 0; id < 256; ++id) {
+      if (mat_cnt[id] < 200) continue;
+      rows.push_back(Row{id, mat_sum[id] / mat_cnt[id], mat_sum[id] / std::max(total, 1e-9)});
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& p1, const Row& p2) { return p1.share > p2.share; });
+    std::printf("  %-4s %-18s %-10s %-10s %s\n", "id", "material", "pixels", "residual", "share");
+    for (std::size_t i = 0; i < rows.size() && i < 10; ++i) {
+      const Row& r = rows[i];
+      const char* name = r.id == 255 ? "(sky)" : (r.id < static_cast<int>(scene.materials.size()) ? scene.materials[static_cast<std::size_t>(r.id)].name.c_str() : "?");
+      std::printf("  %-4d %-18s %-10.0f %-10.5f %.1f%%\n", r.id, name, mat_cnt[r.id], r.mean, r.share * 100.0);
+    }
+    stbi_write_png((args.sweep_out + "-heat.png").c_str(), static_cast<int>(w), static_cast<int>(h), 4, heat.data(), static_cast<int>(w * 4));
+    renderer.capture_png(args.sweep_out + "-frame.png");
+    std::printf("  wrote %s-heat.png and %s-frame.png\n", args.sweep_out.c_str(), args.sweep_out.c_str());
+    renderer.shutdown();
+    gpu.destroy();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+  }
   if (args.bench > 0) {
     // Offscreen benchmark: render N frames without presenting, wait for the
     // GPU, report the average. Independent of vsync and window visibility.
@@ -283,6 +396,7 @@ int main(int argc, char** argv) {
     if (pressed(GLFW_KEY_F3)) renderer.settings().shadows = !renderer.settings().shadows;
     if (pressed(GLFW_KEY_F4)) renderer.settings().bloom = !renderer.settings().bloom;
     if (pressed(GLFW_KEY_F5)) renderer.settings().fxaa = !renderer.settings().fxaa;
+    if (pressed(GLFW_KEY_F6)) renderer.settings().taa = !renderer.settings().taa;
     if (pressed(GLFW_KEY_EQUAL) || pressed(GLFW_KEY_KP_ADD)) renderer.settings().exposure_bias += 0.25f;
     if (pressed(GLFW_KEY_MINUS) || pressed(GLFW_KEY_KP_SUBTRACT)) renderer.settings().exposure_bias -= 0.25f;
     if (pressed(GLFW_KEY_R)) {

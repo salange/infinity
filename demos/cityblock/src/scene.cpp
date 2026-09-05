@@ -103,6 +103,44 @@ std::vector<MaterialDesc> make_materials() {
 }
 
 
+void Scene::register_range(std::uint32_t first, std::uint32_t end, Vec3 centre, float radius, int lod_group, int lod_level,
+                           float lod_max_distance) {
+  if (end <= first) return;
+  DrawRange r;
+  r.first = first;
+  r.count = end - first;
+  r.centre = centre;
+  r.radius = radius;
+  r.lod_group = lod_group;
+  r.lod_level = lod_level;
+  r.lod_max_distance = lod_max_distance;
+  draws.push_back(r);
+}
+
+void Scene::finalize_draws() {
+  std::sort(draws.begin(), draws.end(), [](const DrawRange& a, const DrawRange& b) { return a.first < b.first; });
+  std::vector<DrawRange> out;
+  std::uint32_t cursor = 0;
+  const std::uint32_t total = static_cast<std::uint32_t>(opaque.indices.size());
+  for (const DrawRange& r : draws) {
+    if (r.first > cursor) {
+      DrawRange gap;
+      gap.first = cursor;
+      gap.count = r.first - cursor;
+      out.push_back(gap);
+    }
+    out.push_back(r);
+    cursor = std::max(cursor, r.first + r.count);
+  }
+  if (cursor < total) {
+    DrawRange gap;
+    gap.first = cursor;
+    gap.count = total - cursor;
+    out.push_back(gap);
+  }
+  draws.swap(out);
+}
+
 float glass_floor_height(Mat glass) {
   switch (glass) {
     case M_GLASS_BLUE: return 4.0f;
@@ -426,6 +464,7 @@ Scene generate_scene(const SceneParams& params) {
   CitySize size = city_size_for(root);
   if (params.size >= 0) size = static_cast<CitySize>(params.size);
   const CityStats st = generate_city(sc, root.child(100), size);
+  sc.finalize_draws();
   sc.city_size = to_string(size);
   sc.city_radius = st.radius;
   sc.stats_blocks = st.blocks;

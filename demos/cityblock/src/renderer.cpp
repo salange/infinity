@@ -199,6 +199,36 @@ struct PostParams {
   Vec4 a, b;
 };
 
+// Frustum planes from a view-projection matrix (Gribb & Hartmann), as
+// (a,b,c,d) with the inside being positive.
+struct Frustum {
+  Vec4 planes[6];
+  static Frustum from(const Mat4& m) {
+    Frustum f;
+    auto row = [&](int r) { return Vec4{m.at(r, 0), m.at(r, 1), m.at(r, 2), m.at(r, 3)}; };
+    const Vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    auto add = [](Vec4 a, Vec4 b) { return Vec4{a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w}; };
+    auto sub = [](Vec4 a, Vec4 b) { return Vec4{a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w}; };
+    f.planes[0] = add(r3, r0);  // left
+    f.planes[1] = sub(r3, r0);  // right
+    f.planes[2] = add(r3, r1);  // bottom
+    f.planes[3] = sub(r3, r1);  // top
+    f.planes[4] = r2;           // near (z >= 0)
+    f.planes[5] = sub(r3, r2);  // far
+    for (Vec4& p : f.planes) {
+      const float l = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+      if (l > 0) { p.x /= l; p.y /= l; p.z /= l; p.w /= l; }
+    }
+    return f;
+  }
+  bool visible(Vec3 c, float r) const {
+    for (const Vec4& p : planes) {
+      if (p.x * c.x + p.y * c.y + p.z * c.z + p.w < -r) return false;
+    }
+    return true;
+  }
+};
+
 }  // namespace
 
 struct Renderer::Impl {
@@ -216,6 +246,8 @@ struct Renderer::Impl {
   WGPUBuffer frame_buf{nullptr}, cascade_buf{nullptr}, material_buf{nullptr}, light_buf{nullptr}, post_buf{nullptr};
   std::uint32_t material_count{0}, light_count{0};
   MeshBuffers opaque, foliage;
+  std::vector<DrawRange> draws;                 // from the scene
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> sel_main, sel_shadow;  // per-frame (first, count)
   // samplers
   WGPUSampler mat_samp{nullptr}, cube_samp{nullptr}, shadow_samp{nullptr}, clamp_samp{nullptr};
   // static textures
@@ -228,24 +260,41 @@ struct Renderer::Impl {
   // size-dependent
   std::uint32_t w{0}, h{0};
   Texture depth_pre, normal_pre, ao_a, ao_b, hdr_msaa, depth_msaa, hdr, ldr_a, ldr_b;
+  Texture taa_hist[2];
+  int taa_parity{0};
+  bool taa_valid{false};
+  Mat4 prev_view_proj{Mat4::identity()};
+  Mat4 last_view_proj{Mat4::identity()};
+  std::uint32_t frame_index{0};
+  WGPUBindGroupLayout taa_bgl{nullptr};
+  WGPUPipelineLayout taa_layout{nullptr};
+  WGPURenderPipeline p_taa{nullptr};
+  WGPUBuffer taa_buf{nullptr};
+  WGPUBindGroup taa_bg[2]{nullptr, nullptr};
+  WGPUBindGroup down0_taa_bg[2]{nullptr, nullptr}, tonemap_taa_bg[2]{nullptr, nullptr};
   std::vector<Texture> bloom;     // downsample chain, level i at w>>(i+1)
   std::vector<Texture> bloom_up;  // upsample chain, levels 0..L-2
   // bind groups
   WGPUBindGroup frame_bg{nullptr}, scene_tex_bg{nullptr}, cascade_bg{nullptr}, leaf_bg{nullptr}, ssao_bg{nullptr},
       blur_bg{nullptr}, sky_bg{nullptr}, tonemap_bg{nullptr}, fxaa_bg{nullptr}, blit_bg{nullptr},
-      dbg_ao_bg{nullptr}, dbg_normal_bg{nullptr};
+      dbg_ao_bg{nullptr}, dbg_normal_bg{nullptr}, dbg_hdr_bg{nullptr};
   std::vector<WGPUBindGroup> down_bg, up_bg;
   std::uint32_t post_slots{0};
   bool scene_dirty{true};
   bool have_scene{false};
 
   void release_targets() {
-    for (Texture* t : {&depth_pre, &normal_pre, &ao_a, &ao_b, &hdr_msaa, &depth_msaa, &hdr, &ldr_a, &ldr_b}) t->release();
+    for (Texture* t : {&depth_pre, &normal_pre, &ao_a, &ao_b, &hdr_msaa, &depth_msaa, &hdr, &ldr_a, &ldr_b, &taa_hist[0], &taa_hist[1]}) t->release();
+    for (WGPUBindGroup* g : {&taa_bg[0], &taa_bg[1], &down0_taa_bg[0], &down0_taa_bg[1], &tonemap_taa_bg[0], &tonemap_taa_bg[1]}) {
+      if (*g != nullptr) wgpuBindGroupRelease(*g);
+      *g = nullptr;
+    }
+    taa_valid = false;
     for (Texture& t : bloom) t.release();
     for (Texture& t : bloom_up) t.release();
     bloom.clear();
     bloom_up.clear();
-    for (WGPUBindGroup* g : {&ssao_bg, &blur_bg, &tonemap_bg, &fxaa_bg, &blit_bg, &scene_tex_bg, &dbg_ao_bg, &dbg_normal_bg}) {
+    for (WGPUBindGroup* g : {&ssao_bg, &blur_bg, &tonemap_bg, &fxaa_bg, &blit_bg, &scene_tex_bg, &dbg_ao_bg, &dbg_normal_bg, &dbg_hdr_bg}) {
       if (*g != nullptr) wgpuBindGroupRelease(*g);
       *g = nullptr;
     }
@@ -293,6 +342,12 @@ bool Renderer::init(Gpu* gpu, const std::string& shader_dir, RenderSettings sett
                               texture_entry(1, WGPUTextureSampleType_Float, WGPUTextureViewDimension_2D),
                               texture_entry(2, WGPUTextureSampleType_Float, WGPUTextureViewDimension_2D),
                               sampler_entry(3, WGPUSamplerBindingType_Filtering)});
+  I.taa_bgl = make_bgl(dev, {buffer_entry(0, WGPUShaderStage_Fragment, WGPUBufferBindingType_Uniform, false, 160),
+                             texture_entry(1, WGPUTextureSampleType_Float, WGPUTextureViewDimension_2D),
+                             texture_entry(2, WGPUTextureSampleType_Float, WGPUTextureViewDimension_2D),
+                             texture_entry(3, WGPUTextureSampleType_Depth, WGPUTextureViewDimension_2D),
+                             sampler_entry(4, WGPUSamplerBindingType_Filtering)});
+  I.taa_layout = make_layout(dev, {I.taa_bgl});
   I.main_layout = make_layout(dev, {I.frame_bgl, I.scene_tex_bgl});
   I.shadow_layout = make_layout(dev, {I.cascade_bgl, I.leaf_bgl});
   I.prepass_layout = make_layout(dev, {I.frame_bgl, I.leaf_bgl});
@@ -306,9 +361,10 @@ bool Renderer::init(Gpu* gpu, const std::string& shader_dir, RenderSettings sett
     return m;
   };
   WGPUShaderModule sm_shadow = shader("shadow.wgsl"), sm_pre = shader("prepass.wgsl"), sm_ssao = shader("ssao.wgsl"),
-                   sm_sky = shader("sky.wgsl"), sm_main = shader("main.wgsl"), sm_post = shader("post.wgsl");
+                   sm_sky = shader("sky.wgsl"), sm_main = shader("main.wgsl"), sm_post = shader("post.wgsl"),
+                   sm_taa = shader("taa.wgsl");
   if (!error->empty()) return false;
-  for (WGPUShaderModule m : {sm_shadow, sm_pre, sm_ssao, sm_sky, sm_main, sm_post}) {
+  for (WGPUShaderModule m : {sm_shadow, sm_pre, sm_ssao, sm_sky, sm_main, sm_post, sm_taa}) {
     if (m == nullptr) {
       *error = "shader module creation failed (see wgpu errors above)";
       return false;
@@ -363,7 +419,14 @@ bool Renderer::init(Gpu* gpu, const std::string& shader_dir, RenderSettings sett
     o.fs = "fs_blit"; I.p_copy = make_pipeline(dev, o);  // LDR → LDR copy
     o.color = gpu->surface_format; I.p_blit = make_pipeline(dev, o);
   }
-  for (WGPUShaderModule m : {sm_shadow, sm_pre, sm_ssao, sm_sky, sm_main, sm_post}) wgpuShaderModuleRelease(m);
+  {
+    PipelineOpts o;
+    o.module = sm_taa; o.layout = I.taa_layout; o.vs = "vs_fullscreen"; o.fs = "fs_taa"; o.color = hdr_fmt;
+    o.vertices = false; o.cull = WGPUCullMode_None;
+    I.p_taa = make_pipeline(dev, o);
+  }
+  for (WGPUShaderModule m : {sm_shadow, sm_pre, sm_ssao, sm_sky, sm_main, sm_post, sm_taa}) wgpuShaderModuleRelease(m);
+  I.taa_buf = gpu->create_buffer(WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, 160, nullptr, "taa");
 
   // ---- buffers, samplers, static textures ----------------------------------------
   I.frame_buf = gpu->create_buffer(WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, sizeof(FrameUniform), nullptr, "frame");
@@ -405,7 +468,10 @@ void Renderer::shutdown() {
   for (WGPUBindGroup* g : {&I.frame_bg, &I.cascade_bg, &I.leaf_bg, &I.sky_bg}) {
     if (*g != nullptr) wgpuBindGroupRelease(*g);
   }
-  for (WGPUBuffer* b : {&I.frame_buf, &I.cascade_buf, &I.material_buf, &I.light_buf, &I.post_buf}) {
+  if (I.p_taa != nullptr) wgpuRenderPipelineRelease(I.p_taa);
+  if (I.taa_layout != nullptr) wgpuPipelineLayoutRelease(I.taa_layout);
+  if (I.taa_bgl != nullptr) wgpuBindGroupLayoutRelease(I.taa_bgl);
+  for (WGPUBuffer* b : {&I.frame_buf, &I.cascade_buf, &I.material_buf, &I.light_buf, &I.post_buf, &I.taa_buf}) {
     if (*b != nullptr) wgpuBufferRelease(*b);
   }
   for (WGPUSampler* s : {&I.mat_samp, &I.cube_samp, &I.shadow_samp, &I.clamp_samp}) {
@@ -438,6 +504,12 @@ void Renderer::set_scene(const Scene& scene, const MaterialArrays& arrays) {
   };
   upload(scene.opaque, &I.opaque, "opaque");
   upload(scene.foliage, &I.foliage, "foliage");
+  I.draws = scene.draws;
+  if (I.draws.empty() && !scene.opaque.indices.empty()) {
+    DrawRange all;
+    all.count = static_cast<std::uint32_t>(scene.opaque.indices.size());
+    I.draws.push_back(all);
+  }
   triangles_ = static_cast<std::uint32_t>((scene.opaque.indices.size() + scene.foliage.indices.size()) / 3);
   // materials
   std::vector<GpuMaterial> mats;
@@ -485,7 +557,7 @@ void Renderer::resize(std::uint32_t w, std::uint32_t h) {
   I.w = w;
   I.h = h;
   const WGPUTextureUsage rt = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
-  I.depth_pre = gpu_->create_texture(w, h, WGPUTextureFormat_Depth32Float, rt, 1, 1, 1, "depth-pre");
+  I.depth_pre = gpu_->create_texture(w, h, WGPUTextureFormat_Depth32Float, rt | WGPUTextureUsage_CopySrc, 1, 1, 1, "depth-pre");
   I.normal_pre = gpu_->create_texture(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, 1, "normal-pre");
   I.ao_a = gpu_->create_texture(w, h, WGPUTextureFormat_R8Unorm, rt, 1, 1, 1, "ao-a");
   I.ao_b = gpu_->create_texture(w, h, WGPUTextureFormat_R8Unorm, rt, 1, 1, 1, "ao-b");
@@ -496,6 +568,8 @@ void Renderer::resize(std::uint32_t w, std::uint32_t h) {
     I.depth_msaa = gpu_->create_texture(w, h, WGPUTextureFormat_Depth32Float, WGPUTextureUsage_RenderAttachment, 1, 1, 1, "depth-1x");
   }
   I.hdr = gpu_->create_texture(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, 1, "hdr");
+  I.taa_hist[0] = gpu_->create_texture(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, 1, "taa-0");
+  I.taa_hist[1] = gpu_->create_texture(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, 1, "taa-1");
   I.ldr_a = gpu_->create_texture(w, h, WGPUTextureFormat_RGBA8Unorm, rt | WGPUTextureUsage_CopySrc, 1, 1, 1, "ldr-a");
   I.ldr_b = gpu_->create_texture(w, h, WGPUTextureFormat_RGBA8Unorm, rt | WGPUTextureUsage_CopySrc, 1, 1, 1, "ldr-b");
   std::uint32_t bw = w, bh = h;
@@ -523,10 +597,18 @@ void Renderer::resize(std::uint32_t w, std::uint32_t h) {
     I.up_bg.push_back(post_bg(lower, I.bloom[hi].view));
   }
   I.tonemap_bg = post_bg(I.hdr.view, I.bloom_up[0].view);
+  for (int p = 0; p < 2; ++p) {
+    // parity p: TAA writes taa_hist[p] from history taa_hist[1-p]; post reads taa_hist[p]
+    I.taa_bg[p] = make_bg(dev, I.taa_bgl, {bg_buffer(0, I.taa_buf, 160), bg_texture(1, I.hdr.view), bg_texture(2, I.taa_hist[1 - p].view),
+                                           bg_texture(3, I.depth_pre.view), bg_sampler(4, I.clamp_samp)});
+    I.down0_taa_bg[p] = post_bg(I.taa_hist[p].view, I.taa_hist[p].view);
+    I.tonemap_taa_bg[p] = post_bg(I.taa_hist[p].view, I.bloom_up[0].view);
+  }
   I.fxaa_bg = post_bg(I.ldr_a.view, I.ldr_a.view);
   I.blit_bg = post_bg(I.ldr_b.view, I.ldr_b.view);
   I.dbg_ao_bg = post_bg(I.ao_b.view, I.ao_b.view);
   I.dbg_normal_bg = post_bg(I.normal_pre.view, I.normal_pre.view);
+  I.dbg_hdr_bg = post_bg(I.hdr.view, I.hdr.view);
   I.scene_dirty = true;
 }
 
@@ -595,6 +677,22 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   FrameUniform fu{};
   fu.view = camera.view();
   fu.proj = perspective(camera.fov_y, aspect, zn, zf);
+  const Mat4 view_proj_clean = mul(fu.proj, fu.view);
+  float jx = settings_.jitter_x, jy = settings_.jitter_y;
+  const bool taa_on = settings_.taa && settings_.debug_view != 12;
+  if (taa_on) {
+    // Halton(2,3) sequence, 8 samples, centred
+    auto halton = [](std::uint32_t i, std::uint32_t b) {
+      float f = 1.0f, r = 0.0f;
+      while (i > 0) { f /= static_cast<float>(b); r += f * static_cast<float>(i % b); i /= b; }
+      return r;
+    };
+    const std::uint32_t k = (I.frame_index % 8) + 1;
+    jx += halton(k, 2) - 0.5f;
+    jy += halton(k, 3) - 0.5f;
+  }
+  fu.proj.at(0, 2) += 2.0f * jx / static_cast<float>(I.w);
+  fu.proj.at(1, 2) += 2.0f * jy / static_cast<float>(I.h);
   fu.view_proj = mul(fu.proj, fu.view);
   fu.inv_view_proj = inverse(fu.view_proj);
   fu.inv_proj = inverse(fu.proj);
@@ -647,6 +745,43 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     }
   }
 
+  // ---- draw selection: LOD by distance, frustum culling ---------------------------
+  {
+    const Frustum frustum = Frustum::from(fu.view_proj);
+    I.sel_main.clear();
+    I.sel_shadow.clear();
+    // per LOD group, the finest level whose max distance exceeds the camera distance
+    std::vector<int> chosen(static_cast<std::size_t>(std::max(1, 1 + [&] { int mx = -1; for (const DrawRange& d : I.draws) mx = std::max(mx, d.lod_group); return mx; }())), 99);
+    for (const DrawRange& d : I.draws) {
+      if (d.lod_group < 0) continue;
+      const float dist = length(d.centre - camera.position);
+      if (dist < d.lod_max_distance) chosen[static_cast<std::size_t>(d.lod_group)] = std::min(chosen[static_cast<std::size_t>(d.lod_group)], d.lod_level);
+    }
+    for (const DrawRange& d : I.draws) {
+      const bool in_view = d.radius <= 0.0f || frustum.visible(d.centre, d.radius);
+      if (d.lod_group < 0) {
+        if (in_view) I.sel_main.emplace_back(d.first, d.count);
+        I.sel_shadow.emplace_back(d.first, d.count);
+        continue;
+      }
+      const int pick = chosen[static_cast<std::size_t>(d.lod_group)];
+      if (d.lod_level == pick && in_view) I.sel_main.emplace_back(d.first, d.count);
+      if (d.lod_level == 2 || (pick > 2 && d.lod_level == pick)) I.sel_shadow.emplace_back(d.first, d.count);  // shadows from the coarse level
+    }
+    // merge contiguous ranges to cut draw calls
+    auto merge = [](std::vector<std::pair<std::uint32_t, std::uint32_t>>& v) {
+      std::sort(v.begin(), v.end());
+      std::vector<std::pair<std::uint32_t, std::uint32_t>> out;
+      for (const auto& r : v) {
+        if (!out.empty() && out.back().first + out.back().second == r.first) out.back().second += r.second;
+        else out.push_back(r);
+      }
+      v.swap(out);
+    };
+    merge(I.sel_main);
+    merge(I.sel_shadow);
+  }
+
   WGPUCommandEncoderDescriptor ed{};
   WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev, &ed);
   auto draw_mesh = [&](WGPURenderPassEncoder pass, const MeshBuffers& m) {
@@ -654,6 +789,12 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     wgpuRenderPassEncoderSetVertexBuffer(pass, 0, m.vertices, 0, WGPU_WHOLE_SIZE);
     wgpuRenderPassEncoderSetIndexBuffer(pass, m.indices, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
     wgpuRenderPassEncoderDrawIndexed(pass, m.index_count, 1, 0, 0, 0);
+  };
+  auto draw_opaque = [&](WGPURenderPassEncoder pass, const std::vector<std::pair<std::uint32_t, std::uint32_t>>& sel) {
+    if (I.opaque.index_count == 0) return;
+    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, I.opaque.vertices, 0, WGPU_WHOLE_SIZE);
+    wgpuRenderPassEncoderSetIndexBuffer(pass, I.opaque.indices, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+    for (const auto& r : sel) wgpuRenderPassEncoderDrawIndexed(pass, r.second, 1, r.first, 0, 0);
   };
   auto depth_attachment = [](WGPUTextureView v, bool clear) {
     WGPURenderPassDepthStencilAttachment a{};
@@ -685,7 +826,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
       wgpuRenderPassEncoderSetBindGroup(pass, 0, I.cascade_bg, 1, &off);
       wgpuRenderPassEncoderSetBindGroup(pass, 1, I.leaf_bg, 0, nullptr);
       wgpuRenderPassEncoderSetPipeline(pass, I.p_shadow);
-      draw_mesh(pass, I.opaque);
+      draw_opaque(pass, I.sel_shadow);
       wgpuRenderPassEncoderSetPipeline(pass, I.p_shadow_foliage);
       draw_mesh(pass, I.foliage);
       wgpuRenderPassEncoderEnd(pass);
@@ -704,7 +845,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     wgpuRenderPassEncoderSetBindGroup(pass, 0, I.frame_bg, 0, nullptr);
     wgpuRenderPassEncoderSetBindGroup(pass, 1, I.leaf_bg, 0, nullptr);
     wgpuRenderPassEncoderSetPipeline(pass, I.p_prepass);
-    draw_mesh(pass, I.opaque);
+    draw_opaque(pass, I.sel_main);
     wgpuRenderPassEncoderSetPipeline(pass, I.p_prepass_foliage);
     draw_mesh(pass, I.foliage);
     wgpuRenderPassEncoderEnd(pass);
@@ -742,7 +883,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
     wgpuRenderPassEncoderSetBindGroup(pass, 1, I.scene_tex_bg, 0, nullptr);
     wgpuRenderPassEncoderSetPipeline(pass, I.p_main);
-    draw_mesh(pass, I.opaque);
+    draw_opaque(pass, I.sel_main);
     wgpuRenderPassEncoderSetPipeline(pass, I.p_foliage);
     draw_mesh(pass, I.foliage);
     wgpuRenderPassEncoderEnd(pass);
@@ -762,18 +903,42 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
   };
+  const bool run_taa = taa_on && settings_.ssao;  // needs the 1x depth of the prepass
+  const int par = I.taa_parity;
+  if (run_taa) {
+    struct TaaUniform { Mat4 inv_vp; Mat4 prev_vp; Vec4 params; Vec4 jitter; } tu;
+    tu.inv_vp = inverse(view_proj_clean);
+    tu.prev_vp = I.prev_view_proj;
+    tu.params = Vec4{0.92f, I.taa_valid ? 1.0f : 0.0f, static_cast<float>(I.w), static_cast<float>(I.h)};
+    tu.jitter = Vec4{jx, -jy, 0.0f, 0.0f};  // uv y is flipped relative to clip y
+    gpu_->write_buffer(I.taa_buf, 0, &tu, sizeof(tu));
+    WGPURenderPassColorAttachment ca = color_attachment(I.taa_hist[par].view, nullptr, true);
+    WGPURenderPassDescriptor rp{};
+    rp.colorAttachmentCount = 1;
+    rp.colorAttachments = &ca;
+    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
+    wgpuRenderPassEncoderSetBindGroup(pass, 0, I.taa_bg[par], 0, nullptr);
+    wgpuRenderPassEncoderSetPipeline(pass, I.p_taa);
+    wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    wgpuRenderPassEncoderEnd(pass);
+    wgpuRenderPassEncoderRelease(pass);
+  }
   if (settings_.bloom) {
-    for (std::uint32_t i = 0; i < kBloomLevels; ++i) post(I.p_down, I.down_bg[i], 4 + i, I.bloom[i].view);
+    for (std::uint32_t i = 0; i < kBloomLevels; ++i) post(I.p_down, (i == 0 && run_taa) ? I.down0_taa_bg[par] : I.down_bg[i], 4 + i, I.bloom[i].view);
     for (std::uint32_t i = 0; i < kBloomLevels - 1; ++i) {
       const std::uint32_t hi = kBloomLevels - 2 - i;
       post(I.p_up, I.up_bg[i], 4 + kBloomLevels + i, I.bloom_up[hi].view);
     }
   }
-  post(I.p_tonemap, I.tonemap_bg, 0, I.ldr_a.view);
-  if (settings_.fxaa) {
-    post(I.p_fxaa, I.fxaa_bg, 1, I.ldr_b.view);
+  if (settings_.debug_view == 12) {
+    post(I.p_copy, I.dbg_hdr_bg, 3, I.ldr_b.view);  // ids straight from the HDR target, no tonemap
   } else {
-    post(I.p_copy, I.fxaa_bg, 3, I.ldr_b.view);  // slot 3: plain copy (a.x = 0)
+    post(I.p_tonemap, run_taa ? I.tonemap_taa_bg[par] : I.tonemap_bg, 0, I.ldr_a.view);
+    if (settings_.fxaa) {
+      post(I.p_fxaa, I.fxaa_bg, 1, I.ldr_b.view);
+    } else {
+      post(I.p_copy, I.fxaa_bg, 3, I.ldr_b.view);  // slot 3: plain copy (a.x = 0)
+    }
   }
   if (settings_.debug_view == 10) post(I.p_copy, I.dbg_ao_bg, 3, I.ldr_b.view);
   if (settings_.debug_view == 11) post(I.p_copy, I.dbg_normal_bg, 3, I.ldr_b.view);
@@ -784,6 +949,33 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   wgpuQueueSubmit(gpu_->queue, 1, &cmd);
   wgpuCommandBufferRelease(cmd);
   wgpuCommandEncoderRelease(enc);
+  if (run_taa) {
+    I.taa_valid = true;
+    I.taa_parity = 1 - I.taa_parity;
+  } else {
+    I.taa_valid = false;
+  }
+  I.prev_view_proj = view_proj_clean;
+  I.last_view_proj = view_proj_clean;
+  ++I.frame_index;
+}
+
+bool Renderer::read_depth(std::vector<float>* depth, std::uint32_t* w, std::uint32_t* h) {
+  Impl& I = *impl_;
+  *w = I.depth_pre.width;
+  *h = I.depth_pre.height;
+  return gpu_->read_depth32(I.depth_pre, depth);
+}
+
+const Mat4& Renderer::last_view_proj() const { return impl_->last_view_proj; }
+
+void Renderer::reset_history() { impl_->taa_valid = false; }
+
+bool Renderer::read_frame(std::vector<std::uint8_t>* rgba, std::uint32_t* w, std::uint32_t* h) {
+  Impl& I = *impl_;
+  *w = I.ldr_b.width;
+  *h = I.ldr_b.height;
+  return gpu_->read_rgba8(I.ldr_b, rgba);
 }
 
 bool Renderer::capture_png(const std::string& path) {

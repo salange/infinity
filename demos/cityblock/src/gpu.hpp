@@ -69,6 +69,7 @@ class Gpu {
   std::uint32_t width{0}, height{0};
   std::string adapter_name;
   std::uint64_t max_buffer_size{0};
+  bool vsync{true};
 
  private:
   void configure_surface();

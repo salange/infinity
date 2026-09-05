@@ -35,24 +35,10 @@ struct Rgb {
   float r, g, b;
 };
 
-// material/v1 albedos — mirrors the WGSL palette in the RHI shader.
-Rgb material_albedo(Material id) {
-  switch (id) {
-    case Material::Rock: return {0.42f, 0.38f, 0.34f};
-    case Material::Regolith: return {0.46f, 0.44f, 0.41f};
-    case Material::Sand: return {0.78f, 0.68f, 0.47f};
-    case Material::Grass: return {0.28f, 0.43f, 0.20f};
-    case Material::Snow: return {0.92f, 0.94f, 0.97f};
-    case Material::IceSheet: return {0.70f, 0.80f, 0.90f};
-    case Material::Seabed: return {0.34f, 0.35f, 0.29f};
-    case Material::Scree: return {0.35f, 0.32f, 0.29f};
-    default: return {0.55f, 0.52f, 0.45f};
-  }
-}
-
 }  // namespace
 
-PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_size) {
+PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_size,
+                                  const float* albedo_table) {
   PlanetTexture out;
   out.face_size = face_size;
   const PlanetParams& planet = field.planet();
@@ -61,9 +47,29 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
   const bool ocean_world = planet.type == PlanetType::EarthLike;
   const bool frozen_sea =
       planet.type == PlanetType::Ice && planet.land_fraction.to_double() < 0.999;
-  // Per-planet palette shift, same mapping the app feeds the shader.
-  const float shift =
-      static_cast<float>(static_cast<double>(planet.palette_id % 201U) / 100.0 - 1.0);
+  // Material colours: the loaded tile means when the app supplies them,
+  // else the registry means — both under the planet's palette tints.
+  // Tile means are sRGB-encoded like the tiles; the far-view albedo map
+  // is sampled as linear, so decode (x^2.2 ~ x*x*(0.8 + 0.2x), no libm).
+  const auto decode = [](float x) {
+    x = x < 0.0f ? 0.0f : x;
+    return x * x * (0.8f + 0.2f * x);
+  };
+  const auto material_rgb = [&](Material id) {
+    Rgb out;
+    float tint[3];
+    field.material().tint(id, tint);
+    const auto index = static_cast<std::size_t>(id);
+    if (albedo_table != nullptr && index < kMaterialCount) {
+      out = {decode(albedo_table[index * 3]) * tint[0], decode(albedo_table[index * 3 + 1]) * tint[1],
+             decode(albedo_table[index * 3 + 2]) * tint[2]};
+    } else {
+      const MaterialInfo& info = material_info(id);
+      out = {decode(info.albedo[0]) * tint[0], decode(info.albedo[1]) * tint[1],
+             decode(info.albedo[2]) * tint[2]};
+    }
+    return out;
+  };
 
   // ONE body-scoped cache for the whole bake: the province blend is the
   // cost (48.7 us cold vs 1.14 us warm per sample), and every face of
@@ -138,7 +144,7 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
         if ((ocean_world || frozen_sea) &&
             raw_m[face][index] < static_cast<float>(sea)) {
           if (frozen_sea) {
-            albedo = material_albedo(Material::IceSheet);
+            albedo = material_rgb(Material::IceSheet);
           } else {
             // Depth-tinted open water (matches the ocean impostor hues).
             const float depth = static_cast<float>(sea) - raw_m[face][index];
@@ -174,18 +180,30 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
           ny /= len;
           nz /= len;
           const double r = radius + static_cast<double>(h);
-          const VertexMaterial vm =
-              field.material().classify(dx * r, dy * r, dz * r, nx, ny, nz);
-          const Rgb a0 = material_albedo(vm.mat0);
-          const Rgb a1 = material_albedo(vm.mat1);
-          const float blend = vm.blend < 0.0f ? 0.0f : (vm.blend > 1.0f ? 1.0f : vm.blend);
-          albedo = {a0.r + (a1.r - a0.r) * blend, a0.g + (a1.g - a0.g) * blend,
-                    a0.b + (a1.b - a0.b) * blend};
+          // Weight-averaged material colour: a texel covers hundreds of
+          // metres, so it shows the MIX the rules produce, not a hard
+          // top-two pick (which read as blocky patches from orbit).
+          double weights[kMaterialCount];
+          field.material_weights(dx * r, dy * r, dz * r, nx, ny, nz, &cache, weights);
+          double total = 0.0;
+          double acc[3] = {0.0, 0.0, 0.0};
+          for (std::uint32_t m = 1; m < kMaterialCount; ++m) {
+            if (weights[m] <= 0.0) {
+              continue;
+            }
+            const Rgb c = material_rgb(static_cast<Material>(m));
+            acc[0] += weights[m] * c.r;
+            acc[1] += weights[m] * c.g;
+            acc[2] += weights[m] * c.b;
+            total += weights[m];
+          }
+          if (total > 0.0) {
+            albedo = {static_cast<float>(acc[0] / total), static_cast<float>(acc[1] / total),
+                      static_cast<float>(acc[2] / total)};
+          } else {
+            albedo = material_rgb(Material::RockGranite);
+          }
         }
-        // Per-planet palette shift (same hue rotation as the terrain).
-        albedo.r *= 1.0f + shift * 0.10f;
-        albedo.g *= 1.0f + shift * 0.02f;
-        albedo.b *= 1.0f - shift * 0.08f;
         const auto to_byte = [](float value) {
           const float scaled = value * 255.0f + 0.5f;
           return static_cast<std::uint8_t>(scaled < 0.0f ? 0.0f

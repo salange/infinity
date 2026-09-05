@@ -21,6 +21,7 @@ std::uint64_t hash_planet_script(const core::Seed128& seed, std::uint32_t forced
 
 // Multi-seed x all-types report compared by ci/check.sh
 // (tests/goldens/hash-planet.txt).
+std::uint64_t hash_surface_script(const core::Seed128& seed, std::uint32_t forced_type);
 std::string hash_planet_report();
 
 // M3: density-grid fingerprints for a fixed chunk set (surface, elevated

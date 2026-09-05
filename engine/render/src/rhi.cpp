@@ -32,7 +32,7 @@ namespace {
 
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
-constexpr std::uint64_t kItemUniformSize = 112;  // mvp + color + aux + extra
+constexpr std::uint64_t kItemUniformSize = 128;  // mvp + color + aux + extra + palette
 constexpr std::uint64_t kFrameUniformSize = 144;  // 9 vec4s (see Frame in WGSL)
 
 constexpr const char* kMeshShader = R"(
@@ -55,6 +55,7 @@ struct Uniforms {
   color: vec4<f32>,
   aux: vec4<f32>,
   extra: vec4<f32>,
+  palette: vec4<f32>,  // lit terrain: four material ids (0 = unused)
 };
 // Per-frame globals (frame of the meshes = anchor-planet-local):
 //   sun_dir.xyz light direction; sun_color.rgb light tint, .a time (s);
@@ -85,6 +86,137 @@ struct Frame {
 @group(1) @binding(0) var planet_height: texture_2d_array<f32>;
 @group(1) @binding(1) var planet_material: texture_2d_array<f32>;
 @group(1) @binding(2) var planet_sampler: sampler;
+
+// Surface material library (T0019): albedo.rgb + height.a, normal.xy +
+// roughness.z + ao/emissive.w, one layer per material id, repeat sampler.
+@group(2) @binding(0) var mat_albedo: texture_2d_array<f32>;
+@group(2) @binding(1) var mat_normal: texture_2d_array<f32>;
+@group(2) @binding(2) var mat_sampler: sampler;
+struct MaterialTable {
+  a: array<vec4<f32>, 64>,  // tint.rgb, tile size (m)
+  b: array<vec4<f32>, 64>,  // roughness, emissive, normal strength, ready
+  c: array<vec4<f32>, 64>,  // untinted mean albedo.rgb
+};
+@group(2) @binding(3) var<uniform> mats: MaterialTable;
+
+const kTilePeriodM: f32 = 256.0;  // must match the app's origin modulo
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+  return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+fn hash2(p: vec2<f32>) -> vec2<f32> {
+  var q = vec3<f32>(fract(p.x * 0.1031), fract(p.y * 0.1030), fract((p.x + p.y) * 0.0973));
+  q += dot(q, q.yzx + 33.33);
+  return fract(vec2<f32>((q.x + q.y) * q.z, (q.x + q.z) * q.y));
+}
+
+struct TileSample {
+  albedo: vec3<f32>,
+  height: f32,
+  tnormal: vec2<f32>,  // -1..1
+  rough: f32,
+  aux: f32,            // ao, or emissive mask
+};
+
+// Stochastic tiling on a square lattice split into triangles (the
+// Heitz-Neyret triangle-grid blend with Mikkelsen's sharpened weights and
+// a variance-preserving colour blend around the tile mean). Each lattice
+// vertex owns a random rotation + offset of the tile. Vertex ids are
+// hashed MODULO the tile period so the per-chunk coordinate offsets the
+// CPU applies (multiples of the period) never change a tile's look —
+// no seams at chunk borders, no f32 swim at planet radii.
+fn sample_tiled(layer: i32, uv: vec2<f32>, ddx_uv: vec2<f32>, ddy_uv: vec2<f32>,
+                period_cells: f32, mean: vec3<f32>) -> TileSample {
+  let cell = floor(uv);
+  let f = uv - cell;
+  var verts = array<vec2<f32>, 3>(cell, cell + vec2<f32>(1.0, 0.0), cell + vec2<f32>(0.0, 1.0));
+  var w = vec3<f32>(1.0 - f.x - f.y, f.x, f.y);
+  if (f.x + f.y >= 1.0) {
+    verts[0] = cell + vec2<f32>(1.0, 1.0);
+    w = vec3<f32>(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+  }
+  w = w * w * w;
+  w = w * w;  // ^6: mostly one tile, narrow blend bands
+  w = w / (w.x + w.y + w.z);
+  var acc_a = vec3<f32>(0.0);
+  var acc_h = 0.0;
+  var acc_n = vec2<f32>(0.0);
+  var acc_r = 0.0;
+  var acc_x = 0.0;
+  for (var i = 0; i < 3; i++) {
+    let vm = verts[i] - period_cells * floor(verts[i] / period_cells);
+    let r = hash2(vm + vec2<f32>(0.37, 0.11));
+    let ang = r.y * 6.2831853;
+    let c = cos(ang);
+    let sn = sin(ang);
+    // rotated about the vertex, then a random offset
+    let d = uv - verts[i];
+    let suv = vec2<f32>(c * d.x - sn * d.y, sn * d.x + c * d.y) + r * 7.31;
+    let gx = vec2<f32>(c * ddx_uv.x - sn * ddx_uv.y, sn * ddx_uv.x + c * ddx_uv.y);
+    let gy = vec2<f32>(c * ddy_uv.x - sn * ddy_uv.y, sn * ddy_uv.x + c * ddy_uv.y);
+    let a = textureSampleGrad(mat_albedo, mat_sampler, suv, layer, gx, gy);
+    let nm = textureSampleGrad(mat_normal, mat_sampler, suv, layer, gx, gy);
+    let n2 = nm.xy * 2.0 - 1.0;
+    // rotate the tangent normal back into the uv frame (inverse rotation)
+    let n2r = vec2<f32>(c * n2.x + sn * n2.y, -sn * n2.x + c * n2.y);
+    let wi = w[i];
+    acc_a += wi * (a.rgb - mean);
+    acc_h += wi * a.a;
+    acc_n += wi * n2r;
+    acc_r += wi * nm.z;
+    acc_x += wi * nm.w;
+  }
+  let norm = inverseSqrt(dot(w, w));
+  var out: TileSample;
+  out.albedo = max(mean + acc_a * norm, vec3<f32>(0.0));
+  out.height = acc_h;
+  out.tnormal = acc_n;
+  out.rough = acc_r;
+  out.aux = acc_x;
+  return out;
+}
+
+// One material on one projection plane: fine scale hex-tiled + coarse
+// scale (8x larger, plain) blended by distance (NMS's two-scale trick),
+// so close-ups get photographic detail and the horizon gets no moire.
+fn sample_material(layer: i32, p: vec2<f32>, dpx: vec2<f32>, dpy: vec2<f32>,
+                   coarse_w: f32) -> TileSample {
+  let tile = max(mats.a[layer].w, 0.25);
+  let mean = srgb_to_linear(mats.c[layer].rgb);
+  let fine = sample_tiled(layer, p / tile, dpx / tile, dpy / tile, kTilePeriodM / tile, mean);
+  let ct = tile * 8.0;
+  let cuv = p / ct + vec2<f32>(0.5, 0.25);
+  let ca = textureSampleGrad(mat_albedo, mat_sampler, cuv, layer, dpx / ct, dpy / ct);
+  let cn = textureSampleGrad(mat_normal, mat_sampler, cuv, layer, dpx / ct, dpy / ct);
+  var out: TileSample;
+  out.albedo = mix(fine.albedo, ca.rgb, coarse_w);
+  out.height = mix(fine.height, ca.a, coarse_w);
+  out.tnormal = mix(fine.tnormal, cn.xy * 2.0 - 1.0, coarse_w);
+  out.rough = mix(fine.rough, cn.z, coarse_w);
+  out.aux = mix(fine.aux, cn.w, coarse_w);
+  return out;
+}
+
+// Height-based blend of the vertex's two materials (contrast-preserving:
+// the taller texel wins within a soft band), then the planet tint.
+fn blend_pair(s0: TileSample, s1: TileSample, blend: f32) -> TileSample {
+  let h0 = s0.height + (1.0 - blend);
+  let h1 = s1.height + blend;
+  let ma = max(h0, h1) - 0.3;
+  var w0 = max(h0 - ma, 0.0);
+  var w1 = max(h1 - ma, 0.0);
+  let inv = 1.0 / max(w0 + w1, 1.0e-4);
+  w0 *= inv;
+  w1 *= inv;
+  var out: TileSample;
+  out.albedo = s0.albedo * w0 + s1.albedo * w1;
+  out.height = s0.height * w0 + s1.height * w1;
+  out.tnormal = s0.tnormal * w0 + s1.tnormal * w1;
+  out.rough = s0.rough * w0 + s1.rough * w1;
+  out.aux = s0.aux * w0 + s1.aux * w1;
+  return out;
+}
 
 // Direction -> (u01, v01, face), mirroring world/cubesphere.cpp exactly
 // (dominant axis, ties broken x, y, z).
@@ -132,16 +264,15 @@ struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) opos: vec3<f32>,
-  // material/v1 (T0015 WP3): two material ids packed as mat0*256+mat1,
-  // FLAT so the pair never interpolates across a triangle; the blend
-  // fraction interpolates smoothly.
-  @location(2) @interpolate(flat) mat_pack: f32,
-  @location(3) mat_blend: f32,
+  // T0019: per-vertex weights over the item's four-material palette
+  // (interpolated, so transitions never follow triangle edges). Star
+  // billboards reuse .x as a packed rgb and .y as the twinkle phase.
+  @location(2) weights: vec4<f32>,
 };
 
 @vertex
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
-           @location(2) mat_pack: f32, @location(3) mat_blend: f32) -> VSOut {
+           @location(2) weights: vec4<f32>) -> VSOut {
   var out: VSOut;
   let mode = u32(u.extra.w + 0.5);
   if (mode == 6u) {
@@ -154,8 +285,7 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     out.pos = u.mvp * vec4<f32>(dir * (1.0 + h * u.extra.x), 1.0);
     out.opos = dir;  // undisplaced unit direction; fragment re-derives uv
     out.normal = dir;
-    out.mat_pack = 0.0;
-    out.mat_blend = 0.0;
+    out.weights = vec4<f32>(0.0);
     return out;
   }
   if (mode == 7u) {
@@ -174,15 +304,13 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
                         clip.w * 3.0e-22, clip.w);
     out.opos = vec3<f32>(corner.x / half_len, corner.y / half_len, 0.0);
     out.normal = vec3<f32>(normal.z, 0.0, 0.0);
-    out.mat_pack = mat_pack;
-    out.mat_blend = mat_blend;
+    out.weights = weights;
     return out;
   }
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = normal;
   out.opos = position;
-  out.mat_pack = mat_pack;
-  out.mat_blend = mat_blend;
+  out.weights = weights;
   return out;
 }
 
@@ -398,14 +526,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // and adding 0.5 above 2^23 creates a round-to-even tie that bumps
     // the integer — wrapping a 255 blue byte to 0 (blue-white stars
     // rendered yellow until this was found the hard way).
-    let pack = u32(in.mat_pack);
+    let pack = u32(in.weights.x);
     let tint = vec3<f32>(f32(pack >> 16u), f32((pack >> 8u) & 255u),
                          f32(pack & 255u)) / 255.0;
     var flux = in.normal.x;
     let atmo_depth = clamp(1.0 - frame.cam_fwd.w, 0.0, 1.0);
     if (atmo_depth > 0.0) {
-      let tw = sin(time * (7.0 + in.mat_blend * 9.0) + in.mat_blend * 251.0) *
-               sin(time * 13.7 + in.mat_blend * 617.0);
+      let tw = sin(time * (7.0 + in.weights.y * 9.0) + in.weights.y * 251.0) *
+               sin(time * 13.7 + in.weights.y * 617.0);
       flux *= 1.0 - 0.45 * atmo_depth * (0.5 + 0.5 * tw);
     }
     let shape = exp(-r2 * 9.0) + exp(-r2 * 2.2) * 0.06;
@@ -476,35 +604,179 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let radial = normalize(in.opos + u.aux.xyz - frame.planet_center.xyz);
     n = normalize(mix(n, radial, frame.planet_center.w));
   }
-  let ndl = max(dot(n, light), 0.0);
-  // Soft terminator wrap so the day/night line does not alias harshly.
-  let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
-  // Albedo: material palette when the vertex carries materials, else the
+  // Albedo: material library when the vertex carries materials, else the
   // default terrain material or the item's rgb override (e.g. the
   // ocean-blue sea-level impostor).
   var base = vec3<f32>(0.55, 0.52, 0.45);
   if (u.color.r + u.color.g + u.color.b > 0.001) {
     base = u.color.rgb;
   }
-  if (in.mat_pack >= 255.5) {
-    let pack = u32(in.mat_pack + 0.5);
-    let m0 = pack >> 8u;
-    let m1 = pack & 255u;
-    base = mix(material_albedo(m0), material_albedo(m1), clamp(in.mat_blend, 0.0, 1.0));
-    // Two-scale procedural modulation in PLANET-LOCAL space (stable under
-    // camera motion; 3D noise needs no projection — the triplanar idea
-    // without textures). Fine scale ~3 m, coarse ~45 m.
+  var rough = 0.85;
+  var ao = 1.0;
+  var emissive = vec3<f32>(0.0);
+  var ndl = max(dot(n, light), 0.0);
+  var wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+  let n_geo = n;
+  let p0 = i32(u.palette.x + 0.5);
+  if (p0 > 0) {
+    // Normalised palette weights (four materials per chunk, T0019).
+    var wv = max(in.weights, vec4<f32>(0.0));
+    let wsum = wv.x + wv.y + wv.z + wv.w;
+    wv = select(vec4<f32>(1.0, 0.0, 0.0, 0.0), wv / wsum, wsum > 1.0e-5);
+    let ids = vec4<i32>(p0, i32(u.palette.y + 0.5), i32(u.palette.z + 0.5), i32(u.palette.w + 0.5));
+    var ready = true;
+    for (var k = 0; k < 4; k++) {
+      if (wv[k] > 0.004 && ids[k] > 0 && mats.b[ids[k]].w < 0.5) { ready = false; }
+    }
+    // Planet-local position for km-scale variation (f32 is fine there)
+    // and the precise chunk-local + period-offset position for tiling.
     let world = in.opos + u.aux.xyz - frame.planet_center.xyz;
-    let coarse = vnoise(world * 0.022);
-    let fine = vnoise(world * 0.34);
-    base = base * (0.82 + 0.24 * coarse + 0.12 * fine);
-    // Per-planet palette shift: a subtle hue rotation.
-    let shift = frame.material.x;
-    base = base * (vec3<f32>(1.0) + shift * vec3<f32>(0.10, 0.02, -0.08));
+    let macro_v = 0.86 + 0.20 * vnoise(world * 0.022) + 0.10 * vnoise(world * 0.0016);
+    if (ready) {
+      let p = in.opos + u.extra.xyz;
+      let dpx = dpdx(p);
+      let dpy = dpdy(p);
+      let dist = length(in.opos + u.aux.xyz);
+      let coarse_w = 0.18 + 0.55 * smoothstep(40.0, 900.0, dist);
+      // Biplanar projection (Quilez): the two planes the normal faces most.
+      let an = abs(n);
+      var ma = vec3<i32>(0, 1, 2);
+      if (an.y > an.x && an.y > an.z) { ma = vec3<i32>(1, 2, 0); }
+      else if (an.z > an.x && an.z > an.y) { ma = vec3<i32>(2, 0, 1); }
+      var mi = vec3<i32>(0, 1, 2);
+      if (an.y < an.x && an.y < an.z) { mi = vec3<i32>(1, 2, 0); }
+      else if (an.z < an.x && an.z < an.y) { mi = vec3<i32>(2, 0, 1); }
+      let me = vec3<i32>(3, 3, 3) - mi - ma;
+      let uv1 = vec2<f32>(p[ma.y], p[ma.z]);
+      let uv2 = vec2<f32>(p[me.y], p[me.z]);
+      let dx1 = vec2<f32>(dpx[ma.y], dpx[ma.z]);
+      let dy1 = vec2<f32>(dpy[ma.y], dpy[ma.z]);
+      let dx2 = vec2<f32>(dpx[me.y], dpx[me.z]);
+      let dy2 = vec2<f32>(dpy[me.y], dpy[me.z]);
+      var pw = vec2<f32>(an[ma.x], an[me.x]);
+      pw = clamp((pw - 0.5773) / (1.0 - 0.5773), vec2<f32>(0.0), vec2<f32>(1.0));
+      pw = pw * pw * pw;
+      pw = pw / max(pw.x + pw.y, 1.0e-4);
+      // Per plane: sample every palette material with a visible weight,
+      // height-blend them (taller texel wins inside a soft band, the
+      // band dithered by the vertex weights themselves), tint each with
+      // its own planet pigment.
+      var acc = array<TileSample, 2>();
+      for (var plane = 0; plane < 2; plane++) {
+        var uvp = uv1; var dxp = dx1; var dyp = dy1;
+        if (plane == 1) { uvp = uv2; dxp = dx2; dyp = dy2; }
+        var samples = array<TileSample, 4>();
+        var hb = vec4<f32>(-10.0);
+        for (var k = 0; k < 4; k++) {
+          if (wv[k] > 0.004 && ids[k] > 0) {
+            var sm = sample_material(ids[k], uvp, dxp, dyp, coarse_w);
+            sm.albedo *= mats.a[ids[k]].rgb;
+            samples[k] = sm;
+            hb[k] = sm.height * 0.6 + wv[k];
+          }
+        }
+        let hmax = max(max(hb.x, hb.y), max(hb.z, hb.w)) - 0.28;
+        var bw = max(hb - vec4<f32>(hmax), vec4<f32>(0.0));
+        bw = bw / max(bw.x + bw.y + bw.z + bw.w, 1.0e-5);
+        var out: TileSample;
+        out.albedo = vec3<f32>(0.0);
+        out.height = 0.0;
+        out.tnormal = vec2<f32>(0.0);
+        out.rough = 0.0;
+        out.aux = 0.0;
+        for (var k = 0; k < 4; k++) {
+          if (bw[k] > 0.0) {
+            out.albedo += samples[k].albedo * bw[k];
+            out.height += samples[k].height * bw[k];
+            out.tnormal += samples[k].tnormal * bw[k];
+            out.rough += samples[k].rough * bw[k];
+            out.aux += samples[k].aux * bw[k];
+          }
+        }
+        acc[plane] = out;
+      }
+      let s1 = acc[0];
+      let s2 = acc[1];
+      base = (s1.albedo * pw.x + s2.albedo * pw.y) * macro_v;
+      // Detail normal: whiteout-style per-plane perturbation of the
+      // analytic terrain normal, scaled by the material's strength.
+      var strength = 0.0;
+      var emis_amt = 0.0;
+      for (var k = 0; k < 4; k++) {
+        if (ids[k] > 0) {
+          strength += wv[k] * mats.b[ids[k]].z;
+          emis_amt += wv[k] * mats.b[ids[k]].y;
+        }
+      }
+      let tn1 = s1.tnormal * strength * pw.x;
+      let tn2 = s2.tnormal * strength * pw.y;
+      var pert = vec3<f32>(0.0);
+      pert[ma.y] += tn1.x * sign(n[ma.x]);
+      pert[ma.z] += tn1.y;
+      pert[me.y] += tn2.x * sign(n[me.x]);
+      pert[me.z] += tn2.y;
+      n = normalize(n + pert);
+      rough = clamp(s1.rough * pw.x + s2.rough * pw.y, 0.05, 1.0);
+      let aux_v = s1.aux * pw.x + s2.aux * pw.y;
+      if (emis_amt > 0.0) {
+        emissive = base * 0.0 + aux_v * emis_amt * (s1.albedo * pw.x + s2.albedo * pw.y) * 3.0;
+      } else {
+        ao = 0.35 + 0.65 * aux_v;
+      }
+      ndl = max(dot(n, light), 0.0);
+      wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+    } else {
+      // No library yet: the table's mean colours (sRGB, decoded here).
+      var mean = vec3<f32>(0.0);
+      var rsum = 0.0;
+      for (var k = 0; k < 4; k++) {
+        if (ids[k] > 0) {
+          mean += wv[k] * srgb_to_linear(mats.c[ids[k]].rgb) * mats.a[ids[k]].rgb;
+          rsum += wv[k] * mats.b[ids[k]].x;
+        }
+      }
+      base = mean * macro_v * (0.94 + 0.12 * vnoise(world * 0.34));
+      rough = rsum;
+    }
   }
-  var color = base * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
+  // Far field (T0019): beyond a few km the per-vertex palettes of coarse
+  // chunks would show as seams, so lit terrain fades into the planet's
+  // baked far-view albedo (the same cube map the impostor uses — one
+  // continuous surface from the ground to orbit). aux.w flags a bound
+  // far texture; the detail normal fades with it.
+  if (u.aux.w > 0.5 && p0 > 0) {
+    let world_far = in.opos + u.aux.xyz - frame.planet_center.xyz;
+    let dist_far = length(in.opos + u.aux.xyz);
+    let k_far = smoothstep(2500.0, 14000.0, dist_far);
+    if (k_far > 0.0) {
+      let fuv_far = cube_face_uv(normalize(world_far));
+      let far = textureSampleLevel(planet_material, planet_sampler, fuv_far.xy,
+                                   i32(fuv_far.z), 0.0).rgb;
+      base = mix(base, far, k_far);
+      n = normalize(mix(n, n_geo, k_far));
+      ndl = max(dot(n, light), 0.0);
+      wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+      ao = mix(ao, 1.0, k_far);
+      emissive = emissive * (1.0 - k_far);
+      rough = mix(rough, 0.9, k_far);
+    }
+  }
+  var color = base * ao * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
   let fill = max(dot(n, -light), 0.0);
-  color += base * fill * vec3<f32>(0.012, 0.017, 0.03);
+  color += base * ao * fill * vec3<f32>(0.012, 0.017, 0.03);
+  // Specular: GGX-shaped sun highlight driven by the material roughness
+  // (wet sand, ice and glossy mats read as such; rock stays matte).
+  {
+    let view = normalize(-(in.opos + u.aux.xyz));
+    let hv = normalize(light + view);
+    let ndh = max(dot(n, hv), 0.0);
+    let a2 = max(rough * rough * rough * rough, 1.0e-4);
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let dist_ggx = a2 / (3.14159 * dd * dd);
+    let f0 = 0.04;
+    color += frame.sun_color.rgb * dist_ggx * f0 * ndl * (0.25 + 0.75 * (1.0 - rough));
+  }
+  color += emissive;
   // Submerged terrain shades toward deep water by depth (atmo.a carries
   // the sea radius). This keeps the streamed seabed consistent with the
   // opaque ocean impostor — the ocean no longer flips color when chunks
@@ -740,6 +1012,128 @@ struct Rhi::Impl {
   };
   WGPUBindGroupLayout tex_layout = nullptr;
   WGPUSampler planet_sampler = nullptr;
+
+  // Surface material library (T0019): group 2 = albedo array + normal
+  // array + repeat sampler + material table uniform.
+  struct MaterialLib {
+    WGPUTexture albedo = nullptr;
+    WGPUTexture normal = nullptr;
+    WGPUTextureView albedo_view = nullptr;
+    WGPUTextureView normal_view = nullptr;
+    WGPUBindGroup group = nullptr;
+    std::uint32_t size = 0;
+    std::uint32_t layers = 0;
+    std::uint32_t mips = 1;
+  };
+  static constexpr std::uint32_t kMaterialSlots = 64;
+  static constexpr std::uint64_t kMaterialTableSize = kMaterialSlots * 3 * 16;
+  WGPUBindGroupLayout mat_layout = nullptr;
+  WGPUSampler material_sampler = nullptr;
+  WGPUBuffer material_table = nullptr;
+  MaterialLib material_lib;
+  float material_cpu[kMaterialSlots * 12] = {};
+  bool material_ready[kMaterialSlots] = {};
+  bool material_dirty = true;
+
+  MaterialLib make_material_lib(std::uint32_t size, std::uint32_t layers) {
+    MaterialLib lib;
+    lib.size = size;
+    lib.layers = layers;
+    lib.mips = 1;
+    while ((size >> lib.mips) >= 1U && lib.mips < 16) {
+      ++lib.mips;
+    }
+    WGPUTextureDescriptor desc{};
+    desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+    desc.dimension = WGPUTextureDimension_2D;
+    desc.size = WGPUExtent3D{size, size, layers};
+    desc.mipLevelCount = lib.mips;
+    desc.sampleCount = 1;
+    // Albedo is sRGB-encoded (photographs and generated colours alike):
+    // the sRGB format decodes to linear in the sampler, so the HDR chain
+    // lights physically plausible albedos. Normal/roughness/ao stay linear.
+    desc.format = WGPUTextureFormat_RGBA8UnormSrgb;
+    desc.label = sv("material-albedo");
+    lib.albedo = wgpuDeviceCreateTexture(device, &desc);
+    desc.format = WGPUTextureFormat_RGBA8Unorm;
+    desc.label = sv("material-normal");
+    lib.normal = wgpuDeviceCreateTexture(device, &desc);
+    WGPUTextureViewDescriptor view_desc{};
+    view_desc.dimension = WGPUTextureViewDimension_2DArray;
+    view_desc.baseArrayLayer = 0;
+    view_desc.arrayLayerCount = layers;
+    view_desc.baseMipLevel = 0;
+    view_desc.mipLevelCount = lib.mips;
+    view_desc.format = WGPUTextureFormat_RGBA8UnormSrgb;
+    view_desc.aspect = WGPUTextureAspect_All;
+    lib.albedo_view = wgpuTextureCreateView(lib.albedo, &view_desc);
+    view_desc.format = WGPUTextureFormat_RGBA8Unorm;
+    lib.normal_view = wgpuTextureCreateView(lib.normal, &view_desc);
+    WGPUBindGroupEntry entries[4] = {};
+    entries[0].binding = 0;
+    entries[0].textureView = lib.albedo_view;
+    entries[1].binding = 1;
+    entries[1].textureView = lib.normal_view;
+    entries[2].binding = 2;
+    entries[2].sampler = material_sampler;
+    entries[3].binding = 3;
+    entries[3].buffer = material_table;
+    entries[3].offset = 0;
+    entries[3].size = kMaterialTableSize;
+    WGPUBindGroupDescriptor group_desc{};
+    group_desc.layout = mat_layout;
+    group_desc.entryCount = 4;
+    group_desc.entries = entries;
+    lib.group = wgpuDeviceCreateBindGroup(device, &group_desc);
+    return lib;
+  }
+
+  void release_material_lib(MaterialLib& lib) {
+    if (lib.group != nullptr) wgpuBindGroupRelease(lib.group);
+    if (lib.albedo_view != nullptr) wgpuTextureViewRelease(lib.albedo_view);
+    if (lib.normal_view != nullptr) wgpuTextureViewRelease(lib.normal_view);
+    if (lib.albedo != nullptr) wgpuTextureRelease(lib.albedo);
+    if (lib.normal != nullptr) wgpuTextureRelease(lib.normal);
+    lib = MaterialLib{};
+  }
+
+  // Uploads one layer with a CPU box-filtered mip chain.
+  void write_material_layer(WGPUTexture texture, std::uint32_t layer, const std::uint8_t* rgba) {
+    std::vector<std::uint8_t> level(rgba, rgba + static_cast<std::size_t>(material_lib.size) *
+                                                    material_lib.size * 4);
+    std::uint32_t size = material_lib.size;
+    for (std::uint32_t mip = 0; mip < material_lib.mips; ++mip) {
+      WGPUTexelCopyTextureInfo dst{};
+      dst.texture = texture;
+      dst.mipLevel = mip;
+      dst.origin = WGPUOrigin3D{0, 0, layer};
+      dst.aspect = WGPUTextureAspect_All;
+      WGPUTexelCopyBufferLayout layout{};
+      layout.offset = 0;
+      layout.bytesPerRow = size * 4;
+      layout.rowsPerImage = size;
+      const WGPUExtent3D extent{size, size, 1};
+      wgpuQueueWriteTexture(queue, &dst, level.data(), level.size(), &layout, &extent);
+      if (size == 1) {
+        break;
+      }
+      const std::uint32_t half = size / 2;
+      std::vector<std::uint8_t> next(static_cast<std::size_t>(half) * half * 4);
+      for (std::uint32_t y = 0; y < half; ++y) {
+        for (std::uint32_t x = 0; x < half; ++x) {
+          for (std::uint32_t c = 0; c < 4; ++c) {
+            const std::uint32_t sum =
+                level[((2 * y) * size + 2 * x) * 4 + c] + level[((2 * y) * size + 2 * x + 1) * 4 + c] +
+                level[((2 * y + 1) * size + 2 * x) * 4 + c] +
+                level[((2 * y + 1) * size + 2 * x + 1) * 4 + c];
+            next[(y * half + x) * 4 + c] = static_cast<std::uint8_t>((sum + 2) / 4);
+          }
+        }
+      }
+      level.swap(next);
+      size = half;
+    }
+  }
 
   // --- T0018 WP1: HDR post chain ---------------------------------------
   static constexpr WGPUTextureFormat kHdrFormat = WGPUTextureFormat_RGBA16Float;
@@ -1082,30 +1476,87 @@ struct Rhi::Impl {
     sampler_desc.maxAnisotropy = 1;
     planet_sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
 
-    WGPUBindGroupLayout group_layouts[2] = {bind_layout, tex_layout};
+    // Group 2: the surface material library (T0019).
+    WGPUBindGroupLayoutEntry mat_entries[4] = {};
+    mat_entries[0].binding = 0;
+    mat_entries[0].visibility = WGPUShaderStage_Fragment;
+    mat_entries[0].texture.sampleType = WGPUTextureSampleType_Float;
+    mat_entries[0].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+    mat_entries[1].binding = 1;
+    mat_entries[1].visibility = WGPUShaderStage_Fragment;
+    mat_entries[1].texture.sampleType = WGPUTextureSampleType_Float;
+    mat_entries[1].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+    mat_entries[2].binding = 2;
+    mat_entries[2].visibility = WGPUShaderStage_Fragment;
+    mat_entries[2].sampler.type = WGPUSamplerBindingType_Filtering;
+    mat_entries[3].binding = 3;
+    mat_entries[3].visibility = WGPUShaderStage_Fragment;
+    mat_entries[3].buffer.type = WGPUBufferBindingType_Uniform;
+    mat_entries[3].buffer.hasDynamicOffset = 0U;
+    mat_entries[3].buffer.minBindingSize = kMaterialTableSize;
+    WGPUBindGroupLayoutDescriptor mat_layout_desc{};
+    mat_layout_desc.entryCount = 4;
+    mat_layout_desc.entries = mat_entries;
+    mat_layout = wgpuDeviceCreateBindGroupLayout(device, &mat_layout_desc);
+    {
+      WGPUSamplerDescriptor msd{};
+      msd.label = sv("material-sampler");
+      msd.addressModeU = WGPUAddressMode_Repeat;
+      msd.addressModeV = WGPUAddressMode_Repeat;
+      msd.addressModeW = WGPUAddressMode_Repeat;
+      msd.magFilter = WGPUFilterMode_Linear;
+      msd.minFilter = WGPUFilterMode_Linear;
+      msd.mipmapFilter = WGPUMipmapFilterMode_Linear;
+      msd.lodMinClamp = 0.0f;
+      msd.lodMaxClamp = 32.0f;
+      msd.maxAnisotropy = 8;
+      material_sampler = wgpuDeviceCreateSampler(device, &msd);
+      WGPUBufferDescriptor bd{};
+      bd.label = sv("material-table");
+      bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+      bd.size = kMaterialTableSize;
+      material_table = wgpuDeviceCreateBuffer(device, &bd);
+      for (std::uint32_t i = 0; i < kMaterialSlots; ++i) {
+        float* row = material_cpu + i * 12;
+        row[0] = row[1] = row[2] = 1.0f;
+        row[3] = 4.0f;
+        row[4] = 0.85f;
+        row[5] = 0.0f;
+        row[6] = 1.0f;
+        row[7] = 0.0f;
+        row[8] = row[9] = row[10] = 0.5f;
+        row[11] = 0.0f;
+      }
+      material_dirty = true;
+      // A 1x1 placeholder library so every pipeline can bind group 2.
+      material_lib = make_material_lib(1, 1);
+      const std::uint8_t grey[4] = {128, 128, 128, 128};
+      const std::uint8_t flat[4] = {128, 128, 220, 255};
+      write_material_layer(material_lib.albedo, 0, grey);
+      write_material_layer(material_lib.normal, 0, flat);
+    }
+
+    WGPUBindGroupLayout group_layouts[3] = {bind_layout, tex_layout, mat_layout};
     WGPUPipelineLayoutDescriptor pipeline_layout_desc{};
-    pipeline_layout_desc.bindGroupLayoutCount = 2;
+    pipeline_layout_desc.bindGroupLayoutCount = 3;
     pipeline_layout_desc.bindGroupLayouts = group_layouts;
     WGPUPipelineLayout pipeline_layout =
         wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
 
-    WGPUVertexAttribute attributes[4] = {};
+    WGPUVertexAttribute attributes[3] = {};
     attributes[0].format = WGPUVertexFormat_Float32x3;
     attributes[0].offset = 0;
     attributes[0].shaderLocation = 0;
     attributes[1].format = WGPUVertexFormat_Float32x3;
     attributes[1].offset = 12;
     attributes[1].shaderLocation = 1;
-    attributes[2].format = WGPUVertexFormat_Float32;  // mat_pack
+    attributes[2].format = WGPUVertexFormat_Float32x4;  // palette weights
     attributes[2].offset = 24;
     attributes[2].shaderLocation = 2;
-    attributes[3].format = WGPUVertexFormat_Float32;  // material blend
-    attributes[3].offset = 28;
-    attributes[3].shaderLocation = 3;
     WGPUVertexBufferLayout vertex_layout{};
-    vertex_layout.arrayStride = 32;
+    vertex_layout.arrayStride = 40;
     vertex_layout.stepMode = WGPUVertexStepMode_Vertex;
-    vertex_layout.attributeCount = 4;
+    vertex_layout.attributeCount = 3;
     vertex_layout.attributes = attributes;
 
     WGPUDepthStencilState depth_state{};
@@ -1365,6 +1816,10 @@ struct Rhi::Impl {
       release_planet_tex(entry);
     }
     release_planet_tex(default_tex);
+    release_material_lib(material_lib);
+    if (material_table != nullptr) wgpuBufferRelease(material_table);
+    if (material_sampler != nullptr) wgpuSamplerRelease(material_sampler);
+    if (mat_layout != nullptr) wgpuBindGroupLayoutRelease(mat_layout);
     release_post_set(post_main);
     release_post_set(post_rec);
     if (lum_readback != nullptr) wgpuBufferRelease(lum_readback);
@@ -1528,14 +1983,15 @@ void Rhi::resize(std::uint32_t width, std::uint32_t height) {
 }
 
 std::uint32_t Rhi::create_mesh(const float* vertices, std::size_t float_count) {
-  // Legacy 6-float soup: expand to the 8-float terrain layout with
-  // mat_pack = 0 (the shader's flat base-albedo path).
+  // Legacy 6-float soup: expand to the 10-float terrain layout with zero
+  // weights (the shader's flat base-albedo path).
   const std::size_t count = float_count / 6;
-  std::vector<float> expanded(count * 8);
+  std::vector<float> expanded(count * 10);
   for (std::size_t v = 0; v < count; ++v) {
-    std::memcpy(expanded.data() + v * 8, vertices + v * 6, 6 * sizeof(float));
-    expanded[v * 8 + 6] = 0.0f;
-    expanded[v * 8 + 7] = 0.0f;
+    std::memcpy(expanded.data() + v * 10, vertices + v * 6, 6 * sizeof(float));
+    for (int w = 0; w < 4; ++w) {
+      expanded[v * 10 + 6 + static_cast<std::size_t>(w)] = 0.0f;
+    }
   }
   return create_mesh_mat(expanded.data(), expanded.size());
 }
@@ -1548,7 +2004,7 @@ std::uint32_t Rhi::create_mesh_mat(const float* vertices, std::size_t float_coun
   WGPUBuffer buffer = wgpuDeviceCreateBuffer(impl_->device, &desc);
   wgpuQueueWriteBuffer(impl_->queue, buffer, 0, vertices, desc.size);
   const std::uint32_t id = impl_->next_mesh_id++;
-  impl_->meshes.emplace(id, MeshEntry{buffer, static_cast<std::uint32_t>(float_count / 8)});
+  impl_->meshes.emplace(id, MeshEntry{buffer, static_cast<std::uint32_t>(float_count / 10)});
   return id;
 }
 
@@ -1584,9 +2040,69 @@ void Rhi::destroy_planet_texture(std::uint32_t handle) {
   }
 }
 
+void Rhi::create_material_library(std::uint32_t size, std::uint32_t layers) {
+  impl_->ensure_mesh_pipeline();
+  if (size == 0 || layers == 0) {
+    return;
+  }
+  impl_->release_material_lib(impl_->material_lib);
+  impl_->material_lib = impl_->make_material_lib(size, layers);
+  for (std::uint32_t i = 0; i < Impl::kMaterialSlots; ++i) {
+    impl_->material_ready[i] = false;
+    impl_->material_cpu[i * 12 + 7] = 0.0f;
+  }
+  impl_->material_dirty = true;
+}
+
+void Rhi::upload_material_layer(std::uint32_t layer, const std::uint8_t* albedo_rgba,
+                                const std::uint8_t* normal_rgba) {
+  Impl::MaterialLib& lib = impl_->material_lib;
+  if (lib.albedo == nullptr || layer >= lib.layers || layer >= Impl::kMaterialSlots) {
+    return;
+  }
+  impl_->write_material_layer(lib.albedo, layer, albedo_rgba);
+  impl_->write_material_layer(lib.normal, layer, normal_rgba);
+  impl_->material_ready[layer] = true;
+  impl_->material_cpu[layer * 12 + 7] = 1.0f;
+  impl_->material_dirty = true;
+}
+
+void Rhi::set_material_params(std::uint32_t layer, const MaterialParams& params) {
+  if (layer >= Impl::kMaterialSlots) {
+    return;
+  }
+  float* row = impl_->material_cpu + layer * 12;
+  row[0] = params.tint[0];
+  row[1] = params.tint[1];
+  row[2] = params.tint[2];
+  row[3] = params.tile_m;
+  row[4] = params.roughness;
+  row[5] = params.emissive;
+  row[6] = params.normal_strength;
+  row[7] = impl_->material_ready[layer] ? 1.0f : 0.0f;
+  row[8] = params.mean[0];
+  row[9] = params.mean[1];
+  row[10] = params.mean[2];
+  row[11] = 0.0f;
+  impl_->material_dirty = true;
+}
+
 bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                        std::size_t item_count) {
   impl_->ensure_mesh_pipeline();
+  if (impl_->material_dirty) {
+    // Table layout: three arrays of 64 vec4 (a: tint+tile, b: rough/
+    // emissive/strength/ready, c: mean) — repack from the row layout.
+    float table[Impl::kMaterialSlots * 12];
+    for (std::uint32_t i = 0; i < Impl::kMaterialSlots; ++i) {
+      const float* row = impl_->material_cpu + i * 12;
+      std::memcpy(table + i * 4, row, 4 * sizeof(float));
+      std::memcpy(table + Impl::kMaterialSlots * 4 + i * 4, row + 4, 4 * sizeof(float));
+      std::memcpy(table + Impl::kMaterialSlots * 8 + i * 4, row + 8, 4 * sizeof(float));
+    }
+    wgpuQueueWriteBuffer(impl_->queue, impl_->material_table, 0, table, sizeof(table));
+    impl_->material_dirty = false;
+  }
 
   {
     float frame_block[36] = {
@@ -1608,12 +2124,15 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // Upload all uniforms before the command buffer executes.
   const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
   for (std::size_t i = 0; i < count; ++i) {
-    float block[28];
+    float block[32];
     std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
     std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
     std::memcpy(block + 20, items[i].aux, sizeof(items[i].aux));
     std::memcpy(block + 24, items[i].extra, sizeof(items[i].extra));
     block[27] = static_cast<float>(items[i].mode);
+    for (int k = 0; k < 4; ++k) {
+      block[28 + k] = static_cast<float>(items[i].material_palette[k]);
+    }
     wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, i * kUniformStride, block,
                          sizeof(block));
   }
@@ -1750,6 +2269,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         }
       }
       wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_group, 0, nullptr);
+      wgpuRenderPassEncoderSetBindGroup(pass, 2, impl_->material_lib.group, 0, nullptr);
       wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
       wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
     }

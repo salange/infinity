@@ -10,12 +10,15 @@ endif()
 configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/gen/version.hpp @ONLY)
 
 add_library(game_gen STATIC
+  src/biome.cpp
   src/caves.cpp
+  src/climate.cpp
   src/deep_sky.cpp
   src/drainage.cpp
   src/features.cpp
   src/galaxy.cpp
   src/galaxy_octree.cpp
+  src/life.cpp
   src/macro.cpp
   src/planet_texture.cpp
   src/material.cpp

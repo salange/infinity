@@ -200,6 +200,41 @@ PlanetParams derive_planet_params(const core::Key& body_entity_key,
   const std::uint32_t base = table.cells_lo + pick(draw1[3], table.cells_hi - table.cells_lo + 1);
   params.cells_per_face = std::clamp(scaled + base - table.cells_lo, base, 24U);
   params.palette_id = static_cast<std::uint32_t>(draw2[0] >> 40U);
+
+  // --- climate/v1 inputs for STANDALONE bodies (T0019) -----------------
+  // A fresh draw index: every draw above keeps its word. A system body
+  // overrides these from planets/v1 (planet_params_for_slot / _moon).
+  {
+    const auto draw4 = core::draw_point(params_key, channel::Params, 4, 0, 0);
+    // Host star: bulk G/K, tails to F and M (a rough main-sequence mix).
+    const double star_roll = u01(draw4[0]).to_double();
+    double star_t;
+    if (star_roll < 0.12) {
+      star_t = 6300.0 + 1400.0 * (star_roll / 0.12);          // F
+    } else if (star_roll < 0.42) {
+      star_t = 5300.0 + 1000.0 * ((star_roll - 0.12) / 0.30);  // G
+    } else if (star_roll < 0.72) {
+      star_t = 4000.0 + 1300.0 * ((star_roll - 0.42) / 0.30);  // K
+    } else {
+      star_t = 2800.0 + 1200.0 * ((star_roll - 0.72) / 0.28);  // M
+    }
+    params.star_temperature_k = Real(star_t);
+    params.star_age_gyr = uniform(draw4[1], 0.5, 9.0);
+    switch (params.type) {
+      case PlanetType::EarthLike: params.flux_rel = uniform(draw4[2], 0.65, 1.35); break;
+      case PlanetType::Desert: params.flux_rel = uniform(draw4[2], 1.4, 3.2); break;
+      case PlanetType::Ice: params.flux_rel = uniform(draw4[2], 0.06, 0.32); break;
+      case PlanetType::Barren: params.flux_rel = uniform(draw4[2], 0.08, 2.6); break;
+    }
+    const double obliquity_roll = u01(draw4[3]).to_double();
+    params.obliquity_rad = obliquity_roll < 0.85
+                               ? Real(obliquity_roll / 0.85 * 0.52)
+                               : Real((obliquity_roll - 0.85) / 0.15 * 3.14159265358979323846);
+    params.pressure_rel = params.type == PlanetType::Barren ? Real(0.0)
+                          : params.type == PlanetType::EarthLike ? uniform(draw3[2], 0.5, 1.6)
+                                                                 : uniform(draw3[2], 0.01, 0.3);
+    params.tidally_locked = params.type == PlanetType::Desert && u01(draw3[3]).to_double() < 0.2;
+  }
   return params;
 }
 
@@ -218,10 +253,16 @@ std::string PlanetParams::to_json() const {
   out += "\",\n";
   append_real(out, "land_fraction", land_fraction);
   append_real(out, "macro_amplitude_m", macro_amplitude_m);
-  char buffer[128];
+  append_real(out, "star_temperature_k", star_temperature_k);
+  append_real(out, "star_age_gyr", star_age_gyr);
+  append_real(out, "flux_rel", flux_rel);
+  append_real(out, "obliquity_rad", obliquity_rad);
+  append_real(out, "pressure_rel", pressure_rel);
+  char buffer[192];
   std::snprintf(buffer, sizeof(buffer),
-                "  \"sky_palette\": %u,\n  \"cells_per_face\": %u,\n  \"palette_id\": %u\n",
-                sky_palette, cells_per_face, palette_id);
+                "  \"tidally_locked\": %s,\n  \"sky_palette\": %u,\n  \"cells_per_face\": %u,\n"
+                "  \"palette_id\": %u\n",
+                tidally_locked ? "true" : "false", sky_palette, cells_per_face, palette_id);
   out += buffer;
   out += "}\n";
   return out;

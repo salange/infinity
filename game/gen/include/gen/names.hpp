@@ -30,6 +30,7 @@ inline constexpr core::NameId BeltsV1{0x067c9da641973dd1ULL};         // "belts/
 inline constexpr core::NameId MultistarV1{0x505708ce7508c26bULL};     // "multistar/v1"
 inline constexpr core::NameId MacroV1{0x44fd8a3c80c8f6b1ULL};         // "macro/v1"
 inline constexpr core::NameId TerrainV2{0x48d3cb3103db7f17ULL};       // "terrain/v2"
+inline constexpr core::NameId TerrainV3{0x033b3f39bf206fb7ULL};       // "terrain/v3"
 inline constexpr core::NameId FeaturesV1{0x3dbb2eed252570fbULL};      // "features/v1"
 inline constexpr core::NameId CavesV1{0x637ade26b9efa0daULL};         // "caves/v1"
 inline constexpr core::NameId DrainageV1{0x6bdc9ecba8d08bebULL};      // "drainage/v1"
@@ -38,6 +39,11 @@ inline constexpr core::NameId GalaxySystemsV1{0xe5c73a184da935a5ULL}; // "galaxy
 inline constexpr core::NameId NebulaeV1{0x077f97eae9e3adb4ULL};       // "nebulae/v1"
 inline constexpr core::NameId StarClustersV1{0xb59ee6f1f35abb5eULL};  // "star-clusters/v1"
 inline constexpr core::NameId GalaxyLayoutV1{0xaa91de0c98bdfc07ULL};  // "galaxy-layout/v1"
+// Surface texturing layers (T0019, design/surface-texturing.md).
+inline constexpr core::NameId ClimateV1{0x0245292d47427e3dULL};       // "climate/v1"
+inline constexpr core::NameId LifeV1{0x319503b0591a5e87ULL};          // "life/v1"
+inline constexpr core::NameId BiomeV1{0xfb5bca62da72cb4fULL};         // "biome/v1"
+inline constexpr core::NameId MaterialV2{0xbe8c258868132a27ULL};      // "material/v2"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -96,6 +102,7 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"multistar/v1", name::MultistarV1},
     {"macro/v1", name::MacroV1},
     {"terrain/v2", name::TerrainV2},
+    {"terrain/v3", name::TerrainV3},
     {"features/v1", name::FeaturesV1},
     {"caves/v1", name::CavesV1},
     {"drainage/v1", name::DrainageV1},
@@ -104,6 +111,10 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"nebulae/v1", name::NebulaeV1},
     {"star-clusters/v1", name::StarClustersV1},
     {"galaxy-layout/v1", name::GalaxyLayoutV1},
+    {"climate/v1", name::ClimateV1},
+    {"life/v1", name::LifeV1},
+    {"biome/v1", name::BiomeV1},
+    {"material/v2", name::MaterialV2},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

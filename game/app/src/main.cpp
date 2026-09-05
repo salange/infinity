@@ -32,6 +32,7 @@
 #include "gen/terrain_sampler.hpp"
 #include "gen/universe.hpp"
 #include "hud.hpp"
+#include "material_library.hpp"
 #include "render/math.hpp"
 #include "render/rhi.hpp"
 #include "sim/map_camera.hpp"
@@ -81,6 +82,7 @@ struct AddrHash {
 struct LoadedChunk {
   std::uint32_t mesh_id = 0;
   RVec3 origin;
+  std::uint8_t palette[4]{0, 0, 0, 0};  // material ids for the vertex weights
 };
 
 RVec3 to_render(const SVec3& v) { return RVec3{v.x, v.y, v.z}; }
@@ -436,6 +438,10 @@ int main(int argc, char** argv) {
   bool release_mode = false;  // --release: debug frame ring OFF
   bool hidden = false;        // --hidden: invisible window (scripted captures)
   const char* script_text = nullptr;  // --script <file>: debug command script
+  const char* assets_text = nullptr;  // --assets <dir>: tile library root
+  std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
+  int spawn_slot = -1;                // --slot N: spawn on this system slot
+  int spawn_moon = -1;                // --moon M: spawn on that moon of the slot
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       max_frames = std::strtol(argv[++i], nullptr, 10);
@@ -461,6 +467,14 @@ int main(int argc, char** argv) {
       hidden = true;
     } else if (std::strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
       script_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
+      assets_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--slot") == 0 && i + 1 < argc) {
+      spawn_slot = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+    } else if (std::strcmp(argv[i], "--moon") == 0 && i + 1 < argc) {
+      spawn_moon = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+    } else if (std::strcmp(argv[i], "--tex-size") == 0 && i + 1 < argc) {
+      tex_size = static_cast<std::uint32_t>(std::strtol(argv[++i], nullptr, 10));
     }
   }
 
@@ -478,7 +492,11 @@ int main(int argc, char** argv) {
   inf::gen::SystemCell current_cell{};  // {0,0,0,0} = the home system
   inf::gen::StarSystemParams system =
       inf::gen::generate_system(inf::gen::default_system_key(*seed));
-  const int home_slot = inf::gen::default_landable_slot(system);
+  const int home_slot =
+      spawn_slot >= 0 && spawn_slot < inf::gen::kMaxPlanetSlots &&
+              system.planets[static_cast<std::size_t>(spawn_slot)].occupied
+          ? spawn_slot
+          : inf::gen::default_landable_slot(system);
 
   // Galaxy frame (T0017): the octree that owns every star system, and the
   // current system's galactocentric position. System/planet axes are all
@@ -509,7 +527,13 @@ int main(int argc, char** argv) {
   // Player-diff overlay (M7): the world files are ONLY per-body diffs —
   // the procedural planets are never stored.
   std::unique_ptr<Anchor> anchor =
-      make_anchor(*seed, seed_text, system, current_cell, home_slot, -1, forced, diff_text);
+      make_anchor(*seed, seed_text, system, current_cell, home_slot,
+                  spawn_moon >= 0 &&
+                          spawn_moon < static_cast<int>(system.planets[static_cast<std::size_t>(home_slot)]
+                                                            .moons.size())
+                      ? spawn_moon
+                      : -1,
+                  forced, diff_text);
   const double spawn_r =
       spawn_altitude >= 0.0 ? anchor->radius + spawn_altitude : anchor->radius * 2.2;
   inf::sim::Player player(*anchor->effective,
@@ -673,6 +697,7 @@ int main(int argc, char** argv) {
   // coarse LOD aliases into flickering land/water patches); this static
   // mesh carries the continents instead — same land, no churn.
   std::uint32_t land_mesh = 0;
+  std::uint8_t land_palette[4] = {0, 0, 0, 0};
   const auto rebuild_sea = [&] {
     if (sea_mesh != 0) {
       rhi->destroy_mesh(sea_mesh);
@@ -729,8 +754,13 @@ int main(int argc, char** argv) {
                      std::cos(phi) * std::sin(theta) * r, std::sin(phi) * r};
       };
       std::vector<float> vertices;
-      vertices.reserve(static_cast<std::size_t>(kSlices) * kStacks * 48);
-      const auto point = [&](int slice, int stack, float out[8]) {
+      vertices.reserve(static_cast<std::size_t>(kSlices) * kStacks * 60);
+      // The land mesh carries one four-material palette for the whole
+      // planet: the materials with the most presence over the grid.
+      std::vector<double> grid_weights(static_cast<std::size_t>(kSlices + 1) * (kStacks + 1) *
+                                       inf::gen::kMaterialCount);
+      double palette_total[inf::gen::kMaterialCount] = {};
+      const auto point = [&](int slice, int stack, float out[10]) {
         const double phi = pi * stack / kStacks - pi * 0.5;
         const double theta = 2.0 * pi * slice / kSlices;
         const double nx = std::cos(phi) * std::cos(theta);
@@ -759,24 +789,71 @@ int main(int argc, char** argv) {
         out[3] = static_cast<float>(normal.x);
         out[4] = static_cast<float>(normal.y);
         out[5] = static_cast<float>(normal.z);
-        // Classify at the TRUE surface radius (the mesh is sunk 300 m).
-        const double true_r = r + 300.0;
-        const auto vm = anchor->field->material().classify(
-            nx * true_r, ny * true_r, nz * true_r, normal.x, normal.y, normal.z);
-        out[6] = static_cast<float>(static_cast<int>(vm.mat0) * 256 +
-                                    static_cast<int>(vm.mat1));
-        out[7] = vm.blend;
+        // Weights at the TRUE surface radius (the mesh is sunk 300 m),
+        // over the planet palette chosen below.
+        const std::size_t gi =
+            static_cast<std::size_t>(std::clamp(stack, 0, kStacks)) * (kSlices + 1) +
+            static_cast<std::size_t>(((slice % kSlices) + kSlices) % kSlices);
+        const double* w = grid_weights.data() + gi * inf::gen::kMaterialCount;
+        double sum = 0.0;
+        double ws[4] = {0.0, 0.0, 0.0, 0.0};
+        for (int k = 0; k < 4; ++k) {
+          ws[k] = land_palette[k] != 0 ? w[land_palette[k]] : 0.0;
+          sum += ws[k];
+        }
+        for (int k = 0; k < 4; ++k) {
+          out[6 + k] = sum > 0.0 ? static_cast<float>(ws[k] / sum) : (k == 0 ? 1.0f : 0.0f);
+        }
       };
+      // Pass 1: weights at every grid point + palette pick.
+      for (int stack = 0; stack <= kStacks; ++stack) {
+        for (int slice = 0; slice <= kSlices; ++slice) {
+          const double phi = pi * stack / kStacks - pi * 0.5;
+          const double theta = 2.0 * pi * (slice % kSlices) / kSlices;
+          const double nx = std::cos(phi) * std::cos(theta);
+          const double ny = std::cos(phi) * std::sin(theta);
+          const double nz = std::sin(phi);
+          const double r =
+              radii[static_cast<std::size_t>(stack) * (kSlices + 1) + slice] + 300.0;
+          double* w = grid_weights.data() +
+                      (static_cast<std::size_t>(stack) * (kSlices + 1) + slice) *
+                          inf::gen::kMaterialCount;
+          anchor->field->material_weights(nx * r, ny * r, nz * r, nx, ny, nz, &cache, w);
+          double vmax = 0.0;
+          for (std::uint32_t m = 1; m < inf::gen::kMaterialCount; ++m) {
+            vmax = std::max(vmax, w[m]);
+          }
+          if (vmax > 0.0) {
+            for (std::uint32_t m = 1; m < inf::gen::kMaterialCount; ++m) {
+              palette_total[m] += w[m] / vmax;
+            }
+          }
+        }
+      }
+      for (int k = 0; k < 4; ++k) {
+        double best = 0.0;
+        std::uint32_t pick = 0;
+        for (std::uint32_t m = 1; m < inf::gen::kMaterialCount; ++m) {
+          if (palette_total[m] > best) {
+            best = palette_total[m];
+            pick = m;
+          }
+        }
+        land_palette[k] = static_cast<std::uint8_t>(pick);
+        if (pick != 0) {
+          palette_total[pick] = -1.0;
+        }
+      }
       for (int stack = 0; stack < kStacks; ++stack) {
         for (int slice = 0; slice < kSlices; ++slice) {
-          float p00[8], p10[8], p01[8], p11[8];
+          float p00[10], p10[10], p01[10], p11[10];
           point(slice, stack, p00);
           point(slice + 1, stack, p10);
           point(slice, stack + 1, p01);
           point(slice + 1, stack + 1, p11);
           const float* quad[6] = {p00, p10, p11, p00, p11, p01};
           for (const float* v : quad) {
-            vertices.insert(vertices.end(), v, v + 8);
+            vertices.insert(vertices.end(), v, v + 10);
           }
         }
       }
@@ -984,7 +1061,6 @@ int main(int argc, char** argv) {
   std::unordered_map<inf::core::ChunkAddr, std::shared_ptr<const inf::world::ChunkData>,
                      AddrHash>
       pending_ready;
-  std::vector<float> mat_scratch;
   std::vector<inf::render::Rhi::DrawItem> items;
 
   // --- far-view planet textures (T0016) --------------------------------
@@ -1002,6 +1078,18 @@ int main(int argc, char** argv) {
     return static_cast<std::uint32_t>(moon < 0 ? slot : 0x1000 + slot * 32 + moon);
   };
   std::unordered_map<std::uint32_t, BodyTexture> body_textures;
+  // Surface tile library (T0019): loads in the background; the far-view
+  // baker takes its measured tile means so orbit and ground agree.
+  inf::app::MaterialLibrary materials;
+  {
+    const std::string assets_dir = inf::app::find_assets_dir(assets_text, argv[0]);
+    std::printf("materials: %s, %ux%u tiles\n",
+                assets_dir.empty() ? "no asset directory (procedural tiles)" : assets_dir.c_str(),
+                tex_size, tex_size);
+    materials.start(assets_dir, tex_size);
+  }
+  const inf::gen::TerrainField* materials_anchor = nullptr;
+
   struct BakeResult {
     std::uint32_t key{0};
     double radius_m{0.0};
@@ -1017,8 +1105,10 @@ int main(int argc, char** argv) {
   const auto start_bake_worker = [&](const inf::gen::StarSystemParams system_copy,
                                      const inf::gen::SystemCell cell_copy) {
     bake_quit.store(false);
+    std::vector<float> means_copy(materials.mean_albedo_table(),
+                                  materials.mean_albedo_table() + inf::gen::kMaterialCount * 3);
     bake_thread = std::thread([&bake_mutex, &bake_done, &bake_quit, &body_tex_key,
-                               seed_copy = *seed, system_copy, cell_copy]() {
+                               seed_copy = *seed, system_copy, cell_copy, means_copy]() {
     struct Job {
       int slot;
       int moon;  // -1 = the planet itself
@@ -1054,7 +1144,7 @@ int main(int argc, char** argv) {
             inf::gen::planet_params_for_slot(system_copy, job.slot, body);
         const inf::gen::TerrainField field(body.entity, planet);
         result.radius_m = planet.radius_m.to_double();
-        result.texture = inf::gen::bake_planet_texture(field, job.size);
+        result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
       } else {
         const inf::gen::BodyHandle body =
             inf::gen::body_for_system_moon(seed_copy, cell_copy, job.slot, job.moon);
@@ -1062,7 +1152,7 @@ int main(int argc, char** argv) {
             inf::gen::planet_params_for_moon(system_copy, job.slot, job.moon, body);
         const inf::gen::TerrainField field(body.entity, planet);
         result.radius_m = planet.radius_m.to_double();
-        result.texture = inf::gen::bake_planet_texture(field, job.size);
+        result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
       }
       const std::lock_guard<std::mutex> lock(bake_mutex);
       bake_done.push_back(std::move(result));
@@ -1099,6 +1189,9 @@ int main(int argc, char** argv) {
       entry.slope_scale = static_cast<float>(
           static_cast<double>(result.texture.height_amp_m) *
           static_cast<double>(result.texture.face_size) / (3.1415926 * result.radius_m));
+      if (const auto old = body_textures.find(result.key); old != body_textures.end()) {
+        rhi->destroy_planet_texture(old->second.handle);
+      }
       body_textures[result.key] = entry;
     }
   };
@@ -1107,6 +1200,17 @@ int main(int argc, char** argv) {
   while (glfwWindowShouldClose(window) == GLFW_FALSE) {
     glfwPollEvents();
     upload_finished_bakes();
+    if (materials.poll(*rhi)) {
+      // Every tile is resident: re-bake the far views with the measured
+      // tile means so the planet from orbit matches the ground.
+      materials_anchor = nullptr;
+      stop_bake_worker();
+      start_bake_worker(system, current_cell);
+    }
+    if (materials_anchor != anchor->field.get()) {
+      materials.apply_planet(*rhi, anchor->field->material());
+      materials_anchor = anchor->field.get();
+    }
     // Quit (design/map-mode.md section 5): Cmd+Q/Cmd+W on macOS, Ctrl+Q
     // elsewhere — never bare W. The diff overlay flushes on the normal
     // shutdown path below.
@@ -1739,25 +1843,12 @@ int main(int argc, char** argv) {
         loaded.erase(old);
       }
       if (!data->mesh.vertices.empty()) {
-        // material/v1 (T0015 WP3): classify each vertex (planet-local
-        // position + normal) and upload the 8-float terrain layout.
-        const auto& mesh_vertices = data->mesh.vertices;
-        const std::size_t vertex_count = mesh_vertices.size() / 6;
-        mat_scratch.resize(vertex_count * 8);
-        const auto& material = anchor->field->material();
-        for (std::size_t v = 0; v < vertex_count; ++v) {
-          const float* in_v = mesh_vertices.data() + v * 6;
-          float* out_v = mat_scratch.data() + v * 8;
-          std::memcpy(out_v, in_v, 6 * sizeof(float));
-          const auto vm = material.classify(
-              data->mesh.origin[0] + in_v[0], data->mesh.origin[1] + in_v[1],
-              data->mesh.origin[2] + in_v[2], in_v[3], in_v[4], in_v[5]);
-          out_v[6] = static_cast<float>(static_cast<int>(vm.mat0) * 256 +
-                                        static_cast<int>(vm.mat1));
-          out_v[7] = vm.blend;
-        }
+        // material/v2 (T0019): the worker already classified every vertex
+        // (8-float layout), so this is a straight upload.
         LoadedChunk chunk;
-        chunk.mesh_id = rhi->create_mesh_mat(mat_scratch.data(), mat_scratch.size());
+        chunk.mesh_id =
+            rhi->create_mesh_mat(data->mesh.vertices.data(), data->mesh.vertices.size());
+        std::memcpy(chunk.palette, data->mesh.palette, sizeof(chunk.palette));
         chunk.origin =
             RVec3{data->mesh.origin[0], data->mesh.origin[1], data->mesh.origin[2]};
         loaded[addr] = chunk;
@@ -1979,6 +2070,20 @@ int main(int argc, char** argv) {
       item.aux[0] = static_cast<float>(translation.x);
       item.aux[1] = static_cast<float>(translation.y);
       item.aux[2] = static_cast<float>(translation.z);
+      // Texture-space origin: the chunk origin modulo the tiling period,
+      // in double, so chunk-local f32 coordinates tile seamlessly at any
+      // planet radius (T0019 WP5).
+      constexpr double kTilePeriod = 256.0;
+      item.extra[0] = static_cast<float>(std::fmod(chunk.origin.x, kTilePeriod));
+      item.extra[1] = static_cast<float>(std::fmod(chunk.origin.y, kTilePeriod));
+      item.extra[2] = static_cast<float>(std::fmod(chunk.origin.z, kTilePeriod));
+      std::memcpy(item.material_palette, chunk.palette, sizeof(item.material_palette));
+      // Far field: fade into the anchor's baked cube map when it exists.
+      if (const auto tex_it = body_textures.find(body_tex_key(anchor->slot, anchor->moon));
+          tex_it != body_textures.end()) {
+        item.planet_texture = tex_it->second.handle;
+        item.aux[3] = 1.0f;
+      }
       items.push_back(item);
     }
 
@@ -2049,6 +2154,12 @@ int main(int argc, char** argv) {
         const Mat4 mvp = inf::render::mul(view_projection, model);
         inf::render::Rhi::DrawItem item;
         item.mesh = land_mesh;
+        std::memcpy(item.material_palette, land_palette, sizeof(item.material_palette));
+        if (const auto tex_it = body_textures.find(body_tex_key(anchor->slot, anchor->moon));
+            tex_it != body_textures.end()) {
+          item.planet_texture = tex_it->second.handle;
+          item.aux[3] = 1.0f;
+        }
         std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
         item.aux[0] = static_cast<float>(rel.x);
         item.aux[1] = static_cast<float>(rel.y);

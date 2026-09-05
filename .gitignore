@@ -6,3 +6,6 @@ tests/review/
 
 debug-rec-*/
 *.ppm
+
+# Surface tile library binaries (fetched by tools/fetch-textures.py; CC0)
+assets/textures/

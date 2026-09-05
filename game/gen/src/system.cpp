@@ -475,6 +475,18 @@ PlanetParams planet_params_for_slot(const StarSystemParams& system, int slot,
   params.macro_amplitude_m =
       params.radius_m * macro_amplitude_fraction(params.macro_pattern);
   params.sea_level_m = sea_quantile * params.macro_amplitude_m;
+  // climate/v1 inputs from the system truths (T0019).
+  params.star_temperature_k = system.star.temperature_k;
+  params.star_age_gyr = system.star.age_gyr;
+  {
+    const double a_au = sys_planet.orbit.a_m.to_double() / kAuGame;
+    params.flux_rel = Real(system.star.luminosity_solar.to_double() / (a_au * a_au));
+  }
+  params.obliquity_rad = sys_planet.spin.obliquity_rad;
+  params.tidally_locked = sys_planet.spin.tidally_locked;
+  params.pressure_rel = sys_planet.surface_type == PlanetType::Barren
+                            ? Real(0.0)
+                            : sys_planet.phys.atmosphere.pressure_rel;
   return params;
 }
 
@@ -493,6 +505,18 @@ PlanetParams planet_params_for_moon(const StarSystemParams& system, int slot,
   params.macro_amplitude_m =
       params.radius_m * macro_amplitude_fraction(params.macro_pattern);
   params.sea_level_m = sea_quantile * params.macro_amplitude_m;
+  // climate/v1 inputs (T0019): the moon shares its planet's insolation;
+  // airless, tidally locked to the parent.
+  {
+    const SystemPlanet& parent = system.planets[static_cast<std::size_t>(slot)];
+    const double a_au = parent.orbit.a_m.to_double() / kAuGame;
+    params.flux_rel = Real(system.star.luminosity_solar.to_double() / (a_au * a_au));
+  }
+  params.star_temperature_k = system.star.temperature_k;
+  params.star_age_gyr = system.star.age_gyr;
+  params.obliquity_rad = moon.spin.obliquity_rad;
+  params.tidally_locked = moon.spin.tidally_locked;
+  params.pressure_rel = Real(0.0);
   return params;
 }
 

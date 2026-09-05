@@ -14,10 +14,19 @@ struct ChunkMesh {
   // Chunk origin in planet-local meters (doubles; render folds this into
   // the camera-relative transform before any f32 sees planet magnitudes).
   double origin[3]{0.0, 0.0, 0.0};
-  // Interleaved [px py pz nx ny nz] per vertex, 3 vertices per triangle.
+  // Interleaved [px py pz nx ny nz w0 w1 w2 w3] per vertex, 3 vertices
+  // per triangle: geometry plus the vertex's weights over the chunk's
+  // four-material palette. The mesher writes geometry and zeros the
+  // weights; the sampler's classify_mesh hook fills weights and palette
+  // on the worker. Weights interpolate continuously across every
+  // triangle, so material transitions never follow triangle edges.
+  static constexpr std::size_t kVertexFloats = 10;
+  static constexpr std::size_t kPaletteSize = 4;
+  std::uint8_t palette[kPaletteSize]{0, 0, 0, 0};  // material ids (0 = unused)
   std::vector<float> vertices;
 
-  std::size_t triangle_count() const { return vertices.size() / 18; }
+  std::size_t vertex_count() const { return vertices.size() / kVertexFloats; }
+  std::size_t triangle_count() const { return vertices.size() / (3 * kVertexFloats); }
 };
 
 // Which lateral faces border a COARSER neighbor column (Transvoxel

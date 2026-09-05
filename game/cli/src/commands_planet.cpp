@@ -5,6 +5,7 @@
 
 #include "commands_planet.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -341,6 +342,259 @@ int cmd_terrain_stats(const core::Seed128& seed) {
     }
     std::printf("%-10s mean|dz|: 5m=%.2f  20m=%.2f  100m=%.2f\n", gen::to_string(type),
                 sum5 / n5, sum20 / n20, sum100 / n100);
+  }
+  return 0;
+}
+
+}  // namespace inf::cli
+
+// --- T0019: surface maps and tile dumps -----------------------------------
+
+#include "gen/climate.hpp"
+#include "gen/life.hpp"
+#include "gen/material.hpp"
+#include "tex/tiles.hpp"
+
+namespace inf::cli {
+
+namespace {
+
+// Distinct colours for material ids (index = Material value).
+constexpr Rgb kMaterialColors[] = {
+    {0, 0, 0},          // None
+    {130, 125, 120},    // RockGranite
+    {50, 48, 48},       // RockBasalt
+    {160, 120, 85},     // RockSandstone
+    {105, 105, 110},    // RockShale
+    {120, 110, 100},    // Scree
+    {95, 110, 80},      // CliffMossy
+    {135, 130, 122},    // RegolithFine
+    {110, 105, 98},     // RegolithRubble
+    {120, 115, 108},    // Gravel
+    {140, 128, 115},    // Pebbles
+    {220, 190, 130},    // SandDune
+    {205, 185, 140},    // SandBeach
+    {120, 105, 85},     // SandWet
+    {170, 140, 100},    // SoilDry
+    {90, 70, 50},       // SoilMud
+    {110, 85, 60},      // SoilLoam
+    {85, 70, 45},       // ForestFloor
+    {150, 105, 60},     // DeadLeaves
+    {70, 140, 50},      // Grass
+    {110, 150, 70},     // Meadow
+    {60, 120, 60},      // Moss
+    {240, 242, 248},    // Snow
+    {230, 235, 245},    // SnowDrift
+    {180, 178, 175},    // SnowDirty
+    {170, 205, 230},    // IceSheet
+    {160, 160, 165},    // Permafrost
+    {40, 25, 20},       // LavaRock
+    {160, 90, 170},     // MicrobialMat
+    {170, 170, 110},    // LichenCrust
+    {120, 220, 230},    // CrystalField
+    {230, 200, 50},     // Sulfur
+    {150, 100, 55},     // TholinDust
+    {160, 70, 40},      // RedBed
+    {235, 230, 220},    // SaltFlat
+    {130, 170, 185},    // AmmoniaSlush
+    {95, 95, 75},       // Seabed
+};
+static_assert(sizeof(kMaterialColors) / sizeof(kMaterialColors[0]) == gen::kMaterialCount,
+              "material colour table out of sync");
+
+constexpr Rgb kBiomeColors[] = {
+    {225, 225, 235},  // PolarDesert
+    {150, 170, 150},  // Tundra
+    {40, 90, 60},     // BorealForest
+    {180, 190, 90},   // TemperateGrassland
+    {60, 130, 50},    // TemperateForest
+    {20, 100, 70},    // TemperateRainforest
+    {160, 150, 80},   // Shrubland
+    {200, 170, 70},   // Savanna
+    {230, 200, 120},  // HotDesert
+    {70, 150, 40},    // TropicalSeasonalForest
+    {20, 120, 30},    // TropicalRainforest
+    {140, 140, 150},  // Alpine
+};
+
+}  // namespace
+
+int cmd_surface_map(const core::Seed128& seed, const char* type_text, const char* out_prefix) {
+  const auto forced = parse_type(type_text);
+  if (type_text != nullptr && !forced.has_value()) {
+    std::fprintf(stderr, "unknown type: %s\n", type_text);
+    return 1;
+  }
+  const gen::BodyHandle body = body_for(seed);
+  const gen::PlanetParams planet = gen::derive_planet_params(body, forced);
+  const gen::TerrainField field(body.entity, planet);
+  const double radius = planet.radius_m.to_double();
+
+  constexpr int kWidth = 1024;
+  constexpr int kHeight = 512;
+  constexpr double kPi = 3.14159265358979323846;
+  const std::size_t pixels = static_cast<std::size_t>(kWidth) * kHeight;
+  std::vector<unsigned char> climate_map(pixels * 3);
+  std::vector<unsigned char> biome_map(pixels * 3);
+  std::vector<unsigned char> material_map(pixels * 3);
+  std::vector<unsigned char> life_map(pixels * 3);
+  std::vector<double> heights(pixels);
+  std::uint64_t material_histogram[gen::kMaterialCount] = {};
+
+  gen::TerrainField::ParamCache cache;
+  // Heights first so the material pass can use a real slope from the
+  // grid (like the far-view baker).
+  for (int y = 0; y < kHeight; ++y) {
+    const double lat = kPi * (0.5 - (y + 0.5) / kHeight);
+    for (int x = 0; x < kWidth; ++x) {
+      const double lon = 2.0 * kPi * ((x + 0.5) / kWidth) - kPi;
+      const gen::Dir3 dir = latlon_dir(lat, lon);
+      const auto canonical = field.canonical_params(gen::dir_to_face_uv(dir), &cache);
+      const gen::BlendedParams params = gen::TerrainField::to_blended(canonical);
+      heights[static_cast<std::size_t>(y) * kWidth + x] =
+          field.elevation_from_params(dir, params, canonical.macro_rel, &cache).to_double();
+    }
+  }
+  for (int y = 0; y < kHeight; ++y) {
+    const double lat = kPi * (0.5 - (y + 0.5) / kHeight);
+    const double cos_lat = std::max(0.05, std::cos(lat));
+    for (int x = 0; x < kWidth; ++x) {
+      const double lon = 2.0 * kPi * ((x + 0.5) / kWidth) - kPi;
+      const gen::Dir3 dir = latlon_dir(lat, lon);
+      const std::size_t pixel = static_cast<std::size_t>(y) * kWidth + x;
+      const double h = heights[pixel];
+      // Grid slope -> a tilted normal (the classifier only reads the tilt).
+      const double arc_x = radius * 2.0 * kPi / kWidth * cos_lat;
+      const double arc_y = radius * kPi / kHeight;
+      const double hx = heights[static_cast<std::size_t>(y) * kWidth + (x + 1) % kWidth] -
+                        heights[static_cast<std::size_t>(y) * kWidth + (x + kWidth - 1) % kWidth];
+      const double hy = heights[static_cast<std::size_t>(std::min(y + 1, kHeight - 1)) * kWidth + x] -
+                        heights[static_cast<std::size_t>(std::max(y - 1, 0)) * kWidth + x];
+      const double su = hx / (2.0 * arc_x);
+      const double sv = hy / (2.0 * arc_y);
+      const double tilt = std::sqrt(su * su + sv * sv);
+      const double inv = 1.0 / std::sqrt(1.0 + tilt * tilt);
+      const double dx = dir.x.to_double();
+      const double dy = dir.y.to_double();
+      const double dz = dir.z.to_double();
+      double nx = dx * inv;
+      double ny = dy * inv;
+      double nz = dz * inv + tilt * inv;
+      const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+      nx /= len;
+      ny /= len;
+      nz /= len;
+      const double r = radius + h;
+      const gen::MaterialInputs in =
+          field.material_inputs(dx * r, dy * r, dz * r, nx, ny, nz, &cache);
+      const gen::VertexMaterial vm = field.material().classify(in);
+
+      // Climate: red = temperature (200..320 K), green = humidity, blue = frozen.
+      climate_map[pixel * 3 + 0] =
+          static_cast<unsigned char>(std::clamp((in.climate.temperature_k - 200.0) / 120.0, 0.0, 1.0) * 255.0);
+      climate_map[pixel * 3 + 1] = static_cast<unsigned char>(in.climate.humidity * 255.0);
+      climate_map[pixel * 3 + 2] = in.climate.frozen ? 200 : 30;
+      const Rgb bc = kBiomeColors[static_cast<std::size_t>(in.biome.primary)];
+      const Rgb bs = kBiomeColors[static_cast<std::size_t>(in.biome.secondary)];
+      const double bb = in.biome.blend;
+      biome_map[pixel * 3 + 0] = static_cast<unsigned char>(bc.r + (bs.r - bc.r) * bb);
+      biome_map[pixel * 3 + 1] = static_cast<unsigned char>(bc.g + (bs.g - bc.g) * bb);
+      biome_map[pixel * 3 + 2] = static_cast<unsigned char>(bc.b + (bs.b - bc.b) * bb);
+      const Rgb m0 = kMaterialColors[static_cast<std::size_t>(vm.mat0)];
+      const Rgb m1 = kMaterialColors[static_cast<std::size_t>(vm.mat1)];
+      const double mb = vm.blend;
+      const bool sea = planet.type == gen::PlanetType::EarthLike &&
+                       h < planet.sea_level_m.to_double();
+      material_map[pixel * 3 + 0] = sea ? 20 : static_cast<unsigned char>(m0.r + (m1.r - m0.r) * mb);
+      material_map[pixel * 3 + 1] = sea ? 40 : static_cast<unsigned char>(m0.g + (m1.g - m0.g) * mb);
+      material_map[pixel * 3 + 2] = sea ? 90 : static_cast<unsigned char>(m0.b + (m1.b - m0.b) * mb);
+      ++material_histogram[static_cast<std::size_t>(vm.mat0)];
+      const double patch = 0.5;
+      const double cover = gen::life_coverage(field.life(), in.climate, in.slope,
+                                              in.height_above_sea_m, patch);
+      life_map[pixel * 3 + 0] = static_cast<unsigned char>(cover * 255.0);
+      life_map[pixel * 3 + 1] = static_cast<unsigned char>(in.climate.t01 * 255.0);
+      life_map[pixel * 3 + 2] = static_cast<unsigned char>(in.climate.h01 * 255.0);
+    }
+  }
+  const std::string names[4] = {std::string(out_prefix) + "-climate.png",
+                                std::string(out_prefix) + "-biome.png",
+                                std::string(out_prefix) + "-material.png",
+                                std::string(out_prefix) + "-life.png"};
+  const std::vector<unsigned char>* maps[4] = {&climate_map, &biome_map, &material_map, &life_map};
+  for (int i = 0; i < 4; ++i) {
+    if (stbi_write_png(names[i].c_str(), kWidth, kHeight, 3, maps[i]->data(), kWidth * 3) == 0) {
+      std::fprintf(stderr, "failed to write %s\n", names[i].c_str());
+      return 1;
+    }
+  }
+  const gen::LifeParams& life = field.life();
+  std::printf("type=%s radius=%.0f flux=%.2f star=%.0fK age=%.1fGyr meanT=%.1fK meanH=%.2f\n",
+              gen::to_string(planet.type), radius, planet.flux_rel.to_double(),
+              planet.star_temperature_k.to_double(), planet.star_age_gyr.to_double(),
+              field.climate().mean_temperature_k(), field.climate().mean_humidity());
+  std::printf("life: habitable=%d occupied=%d chemistry=%s stage=%s\n", life.habitable ? 1 : 0,
+              life.occupied ? 1 : 0, gen::to_string(life.chemistry), gen::to_string(life.stage));
+  std::printf("materials (primary, %% of map):");
+  for (std::uint32_t m = 1; m < gen::kMaterialCount; ++m) {
+    if (material_histogram[m] > 0) {
+      std::printf(" %s=%.1f", gen::material_info(static_cast<gen::Material>(m)).name,
+                  100.0 * static_cast<double>(material_histogram[m]) / static_cast<double>(pixels));
+    }
+  }
+  std::printf("\nwrote %s %s %s %s\n", names[0].c_str(), names[1].c_str(), names[2].c_str(),
+              names[3].c_str());
+  return 0;
+}
+
+int cmd_tile_dump(const char* out_dir, int size) {
+  std::size_t count = 0;
+  const char* const* names = tex::known_tile_names(&count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const tex::Tile tile = tex::generate_tile(names[i], static_cast<std::uint32_t>(size), 0x51EDULL + i);
+    const std::string albedo_name = std::string(out_dir) + "/" + names[i] + "-albedo.png";
+    const std::string normal_name = std::string(out_dir) + "/" + names[i] + "-normal.png";
+    if (stbi_write_png(albedo_name.c_str(), size, size, 4, tile.albedo.data(), size * 4) == 0 ||
+        stbi_write_png(normal_name.c_str(), size, size, 4, tile.normal.data(), size * 4) == 0) {
+      std::fprintf(stderr, "failed to write %s\n", albedo_name.c_str());
+      return 1;
+    }
+    std::printf("%-16s mean=(%.2f %.2f %.2f)\n", names[i], static_cast<double>(tile.mean_albedo[0]),
+                static_cast<double>(tile.mean_albedo[1]), static_cast<double>(tile.mean_albedo[2]));
+  }
+  return 0;
+}
+
+int cmd_life_stats(int seed_count) {
+  std::uint64_t stage_hist[4][7] = {};
+  std::uint64_t chem_hist[4][5] = {};
+  std::uint64_t habitable[4] = {};
+  for (std::uint32_t type_index = 0; type_index < 4; ++type_index) {
+    const auto type = static_cast<gen::PlanetType>(type_index);
+    for (int seed = 0; seed < seed_count; ++seed) {
+      const gen::BodyHandle body = body_for(core::Seed128{0, static_cast<std::uint64_t>(seed) + 1});
+      const gen::PlanetParams planet = gen::derive_planet_params(body, type);
+      const gen::MacroField macro(body.entity);
+      const gen::ClimateField climate(body.entity, planet, macro);
+      const gen::LifeParams life = gen::derive_life(body.entity, planet, climate);
+      habitable[type_index] += life.habitable ? 1 : 0;
+      ++stage_hist[type_index][static_cast<std::size_t>(life.stage)];
+      ++chem_hist[type_index][static_cast<std::size_t>(life.chemistry)];
+    }
+  }
+  for (std::uint32_t type_index = 0; type_index < 4; ++type_index) {
+    std::printf("%-9s habitable=%5.1f%% stages:", gen::to_string(static_cast<gen::PlanetType>(type_index)),
+                100.0 * static_cast<double>(habitable[type_index]) / seed_count);
+    for (int st = 0; st < 7; ++st) {
+      std::printf(" %s=%.1f", gen::to_string(static_cast<gen::LifeStage>(st)),
+                  100.0 * static_cast<double>(stage_hist[type_index][st]) / seed_count);
+    }
+    std::printf("\n          chemistry:");
+    for (int c = 0; c < 5; ++c) {
+      std::printf(" %s=%.1f", gen::to_string(static_cast<gen::LifeChemistry>(c)),
+                  100.0 * static_cast<double>(chem_hist[type_index][c]) / seed_count);
+    }
+    std::printf("\n");
   }
   return 0;
 }

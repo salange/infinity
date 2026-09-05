@@ -143,6 +143,9 @@ class MeshBuilder {
       mesh_->vertices.push_back(static_cast<float>(unit.x));
       mesh_->vertices.push_back(static_cast<float>(unit.y));
       mesh_->vertices.push_back(static_cast<float>(unit.z));
+      for (int w = 0; w < 4; ++w) {
+        mesh_->vertices.push_back(0.0f);  // palette weights (filled by the sampler)
+      }
     }
   }
 

@@ -16,6 +16,8 @@ int cmd_civ_state(const core::Seed128& seed, const long long* cell_xyzl, const c
 int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text);
 int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot, int moon,
                 const char* time_text, const char* out_path);
+int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot, int moon,
+                 const char* tier_text, int site_index, const char* time_text, const char* out_path);
 int cmd_hash_civ();
 
 }  // namespace inf::cli

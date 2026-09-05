@@ -51,6 +51,17 @@ struct CivCensus {
   int new_claims_week{0};    // systems unowned at t, owned at t + 1 week
   int level7{0};
   double front_ly{0.0};
+  // Human-owned systems with a settled body, for tooling: cell, distance,
+  // best level, best body slot/moon.
+  struct Listed {
+    SystemCell cell;
+    double dist_ly;
+    int level;
+    int slot;
+    int moon;
+    bool domed;
+  };
+  std::vector<Listed> listed;
 
   std::string report() const;
 };

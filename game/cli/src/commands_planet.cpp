@@ -398,6 +398,11 @@ constexpr Rgb kMaterialColors[] = {
     {235, 230, 220},    // SaltFlat
     {130, 170, 185},    // AmmoniaSlush
     {95, 95, 75},       // Seabed
+    {120, 118, 112},    // Paving
+    {105, 110, 118},    // Plating
+    {140, 115, 75},     // ResinFloor
+    {150, 178, 198},    // CrystalFloor
+    {125, 105, 80},     // DisturbedSoil
 };
 static_assert(sizeof(kMaterialColors) / sizeof(kMaterialColors[0]) == gen::kMaterialCount,
               "material colour table out of sync");

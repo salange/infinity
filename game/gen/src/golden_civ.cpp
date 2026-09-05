@@ -9,6 +9,8 @@
 #include "gen/colony.hpp"
 #include "gen/human.hpp"
 #include "gen/settlements.hpp"
+#include "gen/sites.hpp"
+#include "gen/civil.hpp"
 #include "gen/terrain.hpp"
 #include "gen/universe.hpp"
 
@@ -217,6 +219,72 @@ std::uint64_t hash_plan_script(const core::Seed128& seed) {
   return hash.value();
 }
 
+// WP5: the human home world's sites — centres, datums, families, the
+// lots of the best town at two progress values, and the civil modifier
+// at fixed directions.
+std::uint64_t hash_sites_script(const core::Seed128& seed) {
+  core::GoldenHash hash;
+  const core::Key galaxy_key = home_galaxy_key(seed);
+  const GalaxyParams galaxy = home_galaxy_params(seed);
+  const CivilizationParams civ = derive_civilization(galaxy_key, galaxy, true);
+  RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(human_race(galaxy_key, galaxy));
+  const ColonyResolver resolver(registry);
+  const SystemCivContext context = gather_system_context(seed, registry, SystemCell{}, false);
+  const StarSystemParams system = generate_system(context.system_key);
+  const core::WorldTime t = kLaunchReference;
+  const Owner owner = resolver.owner(context, t);
+  const auto states = resolver.system_states(context, owner, t);
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    if (!states[i].is_home) continue;
+    const BodyCivInputs& body = context.bodies[i];
+    const BodyKeys keys = body_keys_in_system(context.system_key, body.slot);
+    const PlanetParams params = planet_params_for_slot(system, body.slot, BodyHandle{keys.entity, keys.params});
+    TerrainField field(keys.entity, params);
+    const Race& race = resolver.candidates(context.position_m)[owner.candidate];
+    const SettlementPlanner planner(keys.entity, field, race.params, states[i].domed);
+    const SettlementPlan plan = planner.plan(states[i], race.factions);
+    const SiteField sites(keys.entity, field, plan, race.params, race.factions, states[i]);
+    hash.feed(sites.sites().size());
+    const Site* town = nullptr;
+    for (const Site& site : sites.sites()) {
+      feed_double(hash, site.frame.up.x.to_double());
+      feed_double(hash, site.frame.up.z.to_double());
+      feed_double(hash, site.datum_m);
+      hash.feed(static_cast<std::uint64_t>(site.family));
+      hash.feed(static_cast<std::uint64_t>(site.tier));
+      hash.feed(site.arterials.size());
+      if (town == nullptr && site.tier == static_cast<int>(SettlementTier::Town)) town = &site;
+    }
+    if (town != nullptr) {
+      for (const float progress : {0.2f, 0.9f}) {
+        Site probe = *town;
+        probe.progress = progress;
+        std::vector<Lot> lots;
+        sites.all_lots(probe, &lots);
+        hash.feed(lots.size());
+        for (const Lot& lot : lots) {
+          hash.feed(lot.id);
+          hash.feed(lot.order);
+          hash.feed(std::bit_cast<std::uint32_t>(lot.footprint[0][0]));
+          hash.feed(std::bit_cast<std::uint32_t>(lot.height_budget_m));
+          hash.feed(static_cast<std::uint64_t>(lot.usage));
+        }
+      }
+    }
+    const CivilField civil(sites, field);
+    field.set_height_modifier(&civil);
+    for (const Site& site : sites.sites()) {
+      // Centre, half radius, rim, and just outside.
+      for (const double f : {0.0, 0.5, 0.95, 1.2}) {
+        const Dir3 d = site.frame.to_dir(f * site.radius_m, 0.3 * f * site.radius_m);
+        feed_double(hash, field.elevation_m(d).to_double());
+      }
+    }
+  }
+  return hash.value();
+}
+
 }  // namespace
 
 std::string hash_civ_report() {
@@ -245,6 +313,11 @@ std::string hash_civ_report() {
   for (const core::Seed128& seed : kSeeds) {
     report += "plan seed=" + core::to_hex(seed) + " fnv=";
     append_hex(&report, hash_plan_script(seed));
+    report += "\n";
+  }
+  for (const core::Seed128& seed : kSeeds) {
+    report += "sites seed=" + core::to_hex(seed) + " fnv=";
+    append_hex(&report, hash_sites_script(seed));
     report += "\n";
   }
   return report;

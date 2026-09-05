@@ -141,6 +141,7 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
         const double dy = dir.y.to_double();
         const double dz = dir.z.to_double();
         Rgb albedo;
+        double night = 0.0;
         if ((ocean_world || frozen_sea) &&
             raw_m[face][index] < static_cast<float>(sea)) {
           if (frozen_sea) {
@@ -184,7 +185,9 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
           // metres, so it shows the MIX the rules produce, not a hard
           // top-two pick (which read as blocky patches from orbit).
           double weights[kMaterialCount];
-          field.material_weights(dx * r, dy * r, dz * r, nx, ny, nz, &cache, weights);
+          const MaterialInputs inputs = field.material_inputs(dx * r, dy * r, dz * r, nx, ny, nz, &cache);
+          field.material().weights(inputs, weights);
+          night = inputs.night_light;
           double total = 0.0;
           double acc[3] = {0.0, 0.0, 0.0};
           for (std::uint32_t m = 1; m < kMaterialCount; ++m) {
@@ -213,7 +216,9 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
         face_out.rgba[index * 4 + 0] = to_byte(albedo.r);
         face_out.rgba[index * 4 + 1] = to_byte(albedo.g);
         face_out.rgba[index * 4 + 2] = to_byte(albedo.b);
-        face_out.rgba[index * 4 + 3] = 255;
+        // Alpha: the settlement night-light mask (T0020 civil/v1) — the
+        // impostor adds it as warm emissive on the night side.
+        face_out.rgba[index * 4 + 3] = to_byte(static_cast<float>(night));
       }
     }
   }

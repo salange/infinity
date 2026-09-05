@@ -547,7 +547,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let fuv = cube_face_uv(dir);
     let layer = i32(fuv.z);
     let face = u32(fuv.z + 0.5);
-    let alb = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb;
+    let alb4 = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0);
+    let alb = alb4.rgb;
     let texel = 1.0 / f32(textureDimensions(planet_height).x);
     let du = vec2<f32>(texel, 0.0);
     let dv = vec2<f32>(0.0, texel);
@@ -572,6 +573,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let base6 = alb * (0.84 + 0.24 * mo);
     var c6 = base6 * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
     c6 += base6 * max(dot(n, -light), 0.0) * vec3<f32>(0.05, 0.07, 0.12);
+    // Settlement lights (T0020): the bake's alpha is the night-light
+    // mask; warm sodium glow that fades in as the sun sets over it.
+    let night6 = 1.0 - smoothstep(-0.05, 0.12, dot(n, light));
+    c6 += vec3<f32>(1.0, 0.72, 0.38) * alb4.a * night6 * 0.9;
     return vec4<f32>(c6, 1.0);
   }
   if (mode == 1u) {

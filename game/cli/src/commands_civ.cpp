@@ -14,6 +14,9 @@
 #include "gen/civ_time.hpp"
 #include "gen/colony.hpp"
 #include "gen/settlements.hpp"
+#include "gen/sites.hpp"
+#include "gen/civil.hpp"
+#include "gen/site_mesh.hpp"
 #include "gen/terrain.hpp"
 #include "stb_image_write.h"
 #include "gen/civilization.hpp"
@@ -390,6 +393,204 @@ int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot_
     return 1;
   }
   std::printf("wrote %s\n", out_path);
+  return 0;
+}
+
+// WP5: one site of a body — its lots as a top-down PNG, a summary, and
+// capture script lines (pos/aim) for the app at 20 km, 2 km and 200 m.
+int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot_arg, int moon_arg,
+                 const char* tier_text, int site_index, const char* time_text,
+                 const char* out_path) {
+  const core::Key galaxy_key = gen::home_galaxy_key(seed);
+  const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
+  const gen::CivilizationParams civ = gen::derive_civilization(galaxy_key, galaxy, true);
+  gen::RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(gen::human_race(galaxy_key, galaxy));
+  const gen::ColonyResolver resolver(registry);
+  gen::SystemCell cell{};
+  if (cell_xyzl != nullptr) {
+    cell = gen::SystemCell{cell_xyzl[0], cell_xyzl[1], cell_xyzl[2], static_cast<std::int32_t>(cell_xyzl[3])};
+  }
+  const core::WorldTime t = parse_time(time_text);
+  const gen::SystemCivContext context = gen::gather_system_context(seed, registry, cell, true);
+  const gen::Owner owner = resolver.owner(context, t);
+  if (!owner.owned) {
+    std::printf("system unowned at this time\n");
+    return 1;
+  }
+  const auto states = resolver.system_states(context, owner, t);
+  int pick = -1;
+  for (std::size_t i = 0; i < context.bodies.size(); ++i) {
+    const gen::BodyCivInputs& b = context.bodies[i];
+    if (slot_arg >= 0 && (b.slot != slot_arg || b.moon != moon_arg)) continue;
+    if (slot_arg < 0 && !states[i].settled) continue;
+    if (pick < 0 || states[i].level > states[static_cast<std::size_t>(pick)].level) pick = static_cast<int>(i);
+  }
+  if (pick < 0 || !states[static_cast<std::size_t>(pick)].settled) {
+    std::printf("no settled body\n");
+    return 1;
+  }
+  const gen::BodyCivInputs& body = context.bodies[static_cast<std::size_t>(pick)];
+  const gen::CivState& state = states[static_cast<std::size_t>(pick)];
+  const auto& races = resolver.candidates(context.position_m);
+  const gen::Race& race = races[owner.candidate];
+  gen::HomeSlotOverride slot_override;
+  const auto over = registry.home_override(cell);
+  if (over.has_value()) {
+    slot_override.habitat = over->habitat;
+    slot_override.preferred_flux = over->preferred_flux;
+    slot_override.force_biosphere = over->force_biosphere;
+  }
+  const gen::StarSystemParams system = gen::generate_system(context.system_key, over.has_value() ? &slot_override : nullptr);
+  const gen::BodyKeys keys = body.moon >= 0 ? gen::moon_keys_in_system(context.system_key, body.slot, body.moon)
+                                            : gen::body_keys_in_system(context.system_key, body.slot);
+  const gen::PlanetParams params =
+      body.moon >= 0 ? gen::planet_params_for_moon(system, body.slot, body.moon, gen::BodyHandle{keys.entity, keys.params})
+                     : gen::planet_params_for_slot(system, body.slot, gen::BodyHandle{keys.entity, keys.params});
+  gen::TerrainField field(keys.entity, params);
+  const gen::SettlementPlanner planner(keys.entity, field, race.params, state.domed);
+  const gen::SettlementPlan plan = planner.plan(state, race.factions);
+  const gen::SiteField sites(keys.entity, field, plan, race.params, race.factions, state);
+  const gen::CivilField civil(sites, field);
+  field.set_height_modifier(&civil);
+  // The site: by --tier (first site of that tier by rank) or --site index.
+  gen::SettlementTier want = gen::SettlementTier::Town;
+  if (tier_text != nullptr) {
+    for (int k = 1; k <= 7; ++k) {
+      if (std::strcmp(tier_text, gen::to_string(static_cast<gen::SettlementTier>(k))) == 0) want = static_cast<gen::SettlementTier>(k);
+    }
+  }
+  const gen::Site* site = nullptr;
+  if (site_index >= 0 && site_index < static_cast<int>(sites.sites().size())) {
+    site = &sites.sites()[static_cast<std::size_t>(site_index)];
+  } else {
+    // First site of the tier by rank; a site still filling its ring is
+    // preferred (it shows growth between two times).
+    const gen::Site* complete = nullptr;
+    for (const std::uint32_t index : plan.by_rank) {
+      const gen::Site* candidate = sites.site_of(plan.provinces[index].cell);
+      if (candidate == nullptr || static_cast<gen::SettlementTier>(candidate->tier) != want) continue;
+      if (candidate->progress < 0.85f) {
+        site = candidate;
+        break;
+      }
+      if (complete == nullptr) complete = candidate;
+    }
+    if (site == nullptr) site = complete;
+  }
+  std::printf("body slot %d%s %s L%d: %zu sites; plan %s\n", body.slot, body.moon >= 0 ? " (moon)" : "",
+              gen::to_string(params.type), state.level, sites.sites().size(), plan.to_json().c_str());
+  int per_tier[9] = {};
+  for (const gen::Site& s : sites.sites()) ++per_tier[s.tier];
+  std::printf("sites by tier:");
+  for (int k = 1; k <= 7; ++k) if (per_tier[k] > 0) std::printf(" %s=%d", gen::to_string(static_cast<gen::SettlementTier>(k)), per_tier[k]);
+  std::printf("\n");
+  if (site == nullptr) {
+    std::printf("no site of tier %s\n", gen::to_string(want));
+    return 1;
+  }
+  std::vector<gen::Lot> lots;
+  sites.all_lots(*site, &lots);
+  int under_construction = 0;
+  for (const gen::Lot& lot : lots) under_construction += lot.style.construction < 1.0f ? 1 : 0;
+  const double r = field.planet().radius_m.to_double();
+  const gen::Dir3& up = site->frame.up;
+  std::printf("site: province %u tier %s (max %s) radius %.0f m family %s datum %.1f m (sea %.1f) "
+              "progress %.3f lots %zu (%d under construction) arterials %zu%s%s\n",
+              site->province, gen::to_string(static_cast<gen::SettlementTier>(site->tier)),
+              gen::to_string(static_cast<gen::SettlementTier>(site->max_tier)), site->radius_m,
+              gen::to_string(site->family), site->datum_m, site->sea_m, site->progress, lots.size(),
+              under_construction, site->arterials.size(), site->coastal ? " coastal" : "",
+              site->river ? " river" : "");
+  const double cx = up.x.to_double();
+  const double cy = up.y.to_double();
+  const double cz = up.z.to_double();
+  std::printf("centre dir (%.6f, %.6f, %.6f)  planet-local (%.1f, %.1f, %.1f)\n", cx, cy, cz,
+              cx * (r + site->datum_m), cy * (r + site->datum_m), cz * (r + site->datum_m));
+  // Capture script lines: the camera above and to the south of the site,
+  // looking down at ~35 degrees, at three ranges.
+  std::printf("# capture script lines (app --script):\n");
+  const gen::Dir3& north = site->frame.north;
+  for (const double range : {20000.0, 2000.0, 200.0}) {
+    const double back = range * 0.8;
+    const double height = range * 0.6;
+    const double px = cx * (r + site->datum_m + height) - north.x.to_double() * back;
+    const double py = cy * (r + site->datum_m + height) - north.y.to_double() * back;
+    const double pz = cz * (r + site->datum_m + height) - north.z.to_double() * back;
+    const double tx = cx * (r + site->datum_m) - px;
+    const double ty = cy * (r + site->datum_m) - py;
+    const double tz = cz * (r + site->datum_m) - pz;
+    const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+    std::printf("pos %.1f %.1f %.1f\naim dir %.5f %.5f %.5f   # %.0f m\n", px, py, pz, tx / len, ty / len,
+                tz / len, range);
+  }
+  // Top-down PNG: 1024 px across 2.2 R; lots by usage, arterials ochre,
+  // construction hatched, ground shade from the civil elevation.
+  constexpr int kSize = 1024;
+  std::vector<unsigned char> map(static_cast<std::size_t>(kSize) * kSize * 3, 0);
+  const double span = 2.2 * site->radius_m;
+  const double scale = kSize / span;
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize; ++x) {
+      const double lx = (x + 0.5) / scale - 0.5 * span;
+      const double ly = 0.5 * span - (y + 0.5) / scale;
+      const double e = field.elevation_m(site->frame.to_dir(lx, ly)).to_double();
+      const double shade = std::clamp(0.3 + (e - site->datum_m) / 80.0, 0.1, 0.8);
+      const std::size_t pixel = (static_cast<std::size_t>(y) * kSize + x) * 3;
+      const bool sea = params.land_fraction.to_double() < 0.999 && e < params.sea_level_m.to_double();
+      map[pixel] = static_cast<unsigned char>((sea ? 0.1 : shade) * 255.0);
+      map[pixel + 1] = static_cast<unsigned char>((sea ? 0.18 : shade * 1.05) * 255.0);
+      map[pixel + 2] = static_cast<unsigned char>((sea ? 0.35 : shade * 0.9) * 255.0);
+    }
+  }
+  const auto fill = [&](double lx, double ly, int size, unsigned char rr, unsigned char gg, unsigned char bb) {
+    const int px = static_cast<int>((lx + 0.5 * span) * scale);
+    const int py = static_cast<int>((0.5 * span - ly) * scale);
+    for (int dy = -size; dy <= size; ++dy) {
+      for (int dx = -size; dx <= size; ++dx) {
+        const int xx = px + dx;
+        const int yy = py + dy;
+        if (xx < 0 || yy < 0 || xx >= kSize || yy >= kSize) continue;
+        const std::size_t pixel = (static_cast<std::size_t>(yy) * kSize + xx) * 3;
+        map[pixel] = rr; map[pixel + 1] = gg; map[pixel + 2] = bb;
+      }
+    }
+  };
+  for (const gen::Arterial& a : site->arterials) {
+    for (std::size_t s2 = 0; s2 + 3 < a.xy.size(); s2 += 2) {
+      for (int k = 0; k < 64; ++k) {
+        const double f = k / 64.0;
+        fill(a.xy[s2] + (a.xy[s2 + 2] - a.xy[s2]) * f, a.xy[s2 + 1] + (a.xy[s2 + 3] - a.xy[s2 + 1]) * f,
+             std::max(1, static_cast<int>(0.5 * a.width_m * scale)), 210, 170, 90);
+      }
+    }
+  }
+  for (const gen::Lot& lot : lots) {
+    double ccx = 0.0;
+    double ccy = 0.0;
+    for (int k = 0; k < lot.vertex_count; ++k) { ccx += lot.footprint[k][0]; ccy += lot.footprint[k][1]; }
+    ccx /= lot.vertex_count;
+    ccy /= lot.vertex_count;
+    unsigned char rr = 200, gg = 190, bb = 170;
+    switch (lot.usage) {
+      case gen::LotUsage::Civic: rr = 235; gg = 225; bb = 120; break;
+      case gen::LotUsage::Industrial: rr = 170; gg = 120; bb = 100; break;
+      case gen::LotUsage::Agricultural: rr = 120; gg = 170; bb = 80; break;
+      case gen::LotUsage::Pad: rr = 90; gg = 90; bb = 110; break;
+      case gen::LotUsage::Monument: rr = 255; gg = 255; bb = 255; break;
+      default: break;
+    }
+    if (lot.style.construction < 1.0f) { rr = 255; gg = 80; bb = 200; }
+    const double half = 0.5 * std::sqrt(std::fabs((lot.footprint[1][0] - lot.footprint[0][0]) * (lot.footprint[2][1] - lot.footprint[0][1])));
+    fill(ccx, ccy, std::max(1, static_cast<int>(half * scale)), rr, gg, bb);
+  }
+  if (stbi_write_png(out_path, kSize, kSize, 3, map.data(), kSize * 3) == 0) {
+    std::fprintf(stderr, "failed to write %s\n", out_path);
+    return 1;
+  }
+  const gen::SiteMeshParams mp;
+  const gen::SiteMesh mesh = gen::build_site_mesh(sites, *site, field, mp);
+  std::printf("mass mesh: %u lots, %u triangles; wrote %s\n", mesh.lot_count, mesh.triangle_count, out_path);
   return 0;
 }
 

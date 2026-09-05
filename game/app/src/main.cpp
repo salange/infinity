@@ -26,6 +26,7 @@
 #include "gen/system.hpp"
 #include "gen/galaxy.hpp"
 #include "gen/deep_sky.hpp"
+#include "civ_view.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/civilization.hpp"
 #include "gen/colony.hpp"
@@ -259,13 +260,22 @@ struct Anchor {
   std::unique_ptr<inf::gen::TerrainSampler> sampler;
   std::unique_ptr<inf::world::ChunkManager> manager;
   std::unique_ptr<inf::gen::EffectiveField> effective;
+  // T0020: the civilization view of this body (nullptr = uninhabited).
+  std::unique_ptr<inf::app::CivAnchor> civ;
+};
+
+// What make_anchor needs to resolve the body's civilization state.
+struct CivSetup {
+  const inf::gen::RaceRegistry* registry{nullptr};
+  const inf::gen::ColonyResolver* resolver{nullptr};
+  inf::core::WorldTime now;
 };
 
 std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* seed_text,
                                     const inf::gen::StarSystemParams& system,
                                     const inf::gen::SystemCell& cell, int slot, int moon,
                                     std::optional<inf::gen::PlanetType> forced,
-                                    const char* diff_override) {
+                                    const char* diff_override, const CivSetup* civ = nullptr) {
   auto anchor = std::make_unique<Anchor>();
   anchor->slot = slot;
   anchor->moon = moon;
@@ -299,6 +309,12 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
   }
 
   anchor->field = std::make_unique<inf::gen::TerrainField>(anchor->keys.entity, anchor->planet);
+  // T0020: the civilization layers of this body, and the civil/v1 height
+  // modifier set on the field BEFORE any worker samples it.
+  if (civ != nullptr && civ->registry != nullptr && !forced.has_value()) {
+    anchor->civ = inf::app::build_civ_anchor(seed, *civ->registry, *civ->resolver, cell, slot, moon,
+                                             anchor->keys.entity, anchor->field.get(), civ->now);
+  }
   anchor->sampler =
       std::make_unique<inf::gen::TerrainSampler>(*anchor->field, anchor->edits.get());
 
@@ -442,6 +458,9 @@ int main(int argc, char** argv) {
   bool release_mode = false;  // --release: debug frame ring OFF
   bool hidden = false;        // --hidden: invisible window (scripted captures)
   const char* script_text = nullptr;  // --script <file>: debug command script
+  inf::gen::SystemCell start_cell{};  // --system: the starting octree cell (T0020)
+  double civ_time_offset_years = 0.0; // --civ-time: civilization clock offset (T0020)
+  long long clock_offset_s = 0;       // --clock-offset-s: world clock offset (captures)
   const char* assets_text = nullptr;  // --assets <dir>: tile library root
   std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
   int spawn_slot = -1;                // --slot N: spawn on this system slot
@@ -473,6 +492,20 @@ int main(int argc, char** argv) {
       script_text = argv[++i];
     } else if (std::strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
       assets_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--system") == 0 && i + 4 < argc) {
+      // T0020: start anchored in another octree system (x y z level).
+      start_cell = inf::gen::SystemCell{std::atoll(argv[i + 1]), std::atoll(argv[i + 2]),
+                                        std::atoll(argv[i + 3]), std::atoi(argv[i + 4])};
+      i += 4;
+    } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
+      // Shift the world clock (planet rotation, orbits): capture aid to
+      // put a site into daylight. A per-save constant offset is exactly
+      // the escape hatch the systems spec reserved (section 5).
+      clock_offset_s = std::atoll(argv[++i]);
+    } else if (std::strcmp(argv[i], "--civ-time") == 0 && i + 1 < argc) {
+      // T0020: offset the civilization clock by real years (captures of
+      // "one week later" / "one year later").
+      civ_time_offset_years = std::atof(argv[++i]);
     } else if (std::strcmp(argv[i], "--slot") == 0 && i + 1 < argc) {
       spawn_slot = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
     } else if (std::strcmp(argv[i], "--moon") == 0 && i + 1 < argc) {
@@ -493,7 +526,7 @@ int main(int argc, char** argv) {
   // debugging; the system layout stays authoritative for the map.
   // T0017: `system` is mutable state — the J-jump regenerates it for the
   // octree cell it arrives in.
-  inf::gen::SystemCell current_cell{};  // {0,0,0,0} = the home system
+  inf::gen::SystemCell current_cell = start_cell;  // {0,0,0,0} = the home system
   // T0020: the civilization registry for the home galaxy (aliens in the
   // 125-cell block around the current system + humans), the owner
   // resolver, and the race-home override planets/v1 consults.
@@ -593,6 +626,11 @@ int main(int argc, char** argv) {
   }
   // Player-diff overlay (M7): the world files are ONLY per-body diffs —
   // the procedural planets are never stored.
+  const inf::core::LocalClock civ_clock;
+  const auto civ_now = [&](inf::core::WorldTime t) {
+    return inf::core::WorldTime::from_ns(t.ns_since_epoch + inf::gen::real_years_to_ns(civ_time_offset_years));
+  };
+  const CivSetup civ_setup{&civ_registry, &civ_resolver, civ_now(civ_clock.now())};
   std::unique_ptr<Anchor> anchor =
       make_anchor(*seed, seed_text, system, current_cell, home_slot,
                   spawn_moon >= 0 &&
@@ -600,7 +638,7 @@ int main(int argc, char** argv) {
                                                             .moons.size())
                       ? spawn_moon
                       : -1,
-                  forced, diff_text);
+                  forced, diff_text, &civ_setup);
   const double spawn_r =
       spawn_altitude >= 0.0 ? anchor->radius + spawn_altitude : anchor->radius * 2.2;
   inf::sim::Player player(*anchor->effective,
@@ -944,8 +982,10 @@ int main(int argc, char** argv) {
   double last_mx = 0.0;
   double last_my = 0.0;
   glfwGetCursorPos(window, &last_mx, &last_my);
-  const inf::core::LocalClock world_clock;
-  refresh_civ(current_cell, world_clock.now());
+  const inf::core::SyncedClock world_clock(std::make_shared<inf::core::LocalClock>(),
+                                           clock_offset_s * 1'000'000'000LL);
+  refresh_civ(current_cell, civ_now(world_clock.now()));
+  CivSetup civ_setup_now{&civ_registry, &civ_resolver, civ_now(world_clock.now())};
   inf::core::WorldTime last_time = world_clock.now();
   double fps_accum = 0.0;
   int fps_frames = 0;
@@ -1302,6 +1342,7 @@ int main(int argc, char** argv) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);  // prototype convenience
     }
     const inf::core::WorldTime now = world_clock.now();
+    civ_setup_now.now = civ_now(now);
     const double raw_dt = static_cast<double>(now - last_time) * 1e-9;
     const double dt = raw_dt > 0.0 ? std::min(raw_dt, 0.1) : 0.0;
     last_time = now;
@@ -1473,8 +1514,9 @@ int main(int argc, char** argv) {
         loaded.clear();
         pending_ready.clear();  // old anchor's frames are meaningless now
         const SVec3 new_pos = at - candidate.center;
+        if (anchor && anchor->civ) { inf::app::release_civ_meshes(anchor->civ.get(), rhi.get()); }
         anchor = make_anchor(*seed, seed_text, system, current_cell, candidate.slot,
-                             candidate.moon, std::nullopt, nullptr);
+                             candidate.moon, std::nullopt, nullptr, &civ_setup_now);
         player.rebase(*anchor->effective, new_pos);
         rebuild_sea();
         hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
@@ -1599,10 +1641,11 @@ int main(int argc, char** argv) {
         body_textures.clear();
         current_cell = jump_target.cell;
         system = generate_system_at(current_cell);
-        refresh_civ(current_cell, world_clock.now());
+        refresh_civ(current_cell, civ_now(world_clock.now()));
         const int arrival_slot = inf::gen::default_landable_slot(system);
+        if (anchor && anchor->civ) { inf::app::release_civ_meshes(anchor->civ.get(), rhi.get()); }
         anchor = make_anchor(*seed, seed_text, system, current_cell, arrival_slot, -1,
-                             std::nullopt, nullptr);
+                             std::nullopt, nullptr, &civ_setup_now);
         galactic_pos = jump_target.pos_gal;
         // Arrival point: on the approach side of the system (the ship
         // was flying toward this star), at a radius that puts ~2/3 of
@@ -2124,6 +2167,11 @@ int main(int argc, char** argv) {
         stars_item.extra[1] = static_cast<float>(2.0 * star_half_px / state.height);
         items.push_back(stars_item);
       }
+    }
+    // T0020: settlement mass models of the anchor body.
+    if (show_surface && anchor->civ != nullptr) {
+      inf::app::draw_civ_sites(anchor->civ.get(), rhi.get(), *anchor->field, to_render(player.position()),
+                               camera_pos, view_projection, &items);
     }
     for (const auto& [addr, chunk] : loaded) {
       if (!show_surface) {

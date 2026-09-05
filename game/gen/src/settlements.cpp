@@ -311,12 +311,51 @@ void SettlementPlanner::assign_tiers(SettlementPlan* plan) const {
     site.capital = tier == SettlementTier::Capital;
     if (site.capital) plan->capital = static_cast<int>(site.index);
     site.radius_m = static_cast<float>(tier_radius_m(tier));
-    // Progress inside the tier: the planet's progress, scaled by the
-    // site's own growth, clamped below 1 — the newest lots are under
-    // construction (design 14.4).
-    const double p = clamp01(plan->progress * site.growth);
+    // Progress inside the tier (design 14.4), MONOTONE in time: measured
+    // from the continuous level (level + progress, which never decreases
+    // while the race lives) at which the site earned its current tier —
+    // the later of the level it was settled at and the level the tier
+    // first becomes available — scaled by the site's own growth. A level
+    // flip therefore never resets a site; it only adds a ring.
+    const double continuous = static_cast<double>(level) + clamp01(plan->progress);
+    double tier_available = 1.0;
+    switch (tier) {
+      case SettlementTier::Outpost:
+      case SettlementTier::Hamlet: tier_available = 1.0; break;
+      case SettlementTier::Village: tier_available = 2.0; break;
+      case SettlementTier::Town: tier_available = 3.0; break;
+      case SettlementTier::City: tier_available = 3.0; break;
+      case SettlementTier::Capital: tier_available = 5.0; break;
+      case SettlementTier::Metropolis: tier_available = 6.0; break;
+      default: break;
+    }
+    const double granted = std::max(settled_level_of(r), tier_available);
+    const double p = clamp01((continuous - granted) * site.growth);
     site.site_progress = static_cast<float>(p >= 1.0 ? 0.999999 : p);
   }
+}
+
+double SettlementPlanner::settled_level_of(std::uint32_t rank) const {
+  // The continuous level at which the province of this rank crosses the
+  // moving cut-off (inverse of the count rule in update()).
+  const auto count_at = [&](int level, double progress) -> double {
+    if (level <= 0) return 0.0;
+    if (level >= 7) return static_cast<double>(base_.size());
+    if (level == 1) return 1.0 + 2.0 * clamp01(progress);
+    double count = std::ceil(settled_fraction(level, progress) * suitable_count_ - 1e-9);
+    if (count < 3.0) count = std::min(3.0, static_cast<double>(suitable_count_));
+    return count;
+  };
+  const double needed = static_cast<double>(rank) + 1.0;
+  for (int level = 1; level <= 6; ++level) {
+    const double lo = count_at(level, 0.0);
+    const double hi = count_at(level + 1, 0.0);
+    if (needed <= lo) return static_cast<double>(level);
+    if (needed <= hi) {
+      return static_cast<double>(level) + (hi > lo ? clamp01((needed - lo) / (hi - lo)) : 0.0);
+    }
+  }
+  return 7.0;
 }
 
 void SettlementPlanner::assign_regions(SettlementPlan* plan) const {

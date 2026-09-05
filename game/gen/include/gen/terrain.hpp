@@ -11,6 +11,7 @@
 #include "gen/drainage.hpp"
 #include "gen/features.hpp"
 #include "gen/geo.hpp"
+#include "gen/height_modifier.hpp"
 #include "gen/life.hpp"
 #include "gen/names.hpp"
 #include "gen/material.hpp"
@@ -162,6 +163,15 @@ class TerrainField {
   // meters. Positive = solid.
   det::Real density(const Dir3& position_m) const;
 
+  // T0020: a post-terrain height modifier (civil/v1) applied after every
+  // terrain operator. Null = none (byte-identical output). The terrain
+  // never knows what the modifier is; the owner sets it once before the
+  // field is shared with worker threads.
+  void set_height_modifier(const HeightModifier* modifier) { modifier_ = modifier; }
+  const HeightModifier* height_modifier() const { return modifier_; }
+  // The UNMODIFIED elevation (what the modifier reads as its base).
+  det::Real base_elevation_m(const Dir3& unit_dir) const;
+
   const PlanetParams& planet() const { return planet_; }
   const ProvinceField& provinces() const { return provinces_; }
   const ClimateField& climate() const { return climate_; }
@@ -199,7 +209,8 @@ class TerrainField {
                                          CaveField::System* storage) const;
   det::Real evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
                                det::Real macro_rel, Dir3* slope_out,
-                               ParamCache* cache = nullptr) const;
+                               ParamCache* cache = nullptr, bool apply_modifier = true) const;
+  const HeightModifier* modifier_{nullptr};
 
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;

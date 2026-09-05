@@ -56,7 +56,7 @@ int print_usage() {
       "  civ map [--seed] [--system x y z L] [--slot N [--moon M]] [--time] [--out f.png]\n"
       "                       equirect settlement-plan PNG of a body (default: the\n"
       "                       highest-level settled body of the system)\n"
-      "  civ census [--seed <hex128>] [--samples N] [--time <+yr|YYYY-MM-DD>]\n"
+      "  civ census [--seed <hex128>] [--samples N] [--time <+yr|YYYY-MM-DD>] [--level N]\n"
       "                       pacing census over the human sphere\n"
       "  civ races [--seed <hex128>] [--at x y z | --all]\n"
       "                       races whose reach covers a point (galactocentric ly;\n"
@@ -126,6 +126,7 @@ int main(int argc, char** argv) {
     long long cell[4] = {0, 0, 0, 0};
     bool have_cell = false;
     int samples = 800;
+    int min_level = 0;
     bool all = false;
     int slot = -1;
     int moon = -1;
@@ -152,6 +153,8 @@ int main(int argc, char** argv) {
         time_text = argv[++i];
       } else if (std::strcmp(argv[i], "--samples") == 0 && i + 1 < argc) {
         samples = std::atoi(argv[++i]);
+      } else if (std::strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
+        min_level = std::atoi(argv[++i]);
       } else if (std::strcmp(argv[i], "--slot") == 0 && i + 1 < argc) {
         slot = std::atoi(argv[++i]);
       } else if (std::strcmp(argv[i], "--moon") == 0 && i + 1 < argc) {
@@ -179,7 +182,7 @@ int main(int argc, char** argv) {
       return inf::cli::cmd_civ_state(*seed, have_cell ? cell : nullptr, time_text);
     }
     if (std::strcmp(argv[2], "census") == 0) {
-      return inf::cli::cmd_civ_census(*seed, samples, time_text);
+      return inf::cli::cmd_civ_census(*seed, samples, time_text, min_level);
     }
     if (std::strcmp(argv[2], "site") == 0) {
       return inf::cli::cmd_civ_site(*seed, have_cell ? cell : nullptr, slot, moon, tier_text, site_index,

@@ -62,6 +62,7 @@ enum class BuildingRuleSet : std::uint8_t {
   Crystal = 7,    // Crystalline
   Monolith = 8,   // Precursor
   Dome = 9,       // domed colonies
+  Megatower = 10, // ecumenopolis blocks (T0020 WP7)
 };
 BuildingRuleSet rule_set_for(const StyleVector& style);
 

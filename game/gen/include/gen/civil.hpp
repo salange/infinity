@@ -24,7 +24,7 @@ class CivilField final : public HeightModifier {
   CivilField(const SiteField& sites, const TerrainField& field);
 
   det::Real modify(const Dir3& unit_dir, det::Real base_m, const BaseEval& base_at) const override;
-  Urban urban(const Dir3& unit_dir) const override;
+  Urban urban(const Dir3& unit_dir, det::Real surface_m) const override;
   bool near(const Dir3& unit_dir) const override;
 
   // The candidate provinces around a direction (the 3x3-ish probe stencil

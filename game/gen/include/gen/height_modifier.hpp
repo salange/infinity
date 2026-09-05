@@ -30,12 +30,15 @@ class HeightModifier {
   // Urban surface hint for the material classifier: paving/plating weight
   // (0..1) and the material family (0 stone paving, 1 metal plating, 2
   // resin, 3 crystal, 4 grown) at a direction; 0 outside every site.
+  // `surface_m` is the MODIFIED elevation the caller already holds (the
+  // ecumenopolis tells a preserved peak from its plate by it), so no
+  // implementation needs a terrain read of its own here.
   struct Urban {
     double weight{0.0};
     int family{0};
     double night_light{0.0};  // 0..1 emissive mask for the far-view bake
   };
-  virtual Urban urban(const Dir3& unit_dir) const = 0;
+  virtual Urban urban(const Dir3& unit_dir, det::Real surface_m) const = 0;
 
   // True when the direction lies inside some site's or road's bound —
   // the cheap reject the sampler asks before anything else.

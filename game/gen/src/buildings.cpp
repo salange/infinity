@@ -346,12 +346,23 @@ void building_palette(const StyleVector& style, std::uint8_t out[4]) {
     out[2] = m(Material::RockShale);  // no glass survives
   }
   // Dark windows when the site is unlit (outlaws, low light density).
+  if (style.tier == SettlementTier::Ecumenopolis) {
+    // Megatowers: the shaft walls carry the facade-windows tile (the
+    // triplanar tiling paints the window grid in world metres); ruins
+    // show bare structure.
+    if (!style.ruined && style.material_family <= 1) {
+      out[0] = m(Material::FacadeWindows);
+    } else if (style.ruined) {
+      out[0] = style.material_family == 1 ? m(Material::ScrapMetal) : m(Material::RockShale);
+    }
+  }
   if (style.light_density < 0.25f && out[2] == m(Material::WindowGlass)) {
     out[2] = m(Material::WindowDark);
   }
 }
 
 BuildingRuleSet rule_set_for(const StyleVector& style) {
+  if (style.tier == SettlementTier::Ecumenopolis) return BuildingRuleSet::Megatower;
   if (style.domed) return BuildingRuleSet::Dome;
   switch (style.race_type) {
     case RaceType::Reptilian: return BuildingRuleSet::Ziggurat;
@@ -840,6 +851,119 @@ void rules_dome(Ctx& c) {
   }
 }
 
+// The megatower rule set (ecumenopolis blocks, design section 16): a
+// podium over the whole footprint with geometric bays, one shaft with
+// setbacks in a race-flavoured section, a crown by usage. The shaft
+// walls carry the facade-windows tile, so a 1 km tower costs a few
+// hundred triangles whatever its height. Ruins truncate the shaft at a
+// keyed setback and skip the crown.
+void rules_megatower(Ctx& c) {
+  const double h = c.height;
+  const double podium_h = std::clamp(0.06 * h, 10.0, 40.0);
+  Scope podium{c.cx, c.cy, c.yaw, c.hx, c.hy, c.base_z, 0.8 + podium_h};
+  emit_box(c.sink, podium, 1, 1);
+  if (c.parts && !c.ruined) {
+    // Geometric bays on the street floors only (the rest of the podium
+    // and the shaft carry the facade tile): a 1 km tower stays a few
+    // thousand triangles at the nearest detail.
+    Scope street = podium;
+    street.h = std::min(podium.h, 0.8 + 13.5);
+    for (int face = 0; face < 4; ++face) {
+      facade(c, street, face, 4.5, face == 0, false, c.lot.usage == LotUsage::Civic);
+    }
+  }
+  double z = c.base_z + 0.8 + podium_h;
+  if (c.lot.usage == LotUsage::Agricultural) {
+    // Park dome: a glass hemisphere over the podium.
+    const double r = std::min(c.hx, c.hy) * 0.92;
+    const double squash = std::min(1.0, std::max(0.3, (h - podium_h) / std::max(r, 1.0)));
+    emit_dome(c.sink, c.cx, c.cy, z, r, squash, c.parts ? 8 : 4, c.parts ? 24 : 12, 2);
+    return;
+  }
+  if (h <= podium_h + 4.0) {
+    roof(c, podium, 0);
+    return;
+  }
+  // Section and proportions by race and usage.
+  int sides = 4;
+  double taper = 1.0;  // prism radius ratio top/bottom per tier
+  switch (c.style.race_type) {
+    case RaceType::Machine: sides = 6; break;
+    case RaceType::Crystalline: sides = 6; taper = 0.8; break;
+    case RaceType::Insectoid: sides = 12; taper = 0.9; break;
+    case RaceType::Avian: sides = 8; taper = 0.85; break;
+    case RaceType::Precursor: sides = 4; taper = 0.86; break;
+    case RaceType::Fungoid: sides = 10; break;
+    default: break;
+  }
+  const bool boxy = sides == 4 && taper >= 1.0;
+  double fractions[4] = {1.0, 0.0, 0.0, 0.0};
+  int tiers = 1;
+  double shrink = 0.9;
+  double sx = c.hx;
+  double sy = c.hy;
+  switch (c.lot.usage) {
+    case LotUsage::Civic:
+      tiers = 4; fractions[0] = 0.42; fractions[1] = 0.28; fractions[2] = 0.18; fractions[3] = 0.12;
+      shrink = 0.76; sx *= 0.82; sy *= 0.82;
+      break;
+    case LotUsage::Industrial:
+      tiers = 1; shrink = 1.0; sx *= 0.96; sy *= 0.96;
+      break;
+    default:
+      tiers = 2; fractions[0] = 0.62; fractions[1] = 0.38; shrink = 0.86; sx *= 0.92; sy *= 0.92;
+      break;
+  }
+  const double remaining = h - podium_h;
+  Scope last = podium;
+  for (int t = 0; t < tiers; ++t) {
+    const double th = remaining * fractions[t];
+    if (th < 3.0) break;
+    if (boxy) {
+      Scope s{c.cx, c.cy, c.yaw, sx, sy, z, th};
+      emit_box(c.sink, s, 0, 1);
+      last = s;
+    } else {
+      const double r0 = std::min(sx, sy);
+      emit_prism(c.sink, c.cx, c.cy, z, r0, r0 * taper, th, sides, c.yaw, 0, 1);
+      last = Scope{c.cx, c.cy, c.yaw, r0 * taper, r0 * taper, z, th};
+      sx = r0 * taper;
+      sy = r0 * taper;
+    }
+    z += th;
+    sx *= shrink;
+    sy *= shrink;
+    if (c.ruined && c.rng.chance(0.5)) {
+      return;  // truncated at this setback
+    }
+  }
+  if (c.ruined) return;
+  // Crown by usage.
+  switch (c.lot.usage) {
+    case LotUsage::Civic: {
+      const double r = std::min(last.hx, last.hy) * 0.6;
+      emit_prism(c.sink, c.cx, c.cy, z, r, 0.0, std::max(6.0, 0.1 * h), 8, c.yaw, 3, 3);
+      if (c.parts) part_antenna(c.sink, c.cx, c.cy, z + std::max(6.0, 0.1 * h), std::max(4.0, 0.03 * h), 3);
+      break;
+    }
+    case LotUsage::Industrial: {
+      const int stacks = 2 + c.rng.pick(2);
+      for (int i = 0; i < stacks; ++i) {
+        const double u = last.hx * (-0.6 + 1.2 * c.rng.u01());
+        const double v = last.hy * (-0.6 + 1.2 * c.rng.u01());
+        double p[3];
+        scope_point(last, u, v, z, p);
+        emit_prism(c.sink, p[0], p[1], z, 2.0, 1.6, std::max(8.0, 0.12 * h), 10, 0.0, 3, 3);
+      }
+      break;
+    }
+    default:
+      roof(c, last, 0);
+      break;
+  }
+  if (c.parts) props(c, last);
+}
+
 }  // namespace
 
 BuildingMesh build_building(const Lot& lot, const core::Key& lot_key, const BuildingParams& params) {
@@ -894,6 +1018,7 @@ BuildingMesh build_building(const Lot& lot, const core::Key& lot_key, const Buil
     case BuildingRuleSet::Crystal: rules_crystal(ctx); break;
     case BuildingRuleSet::Monolith: rules_monolith(ctx); break;
     case BuildingRuleSet::Dome: rules_dome(ctx); break;
+    case BuildingRuleSet::Megatower: rules_megatower(ctx); break;
   }
   if (ctx.ruined && ctx.parts) {
     // Rubble around the base.

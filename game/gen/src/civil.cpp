@@ -197,7 +197,8 @@ det::Real CivilField::modify(const Dir3& unit_dir, det::Real base_m, const BaseE
   return Real(h);
 }
 
-HeightModifier::Urban CivilField::urban(const Dir3& unit_dir) const {
+HeightModifier::Urban CivilField::urban(const Dir3& unit_dir, det::Real surface_m) const {
+  (void)surface_m;
   Urban out;
   out.family = material_family_;
   double lateral = 0.0;

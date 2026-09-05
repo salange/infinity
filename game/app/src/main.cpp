@@ -262,6 +262,14 @@ struct Anchor {
   std::unique_ptr<inf::gen::EffectiveField> effective;
   // T0020: the civilization view of this body (nullptr = uninhabited).
   std::unique_ptr<inf::app::CivAnchor> civ;
+  // Workers read the civ height modifier through the field: stop them
+  // before the modifier goes away (members would otherwise be destroyed
+  // in reverse order, civ first).
+  ~Anchor() {
+    manager.reset();
+    sampler.reset();
+    effective.reset();
+  }
 };
 
 // What make_anchor needs to resolve the body's civilization state.
@@ -1224,8 +1232,14 @@ int main(int argc, char** argv) {
     bake_quit.store(false);
     std::vector<float> means_copy(materials.mean_albedo_table(),
                                   materials.mean_albedo_table() + inf::gen::kMaterialCount * 3);
+    // T0020 WP7: the settled bodies' civ inputs, gathered on this thread
+    // (the registry is not thread-safe); the worker rebuilds each body's
+    // modifier on its own field so the bake shows plates, urban albedo
+    // and night lights from orbit.
+    std::vector<inf::app::CivBodyInputs> civ_bodies =
+        inf::app::gather_civ_bodies(*seed, civ_registry, civ_resolver, cell_copy, civ_now(world_clock.now()));
     bake_thread = std::thread([&bake_mutex, &bake_done, &bake_quit, &body_tex_key,
-                               seed_copy = *seed, system_copy, cell_copy, means_copy]() {
+                               seed_copy = *seed, system_copy, cell_copy, means_copy, civ_bodies]() {
     struct Job {
       int slot;
       int moon;  // -1 = the planet itself
@@ -1254,12 +1268,18 @@ int main(int argc, char** argv) {
       }
       BakeResult result;
       result.key = body_tex_key(job.slot, job.moon);
+      const inf::app::CivBodyInputs* civ_inputs = nullptr;
+      for (const auto& b : civ_bodies) {
+        if (b.slot == job.slot && b.moon == job.moon) civ_inputs = &b;
+      }
       if (job.moon < 0) {
         const inf::gen::BodyHandle body =
             inf::gen::body_for_system_slot(seed_copy, cell_copy, job.slot);
         const inf::gen::PlanetParams planet =
             inf::gen::planet_params_for_slot(system_copy, job.slot, body);
-        const inf::gen::TerrainField field(body.entity, planet);
+        inf::gen::TerrainField field(body.entity, planet);
+        std::unique_ptr<inf::app::CivModifier> modifier;
+        if (civ_inputs != nullptr) modifier = inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
         result.radius_m = planet.radius_m.to_double();
         result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
       } else {
@@ -1267,10 +1287,15 @@ int main(int argc, char** argv) {
             inf::gen::body_for_system_moon(seed_copy, cell_copy, job.slot, job.moon);
         const inf::gen::PlanetParams planet =
             inf::gen::planet_params_for_moon(system_copy, job.slot, job.moon, body);
-        const inf::gen::TerrainField field(body.entity, planet);
+        inf::gen::TerrainField field(body.entity, planet);
+        std::unique_ptr<inf::app::CivModifier> modifier;
+        if (civ_inputs != nullptr) modifier = inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
         result.radius_m = planet.radius_m.to_double();
         result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
       }
+      std::printf("bake: slot %d moon %d done%s\n", job.slot, job.moon,
+                  civ_inputs != nullptr ? " (with civilization surface)" : "");
+      std::fflush(stdout);
       const std::lock_guard<std::mutex> lock(bake_mutex);
       bake_done.push_back(std::move(result));
     }

@@ -13,7 +13,9 @@ int cmd_civ_enclaves(const core::Seed128& seed);
 // "YYYY-MM-DD", or "+N" real years after the launch reference).
 int cmd_civ_state(const core::Seed128& seed, const long long* cell_xyzl, const char* time_text);
 // The pacing census over the human sphere.
-int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text);
+// min_level > 0 lists only the human systems whose best body reached it
+// (--level; finds ecumenopolis worlds).
+int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text, int min_level = 0);
 int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot, int moon,
                 const char* time_text, const char* out_path);
 int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot, int moon,

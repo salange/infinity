@@ -8,6 +8,8 @@
 #include "gen/civilization.hpp"
 #include "gen/colony.hpp"
 #include "gen/human.hpp"
+#include "gen/settlements.hpp"
+#include "gen/terrain.hpp"
 #include "gen/universe.hpp"
 
 namespace inf::gen {
@@ -165,6 +167,56 @@ std::uint64_t hash_state_script(const core::Seed128& seed) {
   return hash.value();
 }
 
+// WP4: the human home world's plan at two times (settled set, tiers,
+// regions, factions, roads).
+std::uint64_t hash_plan_script(const core::Seed128& seed) {
+  core::GoldenHash hash;
+  const core::Key galaxy_key = home_galaxy_key(seed);
+  const GalaxyParams galaxy = home_galaxy_params(seed);
+  const CivilizationParams civ = derive_civilization(galaxy_key, galaxy, true);
+  RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(human_race(galaxy_key, galaxy));
+  const ColonyResolver resolver(registry);
+  const SystemCivContext context = gather_system_context(seed, registry, SystemCell{}, false);
+  const StarSystemParams system = generate_system(context.system_key);
+  for (const double years : {0.0, 3.0}) {
+    const core::WorldTime t =
+        core::WorldTime::from_ns(kLaunchReference.ns_since_epoch + real_years_to_ns(years));
+    const Owner owner = resolver.owner(context, t);
+    const auto states = resolver.system_states(context, owner, t);
+    for (std::size_t i = 0; i < states.size(); ++i) {
+      if (!states[i].is_home) continue;
+      const BodyCivInputs& body = context.bodies[i];
+      const BodyKeys keys = body_keys_in_system(context.system_key, body.slot);
+      const PlanetParams params =
+          planet_params_for_slot(system, body.slot, BodyHandle{keys.entity, keys.params});
+      const TerrainField field(keys.entity, params);
+      const Race& race = resolver.candidates(context.position_m)[owner.candidate];
+      const SettlementPlanner planner(keys.entity, field, race.params, states[i].domed);
+      const SettlementPlan plan = planner.plan(states[i], race.factions);
+      hash.feed(plan.suitable_count);
+      hash.feed(plan.settled_count);
+      hash.feed(static_cast<std::uint64_t>(static_cast<std::int64_t>(plan.capital)));
+      hash.feed(plan.region_capitals.size());
+      hash.feed(plan.roads.size());
+      for (const ProvinceSite& site : plan.provinces) {
+        if (!site.settled) continue;
+        hash.feed(site.index);
+        hash.feed(static_cast<std::uint64_t>(site.tier));
+        hash.feed(static_cast<std::uint64_t>(static_cast<std::int64_t>(site.region)));
+        hash.feed(static_cast<std::uint64_t>(static_cast<std::int64_t>(site.faction)));
+        hash.feed(std::bit_cast<std::uint32_t>(site.score));
+      }
+      for (const Road& road : plan.roads) {
+        hash.feed(road.a);
+        hash.feed(road.b);
+        feed_double(hash, road.points[4].x.to_double());
+      }
+    }
+  }
+  return hash.value();
+}
+
 }  // namespace
 
 std::string hash_civ_report() {
@@ -188,6 +240,11 @@ std::string hash_civ_report() {
   for (const core::Seed128& seed : kSeeds) {
     report += "state seed=" + core::to_hex(seed) + " fnv=";
     append_hex(&report, hash_state_script(seed));
+    report += "\n";
+  }
+  for (const core::Seed128& seed : kSeeds) {
+    report += "plan seed=" + core::to_hex(seed) + " fnv=";
+    append_hex(&report, hash_plan_script(seed));
     report += "\n";
   }
   return report;

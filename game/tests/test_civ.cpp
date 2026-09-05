@@ -569,3 +569,146 @@ TEST_CASE("colony/v1: pacing census against the real generators (WP3)") {
   // Domes never sit on giants or > 700 K surfaces (the resolver refuses).
   CHECK(census.domed >= 0);
 }
+
+// --- WP4: the planet plan ---------------------------------------------------
+
+#include "gen/settlements.hpp"
+#include "gen/terrain.hpp"
+
+namespace {
+
+struct HomeWorld {
+  CivWorld w;
+  gen::SystemCivContext context;
+  std::size_t body_index{0};
+  std::unique_ptr<gen::TerrainField> field;
+  gen::BodyKeys keys;
+};
+
+HomeWorld human_home_world() {
+  HomeWorld h{civ_world(0x83), {}, 0, nullptr, {}};
+  h.context = gen::gather_system_context(h.w.seed, *h.w.registry, gen::SystemCell{}, false);
+  const gen::Owner owner = h.w.resolver->owner(h.context, gen::kLaunchReference);
+  const auto states = h.w.resolver->system_states(h.context, owner, gen::kLaunchReference);
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    if (states[i].is_home) h.body_index = i;
+  }
+  const gen::StarSystemParams system = gen::generate_system(h.context.system_key);
+  h.keys = gen::body_keys_in_system(h.context.system_key, h.context.bodies[h.body_index].slot);
+  const gen::PlanetParams params = gen::planet_params_for_slot(
+      system, h.context.bodies[h.body_index].slot, gen::BodyHandle{h.keys.entity, h.keys.params});
+  h.field = std::make_unique<gen::TerrainField>(h.keys.entity, params);
+  return h;
+}
+
+}  // namespace
+
+TEST_CASE("settlements/v1: monotone settled set, tiers, regions, capital, faction map (WP4)") {
+  const HomeWorld h = human_home_world();
+  const gen::Race& human = h.w.registry->human();
+  const auto t0 = std::chrono::steady_clock::now();
+  const gen::SettlementPlanner planner(h.keys.entity, *h.field, human.params, false);
+  const auto t1 = std::chrono::steady_clock::now();
+  MESSAGE("planner base pass: " << std::chrono::duration<double, std::milli>(t1 - t0).count()
+                                << " ms for " << planner.base().size() << " provinces");
+  CHECK(std::chrono::duration<double, std::milli>(t1 - t0).count() < 200.0);
+  // Synthetic states: walk level 1..7 with progress, the settled set must
+  // only ever grow, and a settled province keeps its tier or grows.
+  gen::CivState state;
+  state.settled = true;
+  state.is_home = true;  // the faction map is a home-world feature
+  state.race_key = human.key;
+  state.faction_index = 0;
+  state.max_level = 7;
+  state.growth = 1.0;
+  std::vector<bool> was_settled(planner.base().size(), false);
+  std::vector<int> last_tier(planner.base().size(), 0);
+  gen::SettlementPlan plan;
+  bool first = true;
+  for (int level = 1; level <= 6; ++level) {
+    for (double progress : {0.0, 0.3, 0.6, 0.95}) {
+      state.level = level;
+      state.progress = progress;
+      const auto u0 = std::chrono::steady_clock::now();
+      if (first) {
+        plan = planner.plan(state, human.factions);
+        first = false;
+      } else {
+        planner.update(&plan, state, human.factions);
+      }
+      const auto u1 = std::chrono::steady_clock::now();
+      if (level == 3 && progress == 0.6) {
+        MESSAGE("plan update at level 3: " << std::chrono::duration<double, std::micro>(u1 - u0).count() << " us");
+      }
+      CAPTURE(level);
+      CAPTURE(progress);
+      for (std::size_t i = 0; i < plan.provinces.size(); ++i) {
+        const gen::ProvinceSite& site = plan.provinces[i];
+        if (was_settled[i]) {
+          CHECK(site.settled);
+        }
+        was_settled[i] = was_settled[i] || site.settled;
+        if (site.settled) {
+          CHECK(site.suitable);
+          CHECK(!site.ocean);
+          CHECK(site.radius_m > 0.0f);
+          CHECK(site.site_progress >= 0.0f);
+          CHECK(site.site_progress < 1.0f);
+        }
+      }
+      // plan() and update() agree.
+      const gen::SettlementPlan fresh = planner.plan(state, human.factions);
+      CHECK(fresh.settled_count == plan.settled_count);
+      CHECK(fresh.roads.size() == plan.roads.size());
+      CHECK(fresh.capital == plan.capital);
+    }
+    // Home-world faction map: every faction holds its seat province.
+    std::vector<int> seats(human.factions.size(), 0);
+    for (const gen::ProvinceSite& site : plan.provinces) {
+      if (site.settled && site.faction >= 0) ++seats[static_cast<std::size_t>(site.faction)];
+    }
+    // Every faction holds its seat once there are enough settled
+    // provinces to seat them all (levels 3+ on this world).
+    if (plan.settled_count >= human.factions.size()) {
+      for (std::size_t j = 0; j < human.factions.size(); ++j) {
+        CAPTURE(j);
+        CHECK(seats[j] >= 1);
+      }
+    }
+    if (level >= 3) {
+      CHECK(!plan.region_capitals.empty());
+      CHECK(!plan.roads.empty());
+    }
+    if (level >= 5) {
+      CHECK(plan.capital >= 0);
+      int capitals = 0;
+      for (const gen::ProvinceSite& site : plan.provinces) capitals += site.capital ? 1 : 0;
+      CHECK(capitals == 1);
+    }
+  }
+  // Roads are recomputed identically from either endpoint, and every
+  // road joins two settled provinces.
+  for (const gen::Road& road : plan.roads) {
+    CHECK(road.a < road.b);
+    CHECK(plan.provinces[road.a].settled);
+    CHECK(plan.provinces[road.b].settled);
+    const gen::Road ab = planner.road_between(road.a, road.b, road.trunk);
+    const gen::Road ba = planner.road_between(road.b, road.a, road.trunk);
+    for (int i = 0; i < 9; ++i) {
+      CHECK(ab.points[i].x == ba.points[i].x);
+      CHECK(ab.points[i].x == road.points[i].x);
+    }
+  }
+  // The real state: the human home at level 6.
+  const gen::Owner owner = h.w.resolver->owner(h.context, gen::kLaunchReference);
+  const auto states = h.w.resolver->system_states(h.context, owner, gen::kLaunchReference);
+  const gen::SettlementPlan home = planner.plan(states[h.body_index], human.factions);
+  CHECK(home.level == 6);
+  CHECK(home.is_home);
+  CHECK(home.capital >= 0);
+  CHECK(home.settled_count >= home.suitable_count * 9 / 10);
+  int metros = 0;
+  for (const gen::ProvinceSite& site : home.provinces) metros += site.tier == gen::SettlementTier::Metropolis ? 1 : 0;
+  CHECK(metros >= 3);
+  CHECK(metros <= 8);
+}

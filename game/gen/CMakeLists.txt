@@ -16,6 +16,7 @@ add_library(game_gen STATIC
   src/civilization.cpp
   src/colony.cpp
   src/civ_census.cpp
+  src/settlements.cpp
   src/human.cpp
   src/golden_civ.cpp
   src/caves.cpp

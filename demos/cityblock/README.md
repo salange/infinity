@@ -36,7 +36,51 @@ Flags: `--seed S`, `--width W --height H`, `--sky day|night|sunset|file.hdr`,
 `--no-context`, `--debug N`, `--ev bias`, `--hidden --capture out.png
 --frames N` for scripted captures without a visible window.
 
-## What is generated
+## The city
+
+`--size small|medium|large|metropolis` (default: from the seed). The city
+(`src/city.cpp`) is a jittered street grid: every third line is an artery
+(26 m, raised median with hedges and sparse trees), the rest secondary
+roads (14 m); blocks are split into lots along alleys; one or two diagonal
+arteries are cut through the blocks (convex clipping), which is what makes
+the grid read as grown rather than drawn. Districts follow the distance to
+the centre: the government building (marble foundation with wide stairs,
+colonnade, glass dome) sits on the centre block with the unification
+ring plaza in front; towers are placed on inner blocks with a probability
+and a height ceiling set by the city size, and the lattice families
+(diagrid, X-frame, hex) only unlock at large and metropolis; the rest of
+the blocks carry standard buildings; some blocks become plazas.
+
+- **Standard buildings** (`src/standards.cpp`): five types (office,
+  residential with balconies, mixed with retail ground floor, civic in
+  marble, lab), 3–6 storeys, one wall band and one glass strip per storey
+  per edge or punched windows, corner pilasters, slab lines; each picks
+  one of four **entrances** (canopy, portal, stairs with columns, glass
+  vestibule) and one of four **roofs** (flat, parapet with equipment,
+  green roof with hedges, monopitch metal roof with gable walls). The
+  same entrance/roof kit is available to the towers.
+- **Plazas** (five parametric kinds): fountain square with hedges and
+  benches, formal square with twin basins, an axis path and a monument,
+  terraced park, monument square on a raised marble foundation, garden
+  with a curved path, and a landing lot with white pads (not in small
+  cities).
+- **Ground kit** (`src/props.cpp`): round and square water basins,
+  tiered fountains, trimmed hedges (single boxes, hedge rings with gaps),
+  low walls with caps, marble foundations with wide stairs, four monuments
+  (fluted pillar, twisted metal ribbon, two free-standing diagrid strands
+  joined by a ring, obelisk), the unification ring (chrome torus on a
+  marble drum, glowing inner band at night, facing the government
+  building), landing pads with markings, edge lights and a control mast,
+  and white curved pedestrian overpasses (spline deck with an arched
+  underside, slender Y columns, stair flights at both ends) between
+  plazas across an artery.
+- Trees are budgeted per city size and used sparsely (medians, plazas,
+  gardens); point lights are capped at the 64 nearest the centre.
+
+Triangle counts: small ≈ 80 k, medium ≈ 250 k, large ≈ 700 k,
+metropolis ≈ 1.4 M.
+
+## What is generated (the original hero block, kept as families)
 
 Everything is a pure function of the seed (Philox keys from the engine's
 `core::Key` tree; `src/rng.hpp`). The block is 240 × 200 m with streets,
@@ -120,6 +164,9 @@ demos/cityblock/
   src/ibl.*                HDRI → sun + IBL
   src/textures.*           texture arrays, procedural fallbacks, leaf texture
   src/mesh.hpp geometry.cpp   vertex format and geometry builders
+  src/city.*               street grid, districts, plazas, lots, overpasses
+  src/standards.*          standard 3–6 storey buildings (types, entrances, roofs)
+  src/props.*              ground kit: basins, fountains, hedges, walls, foundations, monuments, ring, pads, overpasses, government
   src/towers.*             parametric tower system (families, variants, groups)
   src/scene.*              materials, the block, site and landscape
   src/camera.hpp rng.hpp math.hpp main.cpp

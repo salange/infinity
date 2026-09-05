@@ -83,6 +83,11 @@ struct Emit {
   void polygon(const std::vector<Vec2>& xz, float y, bool up, Vec2 uv_scale = {1, 1});
   // Vertical wall strip along a polyline (closed when `closed`), from y0 to y1.
   void wall(const std::vector<Vec2>& xz, float y0, float y1, bool closed, bool outward = true);
+  // Torus with the given axis (unit), major radius R, tube radius r.
+  void torus(Vec3 centre, Vec3 axis, float R, float r, int segments, int sides);
+  // Annulus between an outer and an inner ring (same vertex count, both
+  // ccw on paper) at height y, facing up.
+  void ring_cap(const std::vector<Vec2>& outer, const std::vector<Vec2>& inner, float y, bool up = true);
   // Triangle with metric uvs.
   void triangle(Vec3 a, Vec3 b, Vec3 c);
   void triangle_uv(Vec3 a, Vec3 b, Vec3 c, Vec2 ua, Vec2 ub, Vec2 uc);
@@ -114,5 +119,18 @@ Sampled plan_sample(const std::vector<Vec2>& poly, float step);
 
 // Catmull-Rom spline through control points (open), sampled at n points.
 std::vector<Vec2> spline(const std::vector<Vec2>& ctrl, int samples_per_segment);
+
+// Convex polygon tools (ccw on paper).
+// Keeps the part of poly with dot(x - p, n) >= 0.
+std::vector<Vec2> clip_halfplane(const std::vector<Vec2>& poly, Vec2 p, Vec2 n);
+Vec2 plan_centroid(const std::vector<Vec2>& poly);
+void plan_bounds(const std::vector<Vec2>& poly, Vec2* lo, Vec2* hi);
+// Oriented extent along a unit direction: min/max of dot(p, dir).
+void plan_extent(const std::vector<Vec2>& poly, Vec2 dir, float* lo, float* hi);
+// Longest edge direction (unit).
+Vec2 plan_long_axis(const std::vector<Vec2>& poly);
+// Largest inscribed axis-aligned-ish half extents around the centroid
+// (approximate: min distance from centroid to any edge).
+float plan_inradius(const std::vector<Vec2>& poly);
 
 }  // namespace cb

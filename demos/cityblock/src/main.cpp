@@ -42,6 +42,7 @@ struct Args {
   int context_detail{-1};
   bool no_ssao{false};
   bool no_shadows{false};
+  int size{-1};
 };
 
 bool parse_vec3(const char* s, cb::Vec3* v) {
@@ -80,6 +81,10 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--no-shadows")) a.no_shadows = true;
     else if (!std::strcmp(argv[i], "--rings")) a.rings = std::atoi(next("--rings"));
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
+    else if (!std::strcmp(argv[i], "--size")) {
+      const std::string t = next("--size");
+      a.size = t == "small" ? 0 : (t == "medium" ? 1 : (t == "large" ? 2 : (t == "metropolis" ? 3 : -1)));
+    }
     else if (!std::strcmp(argv[i], "--context-detail")) a.context_detail = std::atoi(next("--context-detail"));
     else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
       std::printf("cityblock [--seed S] [--width W --height H] [--hidden] [--capture out.png --frames N]\n"
@@ -151,7 +156,10 @@ int main(int argc, char** argv) {
   sp.context_buildings = !args.no_context;
   sp.context_rings = args.rings;
   sp.context_detail = args.context_detail;
+  sp.size = args.size;
   cb::Scene scene = cb::generate_scene(sp);
+  std::printf("  city: %s, radius %.0f m, %d blocks, %d towers, %d standard buildings, %d plazas\n", scene.city_size.c_str(),
+              scene.city_radius, scene.stats_blocks, scene.stats_towers, scene.stats_standards, scene.stats_plazas);
   std::printf("  scene: %zu opaque + %zu foliage triangles, %zu lights (%.2f s)\n", scene.opaque.triangle_count(),
               scene.foliage.triangle_count(), scene.lights.size(), elapsed());
 

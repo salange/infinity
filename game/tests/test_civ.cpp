@@ -264,3 +264,122 @@ TEST_CASE("civ-names/v1: deterministic, filtered, typed (WP1)") {
   CHECK(capital.size() > town.size());
   CHECK(town == gen::settlement_name(site, gen::RaceType::Humanoid, false));
 }
+
+// --- WP2: humans and enclaves ---------------------------------------------
+
+#include "gen/human.hpp"
+
+TEST_CASE("human/v1: constants, factions, the 72 % front (WP2)") {
+  for (std::uint64_t s : {std::uint64_t{0x83}, std::uint64_t{1}, std::uint64_t{7}}) {
+    const core::Seed128 seed{0, s};
+    const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
+    const gen::Race human = gen::human_race(gen::home_galaxy_key(seed), galaxy);
+    CAPTURE(s);
+    CHECK(human.params.is_human);
+    CHECK(!human.params.extinct_ever);
+    CHECK(human.params.t_0 == gen::kHumanExpansionStart);
+    CHECK(human.home_system.is_home());
+    CHECK(human.params.peak_level == 7);
+    CHECK(human.params.home_level == 6);
+    REQUIRE(human.params.sources.size() == 1);
+    // Front radius at the launch reference covers 72 % of the disc area
+    // (front / radius = 0.848) for ANY home galaxy size.
+    const double radius_ly = galaxy.diameter_ly.to_double() * 0.5;
+    const double front_ly = human.params.speed_ly_per_year * gen::kHumanExpansionAgeAtLaunchYears;
+    const double area = (front_ly / radius_ly) * (front_ly / radius_ly);
+    CHECK(area == doctest::Approx(0.72).epsilon(0.05));
+    CHECK(human.params.r_max_ly >= radius_ly);
+    // Factions: 1-2 Government, 2-3 Independent, 2-3 Outlaw, exactly one
+    // aligned and one renegade android faction created 4 years after t_0.
+    int counts[5] = {};
+    for (const gen::FactionParams& f : human.factions) {
+      ++counts[static_cast<int>(f.type)];
+      CHECK(!f.name.empty());
+      CHECK(!f.centres.empty());
+      if (f.type == gen::FactionType::AlignedMachine || f.type == gen::FactionType::RenegadeMachine) {
+        CHECK(f.t_start.ns_since_epoch ==
+              gen::kHumanExpansionStart.ns_since_epoch + gen::real_years_to_ns(4.0));
+      } else {
+        CHECK(f.t_start >= gen::kHumanExpansionStart);
+        CHECK(f.t_start < gen::kHumanExpansionStart + gen::real_years_to_ns(3.1));
+      }
+      CHECK(f.hostile == (f.type == gen::FactionType::RenegadeMachine));
+      CHECK(f.dome_mul <= 1.0);
+    }
+    CHECK(counts[0] >= 1);
+    CHECK(counts[0] <= 2);
+    CHECK(counts[1] >= 2);
+    CHECK(counts[1] <= 3);
+    CHECK(counts[2] >= 2);
+    CHECK(counts[2] <= 3);
+    CHECK(counts[3] == 1);
+    CHECK(counts[4] == 1);
+    CHECK(human.params.faction_count == static_cast<int>(human.factions.size()));
+    // Deterministic.
+    const gen::Race again = gen::human_race(gen::home_galaxy_key(seed), galaxy);
+    CHECK(again.factions.size() == human.factions.size());
+    CHECK(again.factions[0].name == human.factions[0].name);
+    // The registry carries the human race as the last candidate.
+    const gen::CivilizationParams civ = gen::derive_civilization(gen::home_galaxy_key(seed), galaxy, true);
+    gen::RaceRegistry registry(gen::home_galaxy_key(seed), galaxy, civ);
+    registry.set_human(human);
+    const auto& candidates = registry.candidates_around(gen::home_system_position_m(galaxy));
+    REQUIRE(!candidates.empty());
+    CHECK(candidates.back().params.is_human);
+    CHECK(candidates.size() == registry.races_around(gen::home_system_position_m(galaxy)).size() + 1);
+  }
+}
+
+TEST_CASE("human-enclaves/v1: 30 % of home-cluster galaxies, stranded, mutual gates (WP2)") {
+  // Frequency over >= 200 galaxies drawn from several seeds' home clusters.
+  int galaxies = 0;
+  int with_enclaves = 0;
+  for (std::uint64_t s = 1; s <= 40 && galaxies < 400; ++s) {
+    const core::Seed128 seed{0, s};
+    const std::uint32_t count = gen::galaxy_count_in_cluster(gen::home_cluster_key(seed));
+    for (std::uint32_t g = 1; g < count && galaxies < 400; ++g) {
+      ++galaxies;
+      const auto enclaves = gen::human_enclaves(seed, 0, 0, 0, g);
+      if (!enclaves.empty()) {
+        ++with_enclaves;
+      }
+      CHECK(enclaves.size() <= 3);
+      for (const gen::HumanEnclave& e : enclaves) {
+        CHECK(e.source.speed_scale == doctest::Approx(0.1));
+        CHECK(e.source.settle_scale == doctest::Approx(0.3));
+        CHECK(e.source.reproduction_scale == doctest::Approx(0.5));
+        CHECK(e.source.r_max_ly >= 100.0);
+        CHECK(e.source.r_max_ly <= 600.0);
+        CHECK(e.source.level_cap >= 2);
+        CHECK(e.source.level_cap <= 6);
+        CHECK(e.source.t_source >= gen::kHumanExpansionStart);
+        CHECK(e.source.t_source <= gen::kHumanExpansionStart + gen::real_years_to_ns(2.0));
+      }
+    }
+  }
+  REQUIRE(galaxies >= 200);
+  const double frequency = static_cast<double>(with_enclaves) / galaxies;
+  MESSAGE("enclave frequency over " << galaxies << " galaxies: " << frequency);
+  CHECK(frequency > 0.25);
+  CHECK(frequency < 0.35);
+  // The home galaxy itself never has enclaves; a far cluster almost never.
+  CHECK(gen::human_enclaves(core::Seed128{0, 0x83}, 0, 0, 0, 0).empty());
+  // Gate pairs are mutual: every home-galaxy gate points at an enclave
+  // whose own gate partner is that gate.
+  const core::Seed128 seed{0, 0x83};
+  const auto gates = gen::home_galaxy_gates(seed);
+  for (const gen::WormholeGate& gate : gates) {
+    const auto enclaves = gen::human_enclaves(seed, 0, 0, 0, gate.partner_galaxy);
+    REQUIRE(gate.partner_enclave < enclaves.size());
+    const gen::HumanEnclave& e = enclaves[gate.partner_enclave];
+    CHECK(e.gate_partner_m.x == gate.position_m.x);
+    CHECK(e.gate_partner_m.y == gate.position_m.y);
+    CHECK(e.source.position_m.x == gate.partner_position_m.x);
+    CHECK(gate.dead);
+  }
+  // A non-home galaxy's human race has only beachhead sources.
+  const gen::GalaxyParams other = gen::derive_galaxy_params(gen::galaxy_key_in_cluster(seed, 0, 0, 0, 1));
+  const gen::Race stranded = gen::human_race_in_galaxy(seed, 0, 0, 0, 1, other);
+  CHECK(stranded.void_home);
+  CHECK(stranded.params.sources.size() == gen::human_enclaves(seed, 0, 0, 0, 1).size());
+}

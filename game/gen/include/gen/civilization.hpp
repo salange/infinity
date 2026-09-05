@@ -108,6 +108,18 @@ class RaceRegistry {
   // the system's own macro cell (design section 6.4).
   std::optional<SystemOverride> home_override(const SystemCell& cell) const;
 
+  // WP2: the human race (fixed home, or enclave sources) rides along the
+  // registry so the owner resolution sees one candidate list. Optional:
+  // a galaxy without humans has none.
+  void set_human(const Race& human) { human_ = human; has_human_ = true; }
+  bool has_human() const { return has_human_; }
+  const Race& human() const { return human_; }
+  // Aliens around the cell plus the human race (last) when present.
+  const std::vector<Race>& candidates_around(const MacroCell& center) const;
+  const std::vector<Race>& candidates_around(const Dir3& p_m) const {
+    return candidates_around(macro_cell_of(p_m));
+  }
+
   // The key of a macro cell under races/v1 (tests, goldens).
   core::Key cell_key(const MacroCell& cell) const;
 
@@ -120,6 +132,9 @@ class RaceRegistry {
   mutable bool block_valid_{false};
   mutable MacroCell block_center_{};
   mutable std::vector<Race> block_;
+  mutable std::vector<Race> candidates_;
+  bool has_human_{false};
+  Race human_;
 };
 
 // The override for the system planets/v1 consults, from a registry

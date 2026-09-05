@@ -5,6 +5,7 @@
 
 #include "core/golden.hpp"
 #include "gen/civilization.hpp"
+#include "gen/human.hpp"
 #include "gen/universe.hpp"
 
 namespace inf::gen {
@@ -78,6 +79,41 @@ std::uint64_t hash_races_script(const core::Seed128& seed) {
   return hash.value();
 }
 
+// WP2: the human race of the home galaxy and the enclave/gate table of
+// the home cluster.
+std::uint64_t hash_human_script(const core::Seed128& seed) {
+  core::GoldenHash hash;
+  const GalaxyParams galaxy = home_galaxy_params(seed);
+  const Race human = human_race(home_galaxy_key(seed), galaxy);
+  feed_key(hash, human.key);
+  feed_double(hash, human.params.speed_ly_per_year);
+  feed_double(hash, human.params.falloff_ly);
+  feed_double(hash, human.params.r_max_ly);
+  hash.feed(static_cast<std::uint64_t>(human.params.t_0.ns_since_epoch));
+  hash.feed(human.factions.size());
+  for (const FactionParams& f : human.factions) {
+    hash.feed(static_cast<std::uint64_t>(f.type));
+    hash.feed(static_cast<std::uint64_t>(f.t_start.ns_since_epoch));
+    feed_double(hash, f.speed_mul);
+    feed_double(hash, f.reproduction_mul);
+    feed_double(hash, f.settle_mul);
+    hash.feed(f.centres.size());
+    for (const FactionCentre& c : f.centres) {
+      feed_double(hash, c.position_m.x.to_double());
+      feed_double(hash, c.position_m.y.to_double());
+      feed_double(hash, c.weight);
+    }
+  }
+  for (const WormholeGate& gate : home_galaxy_gates(seed)) {
+    hash.feed(gate.partner_galaxy);
+    hash.feed(gate.partner_enclave);
+    feed_double(hash, gate.position_m.x.to_double());
+    feed_double(hash, gate.position_m.y.to_double());
+    feed_double(hash, gate.partner_position_m.x.to_double());
+  }
+  return hash.value();
+}
+
 }  // namespace
 
 std::string hash_civ_report() {
@@ -91,6 +127,11 @@ std::string hash_civ_report() {
   for (const core::Seed128& seed : kSeeds) {
     report += "races seed=" + core::to_hex(seed) + " fnv=";
     append_hex(&report, hash_races_script(seed));
+    report += "\n";
+  }
+  for (const core::Seed128& seed : kSeeds) {
+    report += "human seed=" + core::to_hex(seed) + " fnv=";
+    append_hex(&report, hash_human_script(seed));
     report += "\n";
   }
   return report;

@@ -624,6 +624,15 @@ const std::vector<Race>& RaceRegistry::races_around(const MacroCell& center) con
   return block_;
 }
 
+const std::vector<Race>& RaceRegistry::candidates_around(const MacroCell& center) const {
+  const std::vector<Race>& aliens = races_around(center);
+  candidates_ = aliens;
+  if (has_human_) {
+    candidates_.push_back(human_);
+  }
+  return candidates_;
+}
+
 std::optional<SystemOverride> RaceRegistry::home_override(const SystemCell& cell) const {
   if (cell.is_home() || civ_.race_count == 0) {
     return std::nullopt;  // the default system is never a race home

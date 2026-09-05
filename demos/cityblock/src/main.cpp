@@ -402,11 +402,26 @@ int main(int argc, char** argv) {
     if (pressed(GLFW_KEY_F6)) renderer.settings().taa = !renderer.settings().taa;
     if (pressed(GLFW_KEY_EQUAL) || pressed(GLFW_KEY_KP_ADD)) renderer.settings().exposure_bias += 0.25f;
     if (pressed(GLFW_KEY_MINUS) || pressed(GLFW_KEY_KP_SUBTRACT)) renderer.settings().exposure_bias -= 0.25f;
-    if (pressed(GLFW_KEY_R)) {
-      sp.seed = std::to_string(std::strtoull(sp.seed.c_str(), nullptr, 16) + 1);
+    auto regenerate = [&] {
       scene = cb::generate_scene(sp);
       renderer.set_scene(scene, arrays);
-      std::printf("  seed %s: %u triangles\n", sp.seed.c_str(), renderer.triangles());
+      renderer.reset_history();
+      std::printf("  seed %s, size %s: %u triangles, %d towers, %d standard buildings\n", sp.seed.c_str(),
+                  scene.city_size.c_str(), renderer.triangles(), scene.stats_towers, scene.stats_standards);
+    };
+    if (pressed(GLFW_KEY_R)) {
+      sp.seed = std::to_string(std::strtoull(sp.seed.c_str(), nullptr, 16) + 1);
+      regenerate();
+    }
+    // , and . step the size class down / up for the same seed
+    {
+      static const char* kSizeNames[6] = {"outpost", "village", "small", "medium", "large", "metropolis"};
+      int current = sp.size;
+      if (current < 0) {
+        for (int i = 0; i < 6; ++i) if (scene.city_size == kSizeNames[i]) current = i;
+      }
+      if (pressed(GLFW_KEY_COMMA) && current > 0) { sp.size = current - 1; regenerate(); }
+      if (pressed(GLFW_KEY_PERIOD) && current >= 0 && current < 5) { sp.size = current + 1; regenerate(); }
     }
     if (pressed(GLFW_KEY_P)) {
       std::printf("  camera --cam %.1f,%.1f,%.1f --target %.1f,%.1f,%.1f\n", cam.position.x, cam.position.y, cam.position.z,

@@ -541,8 +541,9 @@ void build_pod_wreck(Scene& sc, Vec2 c, float y, Rng& rng, int detail, bool memo
   Emit rim(&mesh, memorial ? M_MARBLE_WHITE : M_CONCRETE);
   rim.ring_cap(plan_circle(9.6f, seg, c), plan_circle(8.8f, seg, c), y + 0.15f, true);
   rim.wall(plan_circle(9.6f, seg, c), y, y + 0.15f, true, true);
-  // the pod: a truncated cone hull, tilted, landing legs
-  Emit hull(&mesh, M_SILVER);
+  // the pod: a truncated cone hull, tilted, landing legs (matte white so it
+  // does not read as a light source in the sun)
+  Emit hull(&mesh, M_WHITE_METAL);
   const Vec3 base = P3(c + Vec2{1.5f, -0.8f}, y + 0.9f);
   const Vec3 tilt = normalize(Vec3{0.18f, 1.0f, -0.12f});
   hull.frustum(base, base + tilt * 4.2f, 2.6f, 1.4f, detail >= 1 ? 20 : 10, true);

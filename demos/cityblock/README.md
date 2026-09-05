@@ -30,7 +30,7 @@ brakes over ~0.25 s), `N`
 day/night, `F1` cycles debug views (albedo, normals, ambient occlusion,
 shadow cascades, roughness, direct sun, IBL diffuse, IBL specular, sun
 specular), `F2`–`F5` toggle SSAO / shadows / bloom / FXAA, `+`/`-`
-exposure, `R` next seed, `P` prints the camera as `--cam/--target`
+exposure, `R` next seed, `,` / `.` size class down / up for the same seed, `P` prints the camera as `--cam/--target`
 arguments, `F12` screenshot.
 
 Flags: `--seed S`, `--width W --height H`, `--sky day|night|sunset|file.hdr`,

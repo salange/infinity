@@ -22,5 +22,8 @@ struct CityStats {
 };
 
 CityStats generate_city(Scene& sc, Rng root, CitySize size);
+// The asset catalog: all tower families, the five standard types, plazas and
+// the ground kit arranged for one camera.
+void generate_showcase(Scene& sc, Rng root);
 
 }  // namespace cb

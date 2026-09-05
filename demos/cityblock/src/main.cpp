@@ -47,6 +47,7 @@ struct Args {
   bool no_shadows{false};
   bool no_taa{false};
   int size{-1};
+  bool showcase{false};
   int sweep{0};
   float sweep_step{0.03f};
   std::string sweep_out{"sweep"};
@@ -89,6 +90,7 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--no-taa")) a.no_taa = true;
     else if (!std::strcmp(argv[i], "--rings")) a.rings = std::atoi(next("--rings"));
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
+    else if (!std::strcmp(argv[i], "--showcase")) a.showcase = true;
     else if (!std::strcmp(argv[i], "--sweep")) a.sweep = std::atoi(next("--sweep"));
     else if (!std::strcmp(argv[i], "--sweep-step")) a.sweep_step = static_cast<float>(std::atof(next("--sweep-step")));
     else if (!std::strcmp(argv[i], "--sweep-out")) a.sweep_out = next("--sweep-out");
@@ -168,6 +170,7 @@ int main(int argc, char** argv) {
   sp.context_rings = args.rings;
   sp.context_detail = args.context_detail;
   sp.size = args.size;
+  sp.showcase = args.showcase;
   cb::Scene scene = cb::generate_scene(sp);
   std::printf("  city: %s, radius %.0f m, %d blocks, %d towers, %d standard buildings, %d plazas\n", scene.city_size.c_str(),
               scene.city_radius, scene.stats_blocks, scene.stats_towers, scene.stats_standards, scene.stats_plazas);

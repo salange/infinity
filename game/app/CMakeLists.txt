@@ -1,5 +1,6 @@
 add_executable(game_app
   src/main.cpp
+  src/civ_view.cpp
   src/hud.cpp
   src/deep_sky_render.cpp
   src/material_library.cpp

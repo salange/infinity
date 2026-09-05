@@ -712,3 +712,150 @@ TEST_CASE("settlements/v1: monotone settled set, tiers, regions, capital, factio
   CHECK(metros >= 3);
   CHECK(metros <= 8);
 }
+
+// --- WP5: sites and civil terrain --------------------------------------------
+
+#include "gen/civil.hpp"
+#include "gen/site_mesh.hpp"
+#include "gen/sites.hpp"
+
+TEST_CASE("sites/v1 + civil/v1: bounded sites, additive lots, continuous plateau (WP5)") {
+  const HomeWorld h = human_home_world();
+  const gen::Race& human = h.w.registry->human();
+  const gen::Owner owner = h.w.resolver->owner(h.context, gen::kLaunchReference);
+  const auto states = h.w.resolver->system_states(h.context, owner, gen::kLaunchReference);
+  const gen::CivState& state = states[h.body_index];
+  const gen::SettlementPlanner planner(h.keys.entity, *h.field, human.params, false);
+  const gen::SettlementPlan plan = planner.plan(state, human.factions);
+  const auto t0 = std::chrono::steady_clock::now();
+  const gen::SiteField sites(h.keys.entity, *h.field, plan, human.params, human.factions, state);
+  const auto t1 = std::chrono::steady_clock::now();
+  MESSAGE("site field: " << sites.sites().size() << " sites in "
+                         << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms");
+  REQUIRE(!sites.sites().empty());
+  const double radius = h.field->planet().radius_m.to_double();
+  const double sea = h.field->planet().sea_level_m.to_double();
+  const gen::Site* town = nullptr;
+  for (const gen::Site& site : sites.sites()) {
+    // Inside its province: the centre's province is the site's province.
+    const gen::CellId cell = h.field->provinces().cell_of(site.frame.up);
+    CHECK(cell == site.cell);
+    CHECK(site.radius_m > 0.0);
+    CHECK(site.datum_m >= sea + 3.0 - 1e-6);
+    CHECK(sites.site_of(site.cell) == &site);
+    if (town == nullptr && site.tier == static_cast<int>(gen::SettlementTier::Town)) town = &site;
+  }
+  REQUIRE(town != nullptr);
+  // Lots: inside the radius, non-overlapping within a block, every lot
+  // present at tier n-1 is present verbatim at tier n, visible count
+  // monotone in progress.
+  std::vector<gen::Lot> lots;
+  sites.all_lots(*town, &lots);
+  CHECK(lots.size() > 20);
+  for (const gen::Lot& lot : lots) {
+    double cx = 0.0;
+    double cy = 0.0;
+    for (int k = 0; k < lot.vertex_count; ++k) {
+      cx += lot.footprint[k][0];
+      cy += lot.footprint[k][1];
+    }
+    cx /= lot.vertex_count;
+    cy /= lot.vertex_count;
+    CHECK(std::sqrt(cx * cx + cy * cy) <= town->radius_m + 1e-3);
+    CHECK(lot.height_budget_m > 0.0f);
+    CHECK(lot.tier >= 1);
+    CHECK(lot.tier <= town->tier);
+  }
+  // Pairwise separation inside one block (footprints are smaller than
+  // the lattice pitch by construction): centres at least 0.6 lot apart.
+  {
+    std::vector<gen::Lot> block;
+    sites.lots_in_block(*town, 0, 0, &block);
+    for (std::size_t a = 0; a < block.size(); ++a) {
+      for (std::size_t b = a + 1; b < block.size(); ++b) {
+        const double dx = block[a].footprint[0][0] - block[b].footprint[0][0];
+        const double dy = block[a].footprint[0][1] - block[b].footprint[0][1];
+        CHECK(std::sqrt(dx * dx + dy * dy) > 0.6 * town->lot_m);
+      }
+    }
+  }
+  {
+    // Tier n-1 verbatim inside tier n.
+    gen::Site smaller = *town;
+    smaller.tier = town->tier - 1;
+    smaller.radius_m = gen::ring_radius_m(smaller.tier);
+    smaller.progress = 0.999f;
+    gen::Site larger = *town;
+    larger.progress = 0.999f;
+    std::vector<gen::Lot> inner;
+    std::vector<gen::Lot> outer;
+    sites.all_lots(smaller, &inner);
+    sites.all_lots(larger, &outer);
+    CHECK(outer.size() > inner.size());
+    for (const gen::Lot& lot : inner) {
+      bool found = false;
+      for (const gen::Lot& other : outer) {
+        if (other.id == lot.id && other.footprint[0][0] == lot.footprint[0][0] &&
+            other.height_budget_m == lot.height_budget_m) {
+          found = true;
+          break;
+        }
+      }
+      CHECK(found);
+    }
+    // Visible count monotone in progress; the newest 3 % under construction.
+    std::uint32_t last = 0;
+    for (float p = 0.0f; p <= 1.0f; p += 0.1f) {
+      const std::uint32_t count = sites.visible_count(*town, std::min(p, 0.999f));
+      CHECK(count >= last);
+      last = count;
+    }
+    std::vector<gen::Lot> mid;
+    gen::Site half = *town;
+    half.progress = 0.5f;
+    sites.all_lots(half, &mid);
+    int building = 0;
+    for (const gen::Lot& lot : mid) building += lot.style.construction < 1.0f ? 1 : 0;
+    CHECK(building >= 1);
+  }
+  // civil/v1: plateau at the datum inside 0.75 R, continuous across the
+  // rim (no step > 1 m per metre outside terraces), ground query composes.
+  gen::TerrainField& field = *h.field;
+  const gen::CivilField civil(sites, field);
+  field.set_height_modifier(&civil);
+  {
+    const gen::Dir3 centre = town->frame.up;
+    CHECK(field.elevation_m(centre).to_double() == doctest::Approx(town->datum_m).epsilon(1e-6));
+    CHECK(civil.near(centre));
+    double previous = field.elevation_m(town->frame.to_dir(0.0, 0.0)).to_double();
+    double max_grade = 0.0;
+    for (double x = 2.0; x <= 1.4 * town->radius_m; x += 2.0) {
+      const double e = field.elevation_m(town->frame.to_dir(x, 0.0)).to_double();
+      max_grade = std::max(max_grade, std::fabs(e - previous) / 2.0);
+      previous = e;
+    }
+    MESSAGE("max grade across the town rim: " << max_grade << " m/m");
+    if (town->family != gen::LayoutFamily::Terraced) {
+      CHECK(max_grade < 1.0);
+    }
+    // ground_radius_m composes the modifier.
+    const double ground = field.ground_radius_m(centre).to_double();
+    CHECK(ground == doctest::Approx(radius + town->datum_m).epsilon(1e-4));
+    // Far from every site the modifier is silent.
+    const gen::Dir3 far = gen::normalize(gen::Dir3{det::Real(-centre.x.to_double()), det::Real(-centre.y.to_double()), det::Real(-centre.z.to_double())});
+    CHECK(field.elevation_m(far) == field.base_elevation_m(far));
+    // Urban material weight at the centre.
+    const double r = radius + town->datum_m;
+    const gen::MaterialInputs in = field.material_inputs(centre.x.to_double() * r, centre.y.to_double() * r, centre.z.to_double() * r,
+                                                        centre.x.to_double(), centre.y.to_double(), centre.z.to_double());
+    CHECK(in.urban > 0.5);
+  }
+  // Mass mesh: deterministic, lots within budget.
+  const gen::SiteMeshParams mp;
+  const gen::SiteMesh a = gen::build_site_mesh(sites, *town, field, mp);
+  const gen::SiteMesh b = gen::build_site_mesh(sites, *town, field, mp);
+  CHECK(a.lot_count == lots.size());
+  CHECK(a.mesh.vertices == b.mesh.vertices);
+  CHECK(a.triangle_count > 0);
+  field.set_height_modifier(nullptr);
+}

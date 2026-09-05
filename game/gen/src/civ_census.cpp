@@ -118,6 +118,20 @@ CivCensus run_civ_census(const core::Seed128& seed, core::WorldTime t, int max_s
     const auto now = resolver.system_states(context, owner, t);
     const auto week = resolver.system_states(context, owner, t + week_ns);
     const auto later = resolver.system_states(context, owner, t + three_years_ns);
+    {
+      int best = -1;
+      for (std::size_t i = 0; i < now.size(); ++i) {
+        if (now[i].settled && (best < 0 || now[i].level > now[static_cast<std::size_t>(best)].level)) {
+          best = static_cast<int>(i);
+        }
+      }
+      if (best >= 0 && census.listed.size() < 64) {
+        census.listed.push_back(CivCensus::Listed{cell, dist_ly, now[static_cast<std::size_t>(best)].level,
+                                                  context.bodies[static_cast<std::size_t>(best)].slot,
+                                                  context.bodies[static_cast<std::size_t>(best)].moon,
+                                                  now[static_cast<std::size_t>(best)].domed});
+      }
+    }
     for (std::size_t i = 0; i < now.size(); ++i) {
       const CivState& s = now[i];
       if (!s.settled) {
@@ -208,6 +222,16 @@ std::string CivCensus::report() const {
                 pct(advance1_open, open_air), pct(advance2_open, open_air),
                 pct(advance3_open, open_air), open_air, pct(flip_week, live), new_claims_week);
   out += line;
+  if (!listed.empty()) {
+    out += "human systems sampled (cell x y z L, distance, best body):\n";
+    for (const Listed& l : listed) {
+      std::snprintf(line, sizeof(line), "  %lld %lld %lld %d  %6.0f ly  L%d slot %d%s%s\n",
+                    static_cast<long long>(l.cell.x), static_cast<long long>(l.cell.y),
+                    static_cast<long long>(l.cell.z), l.cell.level, l.dist_ly, l.level, l.slot,
+                    l.moon >= 0 ? " (moon)" : "", l.domed ? " domed" : "");
+      out += line;
+    }
+  }
   return out;
 }
 

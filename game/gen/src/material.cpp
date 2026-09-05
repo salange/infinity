@@ -71,6 +71,11 @@ constexpr MaterialInfo kInfo[] = {
     {"salt_flat",      {0.90f, 0.88f, 0.84f}, 5.0f, 0.55f, TintGroup::None, false},
     {"ammonia_slush",  {0.55f, 0.66f, 0.72f}, 4.0f, 0.30f, TintGroup::Life, false},
     {"seabed",         {0.36f, 0.35f, 0.29f}, 4.0f, 0.60f, TintGroup::Soil, false},
+    {"paving",         {0.48f, 0.47f, 0.45f}, 4.0f, 0.75f, TintGroup::None, false},
+    {"plating",        {0.42f, 0.44f, 0.47f}, 4.0f, 0.45f, TintGroup::None, true},
+    {"resin_floor",    {0.55f, 0.46f, 0.30f}, 4.0f, 0.35f, TintGroup::None, false},
+    {"crystal_floor",  {0.60f, 0.70f, 0.78f}, 4.0f, 0.15f, TintGroup::None, true},
+    {"disturbed_soil", {0.50f, 0.42f, 0.32f}, 4.0f, 0.90f, TintGroup::Soil, false},
 };
 static_assert(sizeof(kInfo) / sizeof(kInfo[0]) == kMaterialCount,
               "material registry and enum out of sync");
@@ -248,6 +253,22 @@ void MaterialField::weights(const MaterialInputs& in, double out[kMaterialCount]
   const double patch = 0.5 + 0.5 * noise_m(lattice_patch_, in.px, in.py, in.pz, 90.0);
   const double fine = 0.5 + 0.5 * noise_m(lattice_fine_, in.px, in.py, in.pz, 14.0);
   const double vent = 0.5 + 0.5 * noise_m(lattice_vent_, in.px, in.py, in.pz, 700.0);
+
+  // --- civil/v1 (T0020): paving inside settlements and along roads ------
+  // A strong weight where the settlement plateau is: the surface of a
+  // town is its paving, not its soil. Falls to disturbed soil at the rim.
+  if (in.urban > 0.001) {
+    Material surface = Material::Paving;
+    switch (in.urban_family) {
+      case 1: surface = Material::Plating; break;
+      case 2: surface = Material::ResinFloor; break;
+      case 3: surface = Material::CrystalFloor; break;
+      case 4: surface = Material::DisturbedSoil; break;
+      default: surface = Material::Paving; break;
+    }
+    w.add(surface, in.urban * 6.0);
+    w.add(Material::DisturbedSoil, (1.0 - in.urban) * in.urban * 4.0);
+  }
 
   // --- bedrock: dug faces, cave walls, cliffs ------------------------------
   const double depth = in.depth_below_surface_m;

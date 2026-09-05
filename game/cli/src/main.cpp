@@ -50,6 +50,9 @@ int print_usage() {
       "                       human enclaves + dead gates across the home cluster\n"
       "  civ state [--seed <hex128>] [--system x y z L] [--time <+yr|YYYY-MM-DD>]\n"
       "                       owner + per-body civilization state of a system\n"
+      "  civ site [--seed] [--system x y z L] [--slot N [--moon M]] [--tier T | --site I]\n"
+      "           [--time] [--out f.png]\n"
+      "                       one settlement: lots as a top-down PNG + app capture lines\n"
       "  civ map [--seed] [--system x y z L] [--slot N [--moon M]] [--time] [--out f.png]\n"
       "                       equirect settlement-plan PNG of a body (default: the\n"
       "                       highest-level settled body of the system)\n"
@@ -127,6 +130,8 @@ int main(int argc, char** argv) {
     int slot = -1;
     int moon = -1;
     const char* out_path = "civ-map.png";
+    const char* tier_text = nullptr;
+    int site_index = -1;
     for (int i = 3; i < argc; ++i) {
       if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
         seed_text = argv[++i];
@@ -153,6 +158,10 @@ int main(int argc, char** argv) {
         moon = std::atoi(argv[++i]);
       } else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
         out_path = argv[++i];
+      } else if (std::strcmp(argv[i], "--tier") == 0 && i + 1 < argc) {
+        tier_text = argv[++i];
+      } else if (std::strcmp(argv[i], "--site") == 0 && i + 1 < argc) {
+        site_index = std::atoi(argv[++i]);
       }
     }
     const std::optional<inf::core::Seed128> seed = inf::core::parse_seed(seed_text);
@@ -171,6 +180,10 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[2], "census") == 0) {
       return inf::cli::cmd_civ_census(*seed, samples, time_text);
+    }
+    if (std::strcmp(argv[2], "site") == 0) {
+      return inf::cli::cmd_civ_site(*seed, have_cell ? cell : nullptr, slot, moon, tier_text, site_index,
+                                    time_text, out_path);
     }
     if (std::strcmp(argv[2], "map") == 0) {
       return inf::cli::cmd_civ_map(*seed, have_cell ? cell : nullptr, slot, moon, time_text, out_path);

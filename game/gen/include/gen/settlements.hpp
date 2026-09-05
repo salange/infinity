@@ -118,6 +118,7 @@ class SettlementPlanner {
  private:
   double arc(std::uint32_t a, std::uint32_t b) const;
   void assign_tiers(SettlementPlan* plan) const;
+  double settled_level_of(std::uint32_t rank) const;
   void assign_regions(SettlementPlan* plan) const;
   void assign_factions(SettlementPlan* plan, const std::vector<FactionParams>& factions) const;
   void build_roads(SettlementPlan* plan) const;

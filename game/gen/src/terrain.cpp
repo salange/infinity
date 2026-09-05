@@ -185,9 +185,28 @@ Real TerrainField::elevation_from_params(const Dir3& unit_dir,
 // small local corrections; materials/talus consumers tolerate the
 // approximation, and the provable derivative contract lives in
 // elevation_base_from_params + the noise-level tests).
+namespace {
+
+// The modifier's view of the unmodified terrain.
+struct BaseElevation final : HeightModifier::BaseEval {
+  explicit BaseElevation(const TerrainField& field) : field_(field) {}
+  det::Real elevation_m(const Dir3& unit_dir) const override {
+    return field_.base_elevation_m(unit_dir);
+  }
+  const TerrainField& field_;
+};
+
+}  // namespace
+
+Real TerrainField::base_elevation_m(const Dir3& unit_dir) const {
+  const CanonicalParams canonical = canonical_params(dir_to_face_uv(unit_dir));
+  BlendedParams params = TerrainField::to_blended(canonical);
+  return evaluate_elevation(unit_dir, params, canonical.macro_rel, nullptr, nullptr, false);
+}
+
 Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
                                       Real macro_rel, Dir3* slope_out,
-                                      ParamCache* cache) const {
+                                      ParamCache* cache, bool apply_modifier) const {
   const NoiseControls controls = noise_controls(params, provinces_.cells_per_face(),
                                                planet_.radius_m.to_double());
   const world::NoiseD noise = world::warped_fbm3_d(
@@ -337,6 +356,13 @@ Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams&
   if (features_.enabled()) {
     height = height + features_.height_offset_m(unit_dir,
                                                 cache != nullptr ? &cache->features : nullptr);
+  }
+
+  // --- civil/v1 (T0020): the post-terrain settlement modifier. A body
+  // without one is byte-identical; one branch per sample otherwise.
+  if (apply_modifier && modifier_ != nullptr && modifier_->near(unit_dir)) {
+    const BaseElevation base(*this);
+    height = modifier_->modify(unit_dir, height, base);
   }
   return height;
 }
@@ -788,6 +814,12 @@ MaterialInputs TerrainField::material_inputs(double px, double py, double pz, do
                             in.climate.biotemp_c,
                             planet_.land_fraction.to_double() < 0.999 ? above_sea
                                                                      : elevation);
+  if (modifier_ != nullptr && modifier_->near(dir)) {
+    const HeightModifier::Urban urban = modifier_->urban(dir);
+    in.urban = urban.weight;
+    in.urban_family = urban.family;
+    in.night_light = urban.night_light;
+  }
   return in;
 }
 

@@ -144,7 +144,8 @@ enum class Kind {
   Rock, Basalt, Sandstone, Shale, Scree, Rubble, Gravel, Pebbles, SandDune, SandBeach, SandWet,
   SoilDry, SoilMud, Loam, ForestFloor, DeadLeaves, Grass, Meadow, Moss, Snow, SnowDrift,
   SnowDirty, Ice, Permafrost, Lava, MicrobialMat, LichenCrust, Crystal, Sulfur, Tholin, RedBed,
-  SaltFlat, Slush, Seabed, MossyCliff
+  SaltFlat, Slush, Seabed, MossyCliff,
+  Paving, Plating, Resin, CrystalFloor, Disturbed
 };
 
 struct NameKind {
@@ -171,6 +172,9 @@ constexpr NameKind kNames[] = {
     {"sulfur", Kind::Sulfur},           {"tholin_dust", Kind::Tholin},
     {"red_bed", Kind::RedBed},          {"salt_flat", Kind::SaltFlat},
     {"ammonia_slush", Kind::Slush},     {"seabed", Kind::Seabed},
+    {"paving", Kind::Paving},           {"plating", Kind::Plating},
+    {"resin_floor", Kind::Resin},       {"crystal_floor", Kind::CrystalFloor},
+    {"disturbed_soil", Kind::Disturbed},
 };
 
 const char* kNameList[sizeof(kNames) / sizeof(kNames[0])] = {};
@@ -484,6 +488,78 @@ Texel generic(Kind kind, std::uint64_t seed, double u, double v) {
       t.emissive = 0.0;
       return t;
     }
+    // --- T0020 urban surfaces ---------------------------------------------
+    case Kind::Paving: {
+      // Flagstones: an 8x8 grid of slabs with bevelled joints, per-slab
+      // tone, a little grime along the joints.
+      const int n = 8;
+      const double gx = u * n;
+      const double gy = v * n;
+      const double fx = gx - std::floor(gx);
+      const double fy = gy - std::floor(gy);
+      const double joint = 0.045;
+      const double edge = std::min(std::min(fx, 1.0 - fx), std::min(fy, 1.0 - fy));
+      const double bevel = smooth(edge, 0.0, joint * 2.0);
+      const double slab = hash01(seed, static_cast<std::int64_t>(std::floor(gx)),
+                                 static_cast<std::int64_t>(std::floor(gy)), 0x77);
+      const double grain = pfbm(seed ^ 0x3, u, v, 40, 3, 0.5);
+      Texel t;
+      t.color = mix({0.42, 0.41, 0.39}, {0.56, 0.54, 0.51}, 0.3 + 0.7 * slab);
+      t.color = scale(t.color, 0.92 + 0.08 * grain);
+      t.color = mix(t.color, {0.22, 0.21, 0.19}, 1.0 - bevel);
+      t.height = clamp01(0.55 + 0.35 * bevel + 0.04 * grain);
+      t.roughness = 0.72 + 0.15 * (1.0 - bevel);
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::Plating: {
+      // Hex panels with recessed seams and a faint lit seam.
+      const Worley w = pworley(seed, u * 6, v * 6, 6, 0.0);
+      const double seam = smooth(w.f2 - w.f1, 0.0, 0.035);
+      const double brushed = pfbm(seed ^ 0x9, u * 3.0, v, 60, 2, 0.4);
+      Texel t;
+      t.color = mix({0.36, 0.38, 0.41}, {0.50, 0.53, 0.57}, 0.5 + 0.5 * w.id);
+      t.color = scale(t.color, 0.95 + 0.05 * brushed);
+      t.color = mix(t.color, {0.10, 0.14, 0.18}, 1.0 - seam);
+      t.height = clamp01(0.6 * seam + 0.35);
+      t.roughness = 0.35 + 0.2 * (1.0 - seam);
+      // A faint lit seam only: at distance the seams average into the
+      // panel, so anything stronger reads as a glowing wall.
+      t.emissive = (1.0 - seam) * 0.12;
+      return t;
+    }
+    case Kind::Resin: {
+      // Smooth amber resin with darker veins and bubbles.
+      const double veins = smooth(std::fabs(pfbm(seed, u, v, 5, 4, 0.55)), 0.0, 0.08);
+      const Worley w = pworley(seed ^ 0x4, u * 12, v * 12, 12, 1.0);
+      const double bubble = smooth(0.18 - w.f1, 0.0, 0.1);
+      Texel t;
+      t.color = mix({0.52, 0.40, 0.22}, {0.64, 0.52, 0.30}, veins);
+      t.color = mix(t.color, {0.30, 0.22, 0.12}, bubble * 0.6);
+      t.height = clamp01(0.6 + 0.1 * veins - 0.15 * bubble);
+      t.roughness = 0.3;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::CrystalFloor: {
+      // Low facets on a cellular lattice, faintly lit along the edges.
+      const Worley w = pworley(seed, u * 9, v * 9, 9, 0.9);
+      const double facet = clamp01(1.0 - (w.f2 - w.f1) * 6.0);
+      Texel t;
+      t.color = mix({0.42, 0.52, 0.60}, {0.78, 0.86, 0.92}, 0.4 + 0.6 * w.id);
+      t.height = clamp01(0.4 + 0.4 * (1.0 - facet));
+      t.roughness = 0.15;
+      t.emissive = facet * 0.5;
+      return t;
+    }
+    case Kind::Disturbed: {
+      Texel t = sand_like(seed, u, v, {0.50, 0.42, 0.32}, 0.35, 0.0);
+      const double tracks = smooth(std::fabs(std::sin(v * 6.283185307179586 * 6.0 + 2.0 * pfbm(seed ^ 0x5, u, v, 4, 2))), 0.8, 1.0);
+      t.color = mix(t.color, {0.36, 0.30, 0.22}, tracks * 0.5);
+      t.height = clamp01(t.height - 0.1 * tracks);
+      t.roughness = 0.9;
+      return t;
+    }
   }
   return rock_like(seed, u, v, {0.5, 0.47, 0.44}, 0.0, 0.5, 0.85, 0.5);
 }
@@ -527,7 +603,8 @@ Tile generate_tile(const std::string& material_name, std::uint32_t size, std::ui
   Tile tile;
   tile.size = size;
   const Kind kind = kind_for(material_name);
-  tile.emissive = kind == Kind::Lava || kind == Kind::Crystal;
+  tile.emissive = kind == Kind::Lava || kind == Kind::Crystal || kind == Kind::Plating ||
+                  kind == Kind::CrystalFloor;
   const std::size_t count = static_cast<std::size_t>(size) * size;
   tile.albedo.resize(count * 4);
   tile.normal.assign(count * 4, 0);

@@ -59,7 +59,14 @@ enum class Material : std::uint8_t {
   SaltFlat = 34,
   AmmoniaSlush = 35,
   Seabed = 36,
-  Count = 37,
+  // T0020 urban surfaces (civil/v1): paving and plating by race material
+  // family, disturbed soil in the outer ring.
+  Paving = 37,
+  Plating = 38,
+  ResinFloor = 39,
+  CrystalFloor = 40,
+  DisturbedSoil = 41,
+  Count = 42,
 };
 
 // Which per-planet tint a material takes (SurfacePalette below).
@@ -117,6 +124,10 @@ struct MaterialInputs {
   double ruggedness{0.0};
   Climate climate;
   BiomeSample biome;
+  // T0020: the settlement hint from civil/v1 (0 outside every site).
+  double urban{0.0};
+  int urban_family{0};
+  double night_light{0.0};
 };
 
 class MaterialField {

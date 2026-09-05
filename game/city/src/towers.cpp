@@ -1,9 +1,9 @@
-#include "towers.hpp"
+#include "city/towers.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace cb {
+namespace inf::city {
 
 Vec3 P3(Vec2 xz, float y) { return Vec3{xz.x, y, xz.y}; }
 
@@ -557,13 +557,6 @@ TowerSpec spec_hex(float half, int floors) {
   return s;
 }
 
-namespace {
-Mat pick_glass(Rng& r, float floor_h) {
-  (void)r;
-  return glass_for_floor_height(floor_h);
-}
-}  // namespace
-
 TowerSpec random_tower(Rng& rng, float half, int max_floors) {
   const float u = rng.next();
   TowerSpec s;
@@ -699,4 +692,4 @@ void roof_equipment(Mesh& mesh, Rng& rng, const std::vector<Vec2>& plan, float y
   }
 }
 
-}  // namespace cb
+}  // namespace inf::city

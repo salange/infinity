@@ -146,7 +146,9 @@ enum class Kind {
   SnowDirty, Ice, Permafrost, Lava, MicrobialMat, LichenCrust, Crystal, Sulfur, Tholin, RedBed,
   SaltFlat, Slush, Seabed, MossyCliff,
   Paving, Plating, Resin, CrystalFloor, Disturbed,
-  WindowGlass, WindowDark, FacadeWindows, ScrapMetal
+  WindowGlass, WindowDark, FacadeWindows, ScrapMetal,
+  Asphalt, PavementLight, PavingSlabs, Terrazzo, ConcreteWhite, ConcreteSmooth, ConcretePanels,
+  MetalSilver, MetalBlack, Bark, Marble
 };
 
 struct NameKind {
@@ -178,6 +180,12 @@ constexpr NameKind kNames[] = {
     {"disturbed_soil", Kind::Disturbed}, {"window_glass", Kind::WindowGlass},
     {"window_dark", Kind::WindowDark},   {"facade_windows", Kind::FacadeWindows},
     {"scrap_metal", Kind::ScrapMetal},
+    {"asphalt", Kind::Asphalt},         {"pavement_light", Kind::PavementLight},
+    {"paving_slabs", Kind::PavingSlabs}, {"terrazzo", Kind::Terrazzo},
+    {"concrete_white", Kind::ConcreteWhite}, {"concrete_smooth", Kind::ConcreteSmooth},
+    {"concrete_panels", Kind::ConcretePanels}, {"metal_silver", Kind::MetalSilver},
+    {"metal_black", Kind::MetalBlack},   {"bark", Kind::Bark},
+    {"marble", Kind::Marble},
 };
 
 const char* kNameList[sizeof(kNames) / sizeof(kNames[0])] = {};
@@ -602,6 +610,117 @@ Texel generic(Kind kind, std::uint64_t seed, double u, double v) {
         t.roughness = 0.1;
         t.emissive = lit ? 0.6 : 0.0;
       }
+      return t;
+    }
+    case Kind::Asphalt: {
+      // Fine dark aggregate with a faint tar sheen and cracks.
+      const double grain = pfbm(seed, u, v, 64, 3, 0.55);
+      const double patch = pfbm(seed ^ 0x2, u, v, 3, 3, 0.5);
+      const Worley w = pworley(seed ^ 0x3, u * 5, v * 5, 5, 0.9);
+      const double crack = smooth(0.03 - std::fabs(w.f2 - w.f1), 0.0, 0.02) * smooth(patch, 0.1, 0.4);
+      Texel t;
+      t.color = scale({0.22, 0.22, 0.23}, 0.85 + 0.3 * grain + 0.1 * patch);
+      t.color = mix(t.color, {0.10, 0.10, 0.10}, crack);
+      t.height = clamp01(0.5 + 0.12 * grain - 0.2 * crack);
+      t.roughness = 0.88 + 0.08 * grain;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::PavementLight:
+    case Kind::PavingSlabs: {
+      // Large slabs on a grid with narrow joints, per-slab tone and grain.
+      const int n = kind == Kind::PavementLight ? 4 : 6;
+      const double gx = u * n;
+      const double gy = v * n;
+      const double fx = gx - std::floor(gx);
+      const double fy = gy - std::floor(gy);
+      const double joint = 0.03;
+      const double edge = std::min(std::min(fx, 1.0 - fx), std::min(fy, 1.0 - fy));
+      const double bevel = smooth(edge, 0.0, joint * 1.6);
+      const double slab = hash01(seed, static_cast<std::int64_t>(std::floor(gx)), static_cast<std::int64_t>(std::floor(gy)), 0x79);
+      const double grain = pfbm(seed ^ 0x5, u, v, 48, 3, 0.5);
+      const Rgb base = kind == Kind::PavementLight ? Rgb{0.62, 0.60, 0.57} : Rgb{0.55, 0.55, 0.54};
+      Texel t;
+      t.color = scale(base, 0.9 + 0.16 * slab + 0.06 * grain);
+      t.color = mix(t.color, scale(base, 0.45), 1.0 - bevel);
+      t.height = clamp01(0.55 + 0.3 * bevel + 0.03 * grain);
+      t.roughness = 0.68 + 0.1 * grain;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::Terrazzo: {
+      // Polished floor: speckled chips in a light matrix, low roughness.
+      const Worley w = pworley(seed, u * 40, v * 40, 40, 1.0);
+      const double chip = smooth(0.32 - w.f1, 0.0, 0.08);
+      const double chip_tone = w.id;
+      Texel t;
+      const Rgb chip_col = mix({0.35, 0.33, 0.30}, {0.85, 0.82, 0.78}, chip_tone);
+      t.color = mix({0.72, 0.70, 0.66}, chip_col, chip);
+      t.height = clamp01(0.5 + 0.02 * chip);
+      t.roughness = 0.32 + 0.1 * chip;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::ConcreteWhite:
+    case Kind::ConcreteSmooth:
+    case Kind::ConcretePanels: {
+      // Cast concrete: fine pores, soft tonal clouds; the panel variant
+      // adds a shuttering grid.
+      const double pores = pfbm(seed, u, v, 32, 4, 0.5);
+      const double cloud = pfbm(seed ^ 0x7, u, v, 3, 3, 0.5);
+      const Rgb base = kind == Kind::ConcreteWhite ? Rgb{0.78, 0.77, 0.74}
+                       : (kind == Kind::ConcreteSmooth ? Rgb{0.62, 0.62, 0.61} : Rgb{0.38, 0.38, 0.37});
+      double seam = 1.0;
+      if (kind == Kind::ConcretePanels) {
+        const double gx = u * 2.0 - std::floor(u * 2.0);
+        const double gy = v * 2.0 - std::floor(v * 2.0);
+        const double edge = std::min(std::min(gx, 1.0 - gx), std::min(gy, 1.0 - gy));
+        seam = smooth(edge, 0.0, 0.02);
+      }
+      Texel t;
+      t.color = scale(base, 0.9 + 0.12 * cloud + 0.05 * pores);
+      t.color = mix(t.color, scale(base, 0.6), 1.0 - seam);
+      t.height = clamp01(0.5 + 0.04 * pores + 0.02 * cloud - 0.15 * (1.0 - seam));
+      t.roughness = 0.62 + 0.15 * pores;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::MetalSilver:
+    case Kind::MetalBlack: {
+      // Brushed metal: anisotropic streaks, faint scratches.
+      const double brush = pfbm(seed, u * 6.0, v, 48, 2, 0.4);
+      const double scratch = smooth(pfbm(seed ^ 0x9, u * 4.0, v * 0.5, 16, 2, 0.5), 0.55, 0.75);
+      const Rgb base = kind == Kind::MetalSilver ? Rgb{0.80, 0.80, 0.82} : Rgb{0.08, 0.08, 0.09};
+      Texel t;
+      t.color = scale(base, 0.92 + 0.12 * brush + 0.1 * scratch);
+      t.height = clamp01(0.5 + 0.02 * brush);
+      t.roughness = (kind == Kind::MetalSilver ? 0.30 : 0.45) + 0.1 * scratch;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::Bark: {
+      // Vertical fissures and plates.
+      const double fissure = pfbm(seed, u * 2.0, v * 0.25, 24, 4, 0.55, 0.6);
+      const double plate = pfbm(seed ^ 0xB, u, v, 6, 3, 0.5);
+      Texel t;
+      t.color = mix({0.30, 0.24, 0.18}, {0.42, 0.34, 0.26}, 0.5 + 0.5 * plate);
+      t.color = mix(t.color, {0.16, 0.12, 0.09}, smooth(fissure, 0.2, 0.7));
+      t.height = clamp01(0.5 + 0.25 * plate - 0.3 * smooth(fissure, 0.2, 0.7));
+      t.roughness = 0.88;
+      t.emissive = 0.0;
+      return t;
+    }
+    case Kind::Marble: {
+      // Polished marble: warped veins over a pale ground.
+      const double warp = pfbm(seed, u, v, 3, 3, 0.5);
+      const double vein = std::fabs(pfbm(seed ^ 0xD, u + 0.2 * warp, v * 0.7 + 0.15 * warp, 4, 4, 0.55, 0.8));
+      const double v2 = smooth(1.0 - vein, 0.7, 0.98);
+      Texel t;
+      t.color = mix({0.82, 0.81, 0.80}, {0.48, 0.47, 0.50}, v2 * 0.8);
+      t.color = scale(t.color, 0.96 + 0.06 * warp);
+      t.height = clamp01(0.5 + 0.01 * warp);
+      t.roughness = 0.22 + 0.06 * v2;
+      t.emissive = 0.0;
       return t;
     }
     case Kind::ScrapMetal: {

@@ -1,5 +1,7 @@
 #include "gen/material.hpp"
 
+#include <cstring>
+
 #include <cmath>
 
 #include "core/det/mix.hpp"
@@ -80,6 +82,17 @@ constexpr MaterialInfo kInfo[] = {
     {"window_dark",    {0.12f, 0.14f, 0.18f}, 2.0f, 0.15f, TintGroup::None, false},
     {"facade_windows", {0.55f, 0.52f, 0.47f}, 4.0f, 0.70f, TintGroup::None, true},
     {"scrap_metal",    {0.38f, 0.33f, 0.28f}, 3.0f, 0.65f, TintGroup::None, false},
+    {"asphalt",        {0.22f, 0.22f, 0.23f}, 5.0f, 0.90f, TintGroup::None, false},
+    {"pavement_light", {0.62f, 0.60f, 0.57f}, 4.0f, 0.70f, TintGroup::None, false},
+    {"paving_slabs",   {0.55f, 0.55f, 0.54f}, 3.0f, 0.65f, TintGroup::None, false},
+    {"terrazzo",       {0.72f, 0.70f, 0.66f}, 3.0f, 0.40f, TintGroup::None, false},
+    {"concrete_white", {0.78f, 0.77f, 0.74f}, 3.0f, 0.60f, TintGroup::None, false},
+    {"concrete_smooth",{0.62f, 0.62f, 0.61f}, 4.0f, 0.70f, TintGroup::None, false},
+    {"concrete_panels",{0.38f, 0.38f, 0.37f}, 3.0f, 0.70f, TintGroup::None, false},
+    {"metal_silver",   {0.80f, 0.80f, 0.82f}, 1.0f, 0.30f, TintGroup::None, false},
+    {"metal_black",    {0.08f, 0.08f, 0.09f}, 1.0f, 0.45f, TintGroup::None, false},
+    {"bark",           {0.30f, 0.24f, 0.18f}, 1.2f, 0.90f, TintGroup::None, false},
+    {"marble",         {0.80f, 0.80f, 0.80f}, 3.0f, 0.25f, TintGroup::None, false},
 };
 static_assert(sizeof(kInfo) / sizeof(kInfo[0]) == kMaterialCount,
               "material registry and enum out of sync");
@@ -102,6 +115,13 @@ class Weights {
 };
 
 }  // namespace
+
+int material_by_name(const char* name) {
+  for (std::uint32_t i = 0; i < kMaterialCount; ++i) {
+    if (std::strcmp(kInfo[i].name, name) == 0) return static_cast<int>(i);
+  }
+  return -1;
+}
 
 const MaterialInfo& material_info(Material id) {
   const auto index = static_cast<std::size_t>(id);

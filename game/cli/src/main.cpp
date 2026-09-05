@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 
+#include "commands_city.hpp"
 #include "commands_civ.hpp"
 #include "commands_planet.hpp"
 #include "commands_system.hpp"
@@ -24,6 +25,7 @@ int print_usage() {
       "  hash-system          print the planetary-system golden report\n"
       "  hash-edits           print the effective-density (player diff) golden report\n"
       "  hash-civ             print the civilization golden report\n"
+      "  hash-city            print the city generator golden report\n"
       "  goldens              print the FULL golden suite (all reports, one\n"
       "                       machine-readable document — diff across platforms)\n"
       "  dump-system --seed <hex128> [--start-ns N] [--span-ns N] [--steps N]\n"
@@ -110,6 +112,9 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (std::strcmp(argv[1], "hash-city") == 0) {
+    return inf::cli::cmd_hash_city();
+  }
   if (std::strcmp(argv[1], "hash-civ") == 0) {
     return inf::cli::cmd_hash_civ();
   }

@@ -1,9 +1,9 @@
-#include "mesh.hpp"
+#include "city/mesh.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace cb {
+namespace inf::city {
 
 namespace {
 
@@ -540,9 +540,9 @@ std::vector<Vec2> spline(const std::vector<Vec2>& ctrl, int per_seg) {
   return out;
 }
 
-}  // namespace cb
+}  // namespace inf::city
 
-namespace cb {
+namespace inf::city {
 
 std::vector<Vec2> clip_halfplane(const std::vector<Vec2>& poly, Vec2 p, Vec2 n) {
   std::vector<Vec2> out;
@@ -621,4 +621,4 @@ float plan_inradius(const std::vector<Vec2>& poly) {
   return best;
 }
 
-}  // namespace cb
+}  // namespace inf::city

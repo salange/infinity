@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
               scene.foliage.triangle_count(), scene.lights.size(), elapsed());
 
   // ---- textures --------------------------------------------------------------------
-  cb::MaterialArrays arrays = cb::load_material_arrays(gpu, assets, scene.texture_sets(), args.tex_size, true);
+  cb::MaterialArrays arrays = cb::load_material_arrays(gpu, assets, cb::texture_sets(), args.tex_size, true);
   std::printf("  textures loaded (%.2f s)\n", elapsed());
 
   // ---- environments ------------------------------------------------------------------

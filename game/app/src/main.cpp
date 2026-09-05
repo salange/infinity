@@ -26,6 +26,9 @@
 #include "gen/system.hpp"
 #include "gen/galaxy.hpp"
 #include "gen/deep_sky.hpp"
+#include "city/materials.hpp"
+#include "city/showcase.hpp"
+#include "city_render.hpp"
 #include "civ_view.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/civilization.hpp"
@@ -472,6 +475,8 @@ int main(int argc, char** argv) {
   double civ_time_offset_years = 0.0; // --civ-time: civilization clock offset (T0020)
   long long clock_offset_s = 0;       // --clock-offset-s: world clock offset (captures)
   inf::gen::BuildingMethod building_method = inf::gen::BuildingMethod::GrammarParts;  // --buildings
+  bool city_showcase = false;  // --city-showcase: T0021 pipeline check (catalog scene at the first town)
+  int city_debug = 0;          // --city-debug N: city pipeline debug view
   const char* assets_text = nullptr;  // --assets <dir>: tile library root
   std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
   int spawn_slot = -1;                // --slot N: spawn on this system slot
@@ -514,6 +519,10 @@ int main(int argc, char** argv) {
       building_method = std::strcmp(m, "mass") == 0      ? inf::gen::BuildingMethod::Mass
                         : std::strcmp(m, "grammar") == 0 ? inf::gen::BuildingMethod::Grammar
                                                          : inf::gen::BuildingMethod::GrammarParts;
+    } else if (std::strcmp(argv[i], "--city-showcase") == 0) {
+      city_showcase = true;
+    } else if (std::strcmp(argv[i], "--city-debug") == 0 && i + 1 < argc) {
+      city_debug = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
       // Shift the world clock (planet rotation, orbits): capture aid to
       // put a site into daylight. A per-save constant offset is exactly
@@ -1213,6 +1222,58 @@ int main(int argc, char** argv) {
                 tex_size, tex_size);
     materials.start(assets_dir, tex_size);
   }
+  // T0021 --city-showcase: the catalog scene on the first town's plateau
+  // through the city pipeline (a renderer check, not gameplay).
+  inf::app::CityUpload city_upload;
+  Mat4 city_prev_view_proj = Mat4::identity();
+  RVec3 city_prev_camera{0.0, 0.0, 0.0};
+  bool city_active = false;
+  const auto build_city_showcase = [&]() {
+    city_active = false;
+    if (!city_showcase || !anchor || !anchor->civ || !anchor->civ->sites) {
+      if (city_showcase) std::printf("city-showcase: no settled site on the anchor body\n");
+      return;
+    }
+    const inf::gen::Site* pick = nullptr;
+    for (const inf::gen::Site& site : anchor->civ->sites->sites()) {
+      if (site.tier >= static_cast<int>(inf::gen::SettlementTier::Town) &&
+          (pick == nullptr || site.tier < pick->tier)) {
+        pick = &site;
+      }
+    }
+    if (pick == nullptr && !anchor->civ->sites->sites().empty()) pick = &anchor->civ->sites->sites().front();
+    if (pick == nullptr) return;
+    inf::city::Scene scene;
+    scene.materials = inf::city::make_materials();
+    inf::city::generate_showcase_small(scene, inf::city::Rng(anchor->keys.entity).child(0x51));
+    inf::app::upload_city_materials(*rhi, scene.materials);
+    city_upload = inf::app::upload_city_scene(*rhi, scene, pick->frame, pick->datum_m);
+    city_active = city_upload.opaque != 0;
+    const inf::gen::Dir3& up = pick->frame.up;
+    const double r = anchor->radius + pick->datum_m;
+    std::printf("city-showcase: %u triangles on site %u (%s) at planet-local (%.1f, %.1f, %.1f)\n",
+                city_upload.triangles, pick->province,
+                inf::gen::to_string(static_cast<inf::gen::SettlementTier>(pick->tier)),
+                up.x.to_double() * r, up.y.to_double() * r, up.z.to_double() * r);
+    // Capture lines: 220 m south-west of the centre, 90 m up, looking at it.
+    {
+      const inf::gen::Dir3& north = pick->frame.north;
+      const inf::gen::Dir3& east = pick->frame.east;
+      const double back = 200.0;
+      const double side = 90.0;
+      const double height = 80.0;
+      const double px = up.x.to_double() * (r + height) - north.x.to_double() * back - east.x.to_double() * side;
+      const double py = up.y.to_double() * (r + height) - north.y.to_double() * back - east.y.to_double() * side;
+      const double pz = up.z.to_double() * (r + height) - north.z.to_double() * back - east.z.to_double() * side;
+      const double tx = up.x.to_double() * (r + 30.0) - px;
+      const double ty = up.y.to_double() * (r + 30.0) - py;
+      const double tz = up.z.to_double() * (r + 30.0) - pz;
+      const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+      std::printf("city-showcase: pos %.1f %.1f %.1f\ncity-showcase: aim dir %.5f %.5f %.5f\n", px, py, pz, tx / len, ty / len, tz / len);
+      std::fflush(stdout);
+    }
+  };
+  build_city_showcase();
   const inf::gen::TerrainField* materials_anchor = nullptr;
 
   struct BakeResult {
@@ -2203,9 +2264,13 @@ int main(int argc, char** argv) {
       }
     }
     // T0020: settlement mass models of the anchor body.
-    if (show_surface && anchor->civ != nullptr) {
+    if (show_surface && anchor->civ != nullptr && !city_active) {
       inf::app::draw_civ_sites(anchor->civ.get(), rhi.get(), *anchor->field, to_render(player.position()),
                                camera_pos, view_projection, &items);
+    }
+    // T0021: city scenes through the city pipeline.
+    if (show_surface && city_active) {
+      inf::app::draw_city_upload(city_upload, camera_pos, view_projection, &items);
     }
     for (const auto& [addr, chunk] : loaded) {
       if (!show_surface) {
@@ -3096,6 +3161,30 @@ int main(int argc, char** argv) {
       // of altitude up (full sphere shading from one radius out).
       frame_params.normal_blend = static_cast<float>(
           std::clamp((altitude / anchor->radius - 0.25) / 0.75, 0.0, 1.0));
+      // T0021: the camera-relative view-projection of this and the last
+      // frame for the city pipeline (shadows, AO, temporal AA).
+      frame_params.have_view_proj = true;
+      std::memcpy(frame_params.view_proj, view_projection.m, sizeof(view_projection.m));
+      {
+        const RVec3 shift = camera_pos - city_prev_camera;
+        const Mat4 prev_rel = inf::render::mul(city_prev_view_proj, inf::render::translate(shift));
+        std::memcpy(frame_params.prev_view_proj, prev_rel.m, sizeof(prev_rel.m));
+        city_prev_view_proj = view_projection;
+        city_prev_camera = camera_pos;
+      }
+      // Night for lit rooms and lamps: the sun below the local horizon.
+      inf::render::Rhi::CitySettings city_settings;
+      const double sun_up = static_cast<double>(frame_params.sun_dir[0]) * frame_params.planet_up[0] +
+                            static_cast<double>(frame_params.sun_dir[1]) * frame_params.planet_up[1] +
+                            static_cast<double>(frame_params.sun_dir[2]) * frame_params.planet_up[2];
+      city_settings.night = static_cast<float>(std::clamp((0.03 - sun_up) / 0.12, 0.0, 1.0));
+      city_settings.debug_view = city_debug;
+      rhi->set_city_settings(city_settings);
+      if (city_active) {
+        std::vector<inf::render::Rhi::CityLight> lights;
+        inf::app::city_lights_for_frame(city_upload, camera_pos, city_settings.night > 0.05f, &lights);
+        rhi->set_city_lights(lights.data(), lights.size());
+      }
     }
     // Verification captures (--capture): grab the final rendered frame,
     // when the scene has had time to stream in.

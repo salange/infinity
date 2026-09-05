@@ -1,12 +1,12 @@
-#include "props.hpp"
+#include "city/props.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-#include "site.hpp"
-#include "towers.hpp"
+#include "city/flora.hpp"
+#include "city/towers.hpp"
 
-namespace cb {
+namespace inf::city {
 
 namespace {
 
@@ -561,4 +561,4 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
   }
 }
 
-}  // namespace cb
+}  // namespace inf::city

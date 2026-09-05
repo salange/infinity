@@ -40,6 +40,52 @@ class Rhi {
   std::uint32_t create_mesh_mat(const float* vertices, std::size_t float_count);
   void destroy_mesh(std::uint32_t mesh);
 
+  // --- city meshes (T0021) ---------------------------------------------
+  // Indexed meshes in the city vertex layout (68 bytes: position, normal,
+  // tangent + handedness, metric uv, material id, aux = facade-local
+  // metres, element random, baked occlusion), drawn by mode-8 items
+  // through the city PBR pipeline (engine/render/src/city_shader.hpp).
+  // Positions are relative to the item's origin (DrawItem::aux carries
+  // the camera-relative origin), like terrain chunks.
+  struct CityVertex {
+    float position[3];
+    float normal[3];
+    float tangent[4];
+    float uv[2];
+    std::uint32_t material;
+    float aux[4];
+  };
+  std::uint32_t create_city_mesh(const CityVertex* vertices, std::size_t vertex_count,
+                                 const std::uint32_t* indices, std::size_t index_count);
+  // The city material table (one entry per city material id): tint +
+  // alpha cutoff; roughness, metallic, emissive, normal strength; texture
+  // layers in the shared library (albedo, normal, -1 = none) + uv scale;
+  // flags + secondary tint; room size + lit probability for glass.
+  struct CityMaterial {
+    float base_color[4]{1.0f, 1.0f, 1.0f, 0.5f};
+    float params[4]{0.6f, 0.0f, 0.0f, 1.0f};
+    float tex[4]{-1.0f, -1.0f, -1.0f, 2.0f};
+    float misc[4]{0.0f, 1.0f, 1.0f, 1.0f};
+    float room[4]{4.5f, 3.6f, 6.0f, 0.55f};
+  };
+  void set_city_materials(const CityMaterial* materials, std::size_t count);
+  // Point lights for the frame (camera-relative positions; at most 64).
+  struct CityLight {
+    float pos_radius[4]{0.0f, 0.0f, 0.0f, 12.0f};
+    float color_int[4]{1.0f, 0.85f, 0.6f, 1.0f};
+  };
+  void set_city_lights(const CityLight* lights, std::size_t count);
+  struct CitySettings {
+    bool shadows{true};
+    bool ssao{true};
+    bool taa{true};
+    float ao_strength{2.0f};
+    float night{0.0f};        // 0 day .. 1 night (lit rooms, lamps, night-only emissive)
+    float ibl_intensity{0.35f};
+    int debug_view{0};        // 0 final; 1 albedo, 2 normal, 3 ao, 4 shadow, 5 roughness, 6 sun, 7 sky
+  };
+  void set_city_settings(const CitySettings& settings);
+
   // --- planet cube-map textures (T0016) --------------------------------
   // One height + material pair of 6-layer texture arrays per body, in
   // the engine cube-sphere frame (layer = face), sampled by the textured
@@ -97,6 +143,9 @@ class Rhi {
     // 3 = additive glow sprite (lens flare / veil / limb halo; extra.x
     // intensity, extra.y falloff, extra.z rim radius or 0 for a disc),
     // 4 = analytic sky dome (opaque fullscreen quad at far depth),
+    // 8 = city mesh (T0021: create_city_mesh, the city PBR pipeline;
+    //     aux.xyz = camera-relative origin, extra.xyz = origin modulo
+    //     the tile period for planar/triplanar texturing),
     // 6 = textured planet impostor: a unit sphere displaced in the
     //     vertex shader from the planet_texture height map and shaded
     //     from its material map (extra.x = height amplitude / radius,
@@ -107,6 +156,10 @@ class Rhi {
     // Mode 0 lit terrain: the four material ids the vertex weights refer
     // to (0 = unused; all zero = flat base albedo path).
     std::uint8_t material_palette[4]{0, 0, 0, 0};
+    // Mode 8 (city meshes): an index range of the mesh; index_count 0
+    // draws the whole mesh.
+    std::uint32_t first_index{0};
+    std::uint32_t index_count{0};
     // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
     // T0018: overlay items (HUD, map cards, reticles) are drawn AFTER the
@@ -149,6 +202,13 @@ class Rhi {
     float sea_radius_m{0.0f};
     // Per-planet palette variation applied to material albedos (-1..1).
     float palette_shift{0.0f};
+    // T0021: the camera-relative view-projection of this frame and of
+    // the previous frame (both unjittered, column-major) for the city
+    // pipeline's shadows, ambient occlusion and temporal anti-aliasing.
+    // have_view_proj false disables those (city meshes still render).
+    bool have_view_proj{false};
+    float view_proj[16]{};
+    float prev_view_proj[16]{};
   };
 
   // Clears, draws the items (sun-lit terrain, unlit overlays, star

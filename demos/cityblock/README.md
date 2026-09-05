@@ -174,6 +174,34 @@ Materials are three RGBA8 texture arrays (albedo sRGB, tangent normal,
 AO/roughness/height) with CPU mip chains; the sets are CC0 from ambientCG
 listed in `assets/manifest.json`, fetched by `tools/fetch-assets.py`.
 
+## Performance options
+
+Every option below is a runtime toggle (key) and a flag, so the game can
+expose them to the player later. Measured on the Radeon 780M at 1600×900,
+metropolis, all effects on unless noted:
+
+| Option | Key / flag | Effect |
+|---|---|---|
+| GPU occlusion culling | `F7` / `--no-occlusion` | depth pyramid from the prepass, compute cull of every draw range (one per building, tower level, block plate), one multi-draw-indirect; wins where buildings hide buildings (street level in dense districts), ~0.1 ms overhead elsewhere |
+| Half-resolution SSAO | `F8` / `--ssao-half` | ambient occlusion at half resolution, bilateral upsample; about −0.3 ms |
+| MSAA 4× ↔ off | `F9` / `--msaa 1` | with TAA on, MSAA can be dropped: −1.8 ms |
+| Half-rate far shadows | `F10` / `--shadow-half-rate` | the two far cascades refit on alternating frames: −0.7 to −1.2 ms |
+| Far-cascade shadow LOD | `F11` / `--shadow-far-lod` | the far cascade casts tower shells only and skips buildings beyond 350 m: −1.0 ms |
+
+Shadows are the largest single cost (4.5 ms of 16.5 at street level in a
+metropolis); SSAO 1.5 ms, MSAA 1.8 ms, TAA 0.5 ms. With every option on
+the same view renders in 12.2 ms; with shadows, SSAO, MSAA and TAA off it
+takes 6.4 ms, which is the fixed cost of sky, shading and post at 1600×900
+on this GPU.
+
+Always on: 32-byte packed vertices (octahedral normals and tangents,
+half-float UVs, 1 cm facade coordinates; 2.1× less vertex bandwidth,
+metropolis 35 → 22 ms), per-object LOD with a far shell level beyond
+1.2 km (2.1 M of 8.6 M resident triangles drawn from the air), frustum
+culling per block, per-cascade shadow culling in light space, shadows from
+the coarsest real level. The title bar shows triangles drawn vs resident,
+ranges drawn vs total and the GPU-occluded count.
+
 ## Measuring temporal artifacts
 
 `--sweep N [--sweep-step m] [--sweep-out name]` renders N frames while the

@@ -515,13 +515,13 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
       if (finest == 1) --mid_budget;
       auto register_lod = [&](std::uint32_t first, std::uint32_t end, int level, float height) {
         const Vec2 cw = to_world(b.centre);
-        const float max_d = level == 0 ? switch_hi : (level == 1 ? switch_mid : 1e30f);
+        const float max_d = level == 0 ? switch_hi : (level == 1 ? switch_mid : (level == 2 ? 1200.0f : 1e30f));
         sc.register_range(first, end, Vec3{cw.x, height * 0.5f, cw.y}, height * 0.5f + inrad, group, level, max_d);
       };
       if (R.groups && inrad > 40.0f && r.chance(0.25f)) {
         const float grot = rot + (r.chance(0.5f) ? 0.0f : kPi * 0.5f);
         const Rng gr = r.child(7);
-        for (int level = finest; level < 3; ++level) {
+        for (int level = finest; level < 4; ++level) {
           const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
           build_tower_group(sc, gr, to_world(b.centre), grot, 2 - level);
           register_lod(first, static_cast<std::uint32_t>(sc.opaque.indices.size()), level, 180.0f);
@@ -549,7 +549,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
         spec.rot += rot;
         const Rng tr = r.child(8);
         const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
-        for (int level = finest; level < 3; ++level) {
+        for (int level = finest; level < 4; ++level) {
           const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
           build_tower(sc, spec, to_world(b.centre), kCurb, tr, 2 - level);
           register_lod(first, static_cast<std::uint32_t>(sc.opaque.indices.size()), level, height);
@@ -588,15 +588,26 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
       const int std_detail = (size >= CitySize::Large && b.t > (size == CitySize::Metropolis ? 0.4f : 0.6f)) ? 0 : detail;
       StandardSpec s = random_standard(r, plan_area(fp_local), b.t);
       if (std_detail == 0) { s.pilasters = false; s.balconies = false; }
+      const std::uint32_t lot_first = static_cast<std::uint32_t>(sc.opaque.indices.size());
       build_standard(sc, s, fp, kCurb, r.child(static_cast<std::uint32_t>(st.lots)), std_detail);
-      ++st.lots;
-      ++st.standards;
       // occasional low wall around the lot
       if (r.chance(0.25f)) build_low_wall(sc, poly_world(lot), 0.8f, 0.5f, 0.3f, kCurb, M_CONCRETE_WHITE, 18.0f, r);
+      {
+        // one culling range per building: tight enough for occlusion culling to bite
+        Vec2 lo, hi;
+        plan_bounds(fp, &lo, &hi);
+        const float h = s.floor_h * static_cast<float>(s.storeys) + 3.0f;
+        const Vec2 cw = (lo + hi) * 0.5f;
+        const float rad = std::sqrt(0.25f * ((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y)) + 0.25f * h * h) + 3.0f;
+        sc.register_fine(lot_first, static_cast<std::uint32_t>(sc.opaque.indices.size()), Vec3{cw.x, kCurb + h * 0.5f, cw.y}, rad);
+      }
+      ++st.lots;
+      ++st.standards;
     }
     {
+      // the block as one coarse range (prepass, shadows); its buildings are the fine ranges above
       const Vec2 cw = to_world(b.centre);
-      sc.register_range(block_first, static_cast<std::uint32_t>(sc.opaque.indices.size()), Vec3{cw.x, 12.0f, cw.y}, inrad * 1.6f + 30.0f);
+      sc.register_range(block_first, static_cast<std::uint32_t>(sc.opaque.indices.size()), Vec3{cw.x, 12.0f, cw.y}, inrad * 1.6f + 30.0f, -1, 0, 1e30f, true);
     }
   }
 

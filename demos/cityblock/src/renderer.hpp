@@ -27,6 +27,11 @@ struct RenderSettings {
   float exposure_bias{0.0f};  // EV
   std::uint32_t shadow_size{2048};
   float jitter_x{0.0f}, jitter_y{0.0f};  // projection offset in pixels (analysis / TAA)
+  // Performance options (player-facing later):
+  bool ssao_half{false};          // SSAO at half resolution with bilateral upsampling
+  bool shadow_half_rate{false};   // the two far cascades update every other frame
+  bool occlusion{true};           // GPU occlusion culling against the current prepass depth pyramid
+  bool shadow_far_lod{false};     // far cascade: tower shells only, no building blocks beyond 350 m
 };
 
 class Renderer {
@@ -39,6 +44,11 @@ class Renderer {
   // point lights and lit interiors.
   void set_environment(const Environment* env, bool night);
   void resize(std::uint32_t w, std::uint32_t h);
+  // Re-creates size- and setting-dependent targets after msaa / ssao_half changed.
+  void apply_settings();
+  // Draw statistics of the last frame.
+  struct Stats { std::uint32_t ranges_total{0}, ranges_drawn{0}, ranges_occluded{0}; std::uint64_t indices_drawn{0}; };
+  const Stats& stats() const;
 
   // Renders into `target` (the acquired surface view or nullptr to skip the
   // final blit, e.g. for a capture-only frame).

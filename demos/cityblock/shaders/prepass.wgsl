@@ -11,10 +11,11 @@ struct VOut {
 };
 @vertex fn vs_main(in: VertexIn) -> VOut {
   var o: VOut;
+  let u = unpack_vertex(in);
   o.pos = frame.view_proj * vec4<f32>(in.position, 1.0);
-  o.vnormal = (frame.view * vec4<f32>(in.normal, 0.0)).xyz;
+  o.vnormal = (frame.view * vec4<f32>(u.normal, 0.0)).xyz;
   o.uv = in.uv;
-  o.flags = in.material;
+  o.flags = u.material;
   return o;
 }
 @fragment fn fs_main(in: VOut) -> @location(0) vec4<f32> {

@@ -28,14 +28,15 @@ struct VOut {
 
 @vertex fn vs_main(in: VertexIn) -> VOut {
   var o: VOut;
+  let u = unpack_vertex(in);
   let wp = vec4<f32>(in.position, 1.0);
   o.pos = frame.view_proj * wp;
   o.world = in.position;
-  o.normal = in.normal;
-  o.tangent = in.tangent;
+  o.normal = u.normal;
+  o.tangent = u.tangent;
   o.uv = in.uv;
-  o.material = in.material;
-  o.aux = in.aux;
+  o.material = u.material;
+  o.aux = u.aux;
   o.view_z = -(frame.view * wp).z;
   return o;
 }

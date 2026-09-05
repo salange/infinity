@@ -72,6 +72,7 @@ class Gpu {
   std::string adapter_name;
   std::uint64_t max_buffer_size{0};
   bool vsync{true};
+  bool multi_draw{false};  // WGPUNativeFeature_MultiDrawIndirect available
 
  private:
   void configure_surface();

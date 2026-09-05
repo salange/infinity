@@ -18,7 +18,7 @@ void wall_quad(Emit& e, Vec3 A, Vec3 B, Vec3 C, Vec3 D, Vec2 uvA, Vec2 uvB, Vec2
 int sides_for(int detail, int full) { return std::max(4, detail >= 2 ? full : (detail == 1 ? full * 2 / 3 : full / 2)); }
 
 std::vector<Vec2> base_plan(const TowerSpec& s, int detail) {
-  const int seg = detail >= 2 ? 96 : (detail == 1 ? 48 : 24);
+  const int seg = detail >= 2 ? 96 : (detail == 1 ? 48 : (detail == 0 ? 24 : 12));
   switch (s.plan) {
     case PlanKind::Superellipse: return plan_superellipse(s.a, s.b, s.exponent, seg, Vec2{0, 0}, 0.0f);
     case PlanKind::Circle: return plan_circle(s.a, seg);
@@ -472,6 +472,36 @@ void build_crown(Ctx& c, float top) {
 // ---- public ------------------------------------------------------------------
 
 void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rng rng, int detail) {
+  if (detail < 0) {
+    // Far shell: the glass volume as one quad per plan segment over the full
+    // height (the shader's room grid still paints the floors), a roof cap and
+    // a plain base ring. ~100 triangles; used beyond ~1.2 km.
+    Profile prof{&spec, base_plan(spec, 0), centre};
+    std::vector<Vec2> p0 = prof.at(0);
+    const float bh = static_cast<float>(spec.base_floors) * spec.floor_h;
+    const float y0 = base_y, y1 = base_y + bh + spec.floor_h * static_cast<float>(spec.floors);
+    Emit g(&sc.opaque, spec.glass);
+    g.element_random = spec.random;
+    const std::vector<Vec2> p1 = prof.at(spec.floors);
+    float u = 0.0f;
+    for (std::size_t i = 0; i < p0.size(); ++i) {
+      const std::size_t j = (i + 1) % p0.size();
+      const float w = length(p0[j] - p0[i]);
+      g.quad(P3(p0[j], y0), P3(p0[i], y0), P3(p1[i], y1), P3(p1[j], y1), QuadUV{{u + w, y0}, {u, y0}, {u, y1}, {u + w, y1}});
+      u += w;
+    }
+    Emit roof(&sc.opaque, M_ROOF);
+    roof.polygon(p1, y1, true);
+    if (spec.facade == FacadeKind::Diagrid || spec.facade == FacadeKind::XFrame || spec.facade == FacadeKind::HexLattice) {
+      // lattice towers read white from afar: a thin bright ring per lattice cell
+      Emit band(&sc.opaque, spec.member);
+      const float cell = static_cast<float>(std::max(1, spec.lattice_rows)) * spec.floor_h;
+      for (float y = y0 + bh; y < y1; y += cell * 2.0f) {
+        band.wall(plan_offset(prof.at(static_cast<int>((y - y0) / spec.floor_h)), 0.3f), y, y + 0.35f, true, true);
+      }
+    }
+    return;
+  }
   Ctx c{&sc, &sc.opaque, &spec, Profile{&spec, base_plan(spec, detail), centre}, rng, detail, base_y, base_y};
   const bool lattice_facade = spec.facade == FacadeKind::Diagrid || spec.facade == FacadeKind::XFrame || spec.facade == FacadeKind::HexLattice;
   // base
@@ -618,6 +648,7 @@ TowerSpec random_context_tower(Rng& rng, float half, int max_floors) {
 }
 
 void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail) {
+  const int tower_detail = detail;  // -1 passes through to the shells
   // Shared podium (2 floors) with 2–3 towers of one family.
   const float pod_hx = rng.range(38.0f, 48.0f), pod_hz = rng.range(26.0f, 34.0f);
   const std::vector<Vec2> podium = plan_transform(plan_rounded_rect(pod_hx, pod_hz, 8.0f, 6), centre, rot);
@@ -649,7 +680,7 @@ void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail) {
     else if (family < 0.65f) { s = spec_diagrid(half, floors); s.base = BaseKind::Lobby; s.base_floors = 1; s.crown = CrownKind::Parapet; }
     else { s = spec_finweave(half, floors); s.base = BaseKind::Lobby; s.base_floors = 1; }
     s.random = rng.next();
-    build_tower(sc, s, c, ph, rng.child(k), detail);
+    build_tower(sc, s, c, ph, rng.child(k), tower_detail);
   }
   if (detail >= 1) {
     Rng r2 = rng.child(99);

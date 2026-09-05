@@ -46,6 +46,10 @@ struct Args {
   bool no_ssao{false};
   bool no_shadows{false};
   bool no_taa{false};
+  bool ssao_half{false};
+  bool shadow_half_rate{false};
+  bool no_occlusion{false};
+  bool shadow_far_lod{false};
   int size{-1};
   bool showcase{false};
   int sweep{0};
@@ -88,6 +92,10 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--no-ssao")) a.no_ssao = true;
     else if (!std::strcmp(argv[i], "--no-shadows")) a.no_shadows = true;
     else if (!std::strcmp(argv[i], "--no-taa")) a.no_taa = true;
+    else if (!std::strcmp(argv[i], "--ssao-half")) a.ssao_half = true;
+    else if (!std::strcmp(argv[i], "--shadow-half-rate")) a.shadow_half_rate = true;
+    else if (!std::strcmp(argv[i], "--no-occlusion")) a.no_occlusion = true;
+    else if (!std::strcmp(argv[i], "--shadow-far-lod")) a.shadow_far_lod = true;
     else if (!std::strcmp(argv[i], "--rings")) a.rings = std::atoi(next("--rings"));
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
     else if (!std::strcmp(argv[i], "--showcase")) a.showcase = true;
@@ -204,6 +212,10 @@ int main(int argc, char** argv) {
   settings.ssao = !args.no_ssao;
   settings.shadows = !args.no_shadows;
   settings.taa = !args.no_taa;
+  settings.ssao_half = args.ssao_half;
+  settings.shadow_half_rate = args.shadow_half_rate;
+  settings.occlusion = !args.no_occlusion;
+  settings.shadow_far_lod = args.shadow_far_lod;
   cb::Renderer renderer;
   if (!renderer.init(&gpu, shaders, settings, &error)) {
     std::fprintf(stderr, "renderer init failed: %s\n", error.c_str());
@@ -328,9 +340,12 @@ int main(int argc, char** argv) {
     for (int i = 0; i < args.bench; ++i) renderer.render(cam, static_cast<float>(i) * 0.016f, nullptr);
     gpu.poll(true);
     const double b1 = elapsed();
-    std::printf("  bench: %d frames, %.2f ms/frame, %u triangles, %ux%u, msaa %u, ssao %d, shadows %d\n", args.bench,
-                (b1 - b0) * 1000.0 / args.bench, renderer.triangles(), gpu.width, gpu.height, settings.msaa,
-                settings.ssao ? 1 : 0, settings.shadows ? 1 : 0);
+    const cb::Renderer::Stats& rs = renderer.stats();
+    std::printf("  bench: %d frames, %.2f ms/frame, %u triangles resident, %.2f M drawn, %u/%u ranges (%u gpu-occluded), %ux%u, msaa %u, ssao %d%s, shadows %d%s%s, taa %d, occlusion %d\n",
+                args.bench, (b1 - b0) * 1000.0 / args.bench, renderer.triangles(), static_cast<double>(rs.indices_drawn) / 3.0e6,
+                rs.ranges_drawn, rs.ranges_total, rs.ranges_occluded, gpu.width, gpu.height, renderer.settings().msaa, settings.ssao ? 1 : 0,
+                settings.ssao_half ? " half" : "", settings.shadows ? 1 : 0, settings.shadow_half_rate ? " half-rate" : "",
+                settings.shadow_far_lod ? " far-lod" : "", settings.taa ? 1 : 0, settings.occlusion ? 1 : 0);
     renderer.shutdown();
     gpu.destroy();
     glfwDestroyWindow(window);
@@ -400,6 +415,18 @@ int main(int argc, char** argv) {
     if (pressed(GLFW_KEY_F4)) renderer.settings().bloom = !renderer.settings().bloom;
     if (pressed(GLFW_KEY_F5)) renderer.settings().fxaa = !renderer.settings().fxaa;
     if (pressed(GLFW_KEY_F6)) renderer.settings().taa = !renderer.settings().taa;
+    auto print_settings = [&] {
+      const cb::RenderSettings& st = renderer.settings();
+      std::printf("  settings: msaa %u, ssao %s%s, shadows %s%s%s, taa %s, occlusion %s, bloom %s, fxaa %s\n", st.msaa,
+                  st.ssao ? "on" : "off", st.ssao_half ? " (half res)" : "", st.shadows ? "on" : "off",
+                  st.shadow_half_rate ? " (far cascades half rate)" : "", st.shadow_far_lod ? " (far lod)" : "", st.taa ? "on" : "off", st.occlusion ? "on" : "off",
+                  st.bloom ? "on" : "off", st.fxaa ? "on" : "off");
+    };
+    if (pressed(GLFW_KEY_F7)) { renderer.settings().occlusion = !renderer.settings().occlusion; print_settings(); }
+    if (pressed(GLFW_KEY_F8)) { renderer.settings().ssao_half = !renderer.settings().ssao_half; renderer.apply_settings(); print_settings(); }
+    if (pressed(GLFW_KEY_F9)) { renderer.settings().msaa = renderer.settings().msaa > 1 ? 1 : 4; renderer.apply_settings(); print_settings(); }
+    if (pressed(GLFW_KEY_F10)) { renderer.settings().shadow_half_rate = !renderer.settings().shadow_half_rate; print_settings(); }
+    if (pressed(GLFW_KEY_F11)) { renderer.settings().shadow_far_lod = !renderer.settings().shadow_far_lod; print_settings(); }
     if (pressed(GLFW_KEY_EQUAL) || pressed(GLFW_KEY_KP_ADD)) renderer.settings().exposure_bias += 0.25f;
     if (pressed(GLFW_KEY_MINUS) || pressed(GLFW_KEY_KP_SUBTRACT)) renderer.settings().exposure_bias -= 0.25f;
     auto regenerate = [&] {
@@ -449,9 +476,11 @@ int main(int argc, char** argv) {
     ++frame;
     ++fps_n;
     if (now - fps_t > 2.0) {
-      char title[128];
-      std::snprintf(title, sizeof(title), "cityblock — %.0f fps, %u tris, speed %.0f m/s%s", fps_n / (now - fps_t),
-                    renderer.triangles(), cam.speed, night ? ", night" : "");
+      char title[256];
+      const cb::Renderer::Stats& rs = renderer.stats();
+      std::snprintf(title, sizeof(title), "cityblock — %.0f fps, %.1f M tris drawn of %.1f M, %u/%u ranges (%u occluded), %.0f m/s%s",
+                    fps_n / (now - fps_t), static_cast<double>(rs.indices_drawn) / 3.0e6, renderer.triangles() / 1.0e6, rs.ranges_drawn,
+                    rs.ranges_total, rs.ranges_occluded, cam.speed, night ? ", night" : "");
       glfwSetWindowTitle(window, title);
       fps_t = now;
       fps_n = 0;

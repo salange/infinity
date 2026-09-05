@@ -147,6 +147,9 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
     }
     WGPUDeviceDescriptor ddesc{};
     ddesc.requiredLimits = &required;  // ask for everything the adapter has
+    // wgpu-native does not gate MultiDrawIndexedIndirect behind a feature (only
+    // the *Count variants are); it is available on every backend it ships.
+    g->multi_draw = true;
     ddesc.uncapturedErrorCallbackInfo.callback = [](WGPUDevice const*, WGPUErrorType type,
                                                     WGPUStringView message, void*, void*) {
       std::fprintf(stderr, "[wgpu] error (%d): %.*s\n", static_cast<int>(type),

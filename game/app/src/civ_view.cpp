@@ -1,7 +1,8 @@
 #include "civ_view.hpp"
 
+#include "core/time/world_clock.hpp"
+
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -238,7 +239,8 @@ void draw_ecumenopolis(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField
     }
     // Mark, build (bounded by a time budget), evict.
     int built = 0;
-    const auto frame_start = std::chrono::steady_clock::now();
+    const core::LocalClock frame_clock;
+    const std::int64_t frame_start_ns = frame_clock.now().ns_since_epoch;
     for (const auto& want : wanted) {
       CivAnchor::TileEntry* entry = nullptr;
       for (auto& tile : civ->tiles) {
@@ -253,9 +255,8 @@ void draw_ecumenopolis(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField
       entry->wanted = true;
       if (entry->mesh != 0 && entry->detail == want.second) continue;
       if (entry->mesh == 0 || entry->detail != want.second) {
-        if (built > 0 &&
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_start).count() >
-                kTileBuildBudgetMs) {
+        if (built > 0 && static_cast<double>(frame_clock.now().ns_since_epoch - frame_start_ns) * 1e-6 >
+                             kTileBuildBudgetMs) {
           continue;
         }
         ++built;

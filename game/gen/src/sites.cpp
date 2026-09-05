@@ -26,6 +26,33 @@ std::uint64_t lot_hash(std::uint64_t lattice, std::int64_t bx, std::int64_t by, 
 }
 double hash01(std::uint64_t h) { return static_cast<double>(h >> 11U) * 0x1.0p-53; }
 
+// Deterministic trig on the det path (no libm in gen; ci grep gate).
+inline double cos_d(double a) {
+  det::Real s(0.0), c(0.0);
+  det::fast_sin_cos(det::Real(a), &s, &c);
+  return c.to_double();
+}
+inline double sin_d(double a) {
+  det::Real s(0.0), c(0.0);
+  det::fast_sin_cos(det::Real(a), &s, &c);
+  return s.to_double();
+}
+// atan2 by a rational approximation (max error ~1e-4 rad): cosmetic
+// orientations only, and only +-*/ so every platform agrees.
+inline double atan2_d(double y, double x) {
+  const double ax = x < 0.0 ? -x : x;
+  const double ay = y < 0.0 ? -y : y;
+  const double mx = ax > ay ? ax : ay;
+  if (mx <= 0.0) return 0.0;
+  const double mn = ax > ay ? ay : ax;
+  const double a = mn / mx;
+  const double s = a * a;
+  double r = ((-0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a;
+  if (ay > ax) r = 1.57079637 - r;
+  if (x < 0.0) r = 3.14159274 - r;
+  return y < 0.0 ? -r : r;
+}
+
 }  // namespace
 
 void SiteFrame::to_local(const Dir3& dir, double* x, double* y) const {
@@ -245,7 +272,7 @@ Site SiteField::build_site(const ProvinceSite& province, const SettlementPlan& p
     // --- lattice parameters by family. Fixed per site (never by tier):
     // the block lattice must not move when the site grows a ring. Lot
     // size scales with the RING a block lies in (lots_in_block), so the
-    // old town keeps its small lots and the new rings build bigger.
+    // old town keeps its small lots and the outer rings build bigger.
     switch (family) {
       case LayoutFamily::Grid: site.block_m = 100.0; site.street_m = 14.0; site.lot_m = 22.0; site.density = 0.85; break;
       case LayoutFamily::Radial: site.block_m = 90.0; site.street_m = 12.0; site.lot_m = 20.0; site.density = 0.85; break;
@@ -306,8 +333,8 @@ void SiteField::build_arterials(Site* site) const {
     site->arterials.push_back(std::move(a));
   };
   const double R = site->radius_m;
-  const double ca = std::cos(site->axis_rad);
-  const double sa = std::sin(site->axis_rad);
+  const double ca = cos_d(site->axis_rad);
+  const double sa = sin_d(site->axis_rad);
   const auto rot = [&](double x, double y) {
     return std::pair<double, double>{x * ca - y * sa, x * sa + y * ca};
   };
@@ -322,7 +349,7 @@ void SiteField::build_arterials(Site* site) const {
       const int spokes = site->tier >= 5 ? 6 : 4;
       for (int i = 0; i < spokes; ++i) {
         const double az = site->axis_rad + i * 6.283185307179586 / spokes;
-        add({{0.0, 0.0}, {std::cos(az) * R, std::sin(az) * R}}, w);
+        add({{0.0, 0.0}, {cos_d(az) * R, sin_d(az) * R}}, w);
       }
       break;
     }
@@ -340,8 +367,8 @@ void SiteField::build_arterials(Site* site) const {
         double y = 0.0;
         for (int s = 1; s <= 4; ++s) {
           az += (u01(d[s % 4]) - 0.5) * 0.9;
-          x += std::cos(az) * R / 4.0;
-          y += std::sin(az) * R / 4.0;
+          x += cos_d(az) * R / 4.0;
+          y += sin_d(az) * R / 4.0;
           pts.emplace_back(x, y);
         }
         add(pts, w * 0.8);
@@ -351,7 +378,7 @@ void SiteField::build_arterials(Site* site) const {
     case LayoutFamily::Crystal: {
       for (int i = 0; i < 5; ++i) {
         const double az = site->axis_rad + i * 1.2566370614359172;
-        add({{0.0, 0.0}, {std::cos(az) * R, std::sin(az) * R}}, 4.0);
+        add({{0.0, 0.0}, {cos_d(az) * R, sin_d(az) * R}}, 4.0);
       }
       break;
     }
@@ -381,8 +408,8 @@ double SiteField::plateau_m(const Site& site, double x, double y) const {
   // Terraces: steps along the downhill axis (perpendicular to the site
   // axis), each kTerraceStepM high, following the mean slope through
   // the centre. The datum sits at the centre; steps rise uphill.
-  const double ca = std::cos(site.axis_rad);
-  const double sa = std::sin(site.axis_rad);
+  const double ca = cos_d(site.axis_rad);
+  const double sa = sin_d(site.axis_rad);
   const double across = -x * sa + y * ca;  // signed distance along the downhill axis (positive = uphill)
   const double run = 60.0;                 // metres per terrace
   const double step = std::floor(across / run + 0.5);
@@ -446,8 +473,8 @@ void SiteField::lots_in_block(const Site& site, int bx, int by, std::vector<Lot>
       double wy = ly;
       if (site.family == LayoutFamily::Grid || site.family == LayoutFamily::Linear ||
           site.family == LayoutFamily::Terraced || site.family == LayoutFamily::Lattice) {
-        const double ca = std::cos(site.axis_rad);
-        const double sa = std::sin(site.axis_rad);
+        const double ca = cos_d(site.axis_rad);
+        const double sa = sin_d(site.axis_rad);
         wx = lx * ca - ly * sa;
         wy = lx * sa + ly * ca;
       }
@@ -455,7 +482,7 @@ void SiteField::lots_in_block(const Site& site, int bx, int by, std::vector<Lot>
       if (dist > site.radius_m) {
         continue;
       }
-      if (site.family == LayoutFamily::Linear && std::fabs(-wx * std::sin(site.axis_rad) + wy * std::cos(site.axis_rad)) > 0.35 * site.radius_m) {
+      if (site.family == LayoutFamily::Linear && std::fabs(-wx * sin_d(site.axis_rad) + wy * cos_d(site.axis_rad)) > 0.35 * site.radius_m) {
         continue;  // a ribbon along the axis
       }
       // Arterial clearance.
@@ -517,8 +544,8 @@ void SiteField::lots_in_block(const Site& site, int bx, int by, std::vector<Lot>
       const double rotation = site.family == LayoutFamily::Organic
                                   ? (hash01(lot_hash(lattice, bx, by, index, 0x57)) - 0.5) * 0.6 + site.axis_rad
                                   : site.axis_rad;
-      const double cr = std::cos(rotation);
-      const double sr = std::sin(rotation);
+      const double cr = cos_d(rotation);
+      const double sr = sin_d(rotation);
       const auto put = [&](int k, double px, double py) {
         lot.footprint[k][0] = static_cast<float>(wx + px * cr - py * sr);
         lot.footprint[k][1] = static_cast<float>(wy + px * sr + py * cr);
@@ -527,13 +554,13 @@ void SiteField::lots_in_block(const Site& site, int bx, int by, std::vector<Lot>
         lot.vertex_count = 8;
         for (int k = 0; k < 8; ++k) {
           const double az = k * 0.7853981633974483;
-          put(k, std::cos(az) * 0.5 * size, std::sin(az) * 0.5 * size);
+          put(k, cos_d(az) * 0.5 * size, sin_d(az) * 0.5 * size);
         }
       } else if (site.family == LayoutFamily::Lattice) {
         lot.vertex_count = 6;
         for (int k = 0; k < 6; ++k) {
           const double az = k * 1.0471975511965976;
-          put(k, std::cos(az) * 0.5 * size, std::sin(az) * 0.5 * size);
+          put(k, cos_d(az) * 0.5 * size, sin_d(az) * 0.5 * size);
         }
       } else {
         lot.vertex_count = 4;
@@ -549,11 +576,11 @@ void SiteField::lots_in_block(const Site& site, int bx, int by, std::vector<Lot>
       // and ring — every quantity reads the ring that created the lot,
       // never the site's current tier, so growth is additive.
       const double rel = r_out > 0.0 ? dist / r_out : 0.0;
-      const double sector = std::atan2(wy, wx) - site.axis_rad;
+      const double sector = atan2_d(wy, wx) - site.axis_rad;
       const double use_roll = hash01(lot_hash(lattice, bx, by, index, 0x58));
       if (rel < 0.12 && ring >= 3 && use_roll < 0.6) {
         lot.usage = LotUsage::Civic;
-      } else if (rel > 0.55 && rel < 0.85 && std::cos(sector - 2.3) > 0.5 && use_roll < 0.7) {
+      } else if (rel > 0.55 && rel < 0.85 && cos_d(sector - 2.3) > 0.5 && use_roll < 0.7) {
         lot.usage = LotUsage::Industrial;
       } else if (rel > 0.8 && ring <= 4 && use_roll < 0.5 &&
                  (site.family == LayoutFamily::Organic || site.family == LayoutFamily::Grid ||

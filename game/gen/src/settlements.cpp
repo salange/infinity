@@ -62,7 +62,6 @@ double settled_fraction(int level, double progress) {
 SettlementPlanner::SettlementPlanner(const core::Key& body_entity_key, const TerrainField& field,
                                      const RaceParams& race, bool domed)
     : key_(core::derive_named(body_entity_key, name::SettlementsV1)),
-      field_(field),
       race_(race),
       domed_(domed),
       n_(field.provinces().cells_per_face()),

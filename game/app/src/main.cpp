@@ -3105,13 +3105,13 @@ int main(int argc, char** argv) {
     // Player-state sidecar for active recordings (frame-by-frame
     // correlation when analyzing a dumped sequence).
     if (rhi->recording_active() && !rec_dir_current.empty()) {
-      std::FILE* meta = std::fopen((rec_dir_current + "/meta.csv").c_str(), "a");
+      const std::unique_ptr<std::FILE, int (*)(std::FILE*)> meta(
+          std::fopen((rec_dir_current + "/meta.csv").c_str(), "a"), &std::fclose);
       if (meta != nullptr) {
         const SVec3 meta_pos = player.position();
-        std::fprintf(meta, "%.4f,%.1f,%.1f,%.1f,%.2f,%.1f,%d\n", frame_params.time_s,
+        std::fprintf(meta.get(), "%.4f,%.1f,%.1f,%.1f,%.2f,%.1f,%d\n", frame_params.time_s,
                      meta_pos.x, meta_pos.y, meta_pos.z, player.speed(), player.altitude(),
                      static_cast<int>(player.mode()));
-        std::fclose(meta);
       }
     }
     rhi->render_frame(frame_params, items.data(), items.size());

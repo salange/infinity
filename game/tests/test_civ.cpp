@@ -1071,3 +1071,153 @@ TEST_CASE("ecumenopolis/v1: plates over terrain, block determinism, tile cost (W
     }
   }
 }
+
+TEST_CASE("civilization: time sweep, two-client agreement, performance acceptance (WP8)") {
+  const core::Seed128 seed{0, 0x83};
+  const core::Key galaxy_key = gen::home_galaxy_key(seed);
+  const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
+  const gen::CivilizationParams civ = gen::derive_civilization(galaxy_key, galaxy, true);
+  gen::RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(gen::human_race(galaxy_key, galaxy));
+  const gen::ColonyResolver resolver(registry);
+  const auto at_years = [](double years) {
+    return core::WorldTime::from_ns(gen::kLaunchReference.ns_since_epoch + gen::real_years_to_ns(years));
+  };
+  const double sweep[5] = {-5.0, 0.0, 7.0 / 365.25, 3.0, 10.0};
+  // --- the human home system: levels and visible lots never decrease ---
+  {
+    const gen::SystemCivContext context = gen::gather_system_context(seed, registry, gen::SystemCell{}, false);
+    const gen::StarSystemParams system = gen::generate_system(context.system_key);
+    std::vector<int> last_level(context.bodies.size(), 0);
+    std::uint32_t last_lots = 0;
+    for (const double years : sweep) {
+      const core::WorldTime t = at_years(years);
+      const gen::Owner owner = resolver.owner(context, t);
+      REQUIRE(owner.owned);
+      const auto states = resolver.system_states(context, owner, t);
+      for (std::size_t i = 0; i < states.size(); ++i) {
+        CAPTURE(years);
+        CHECK(states[i].level >= last_level[i]);
+        last_level[i] = states[i].level;
+        if (states[i].is_home && states[i].settled) {
+          const gen::BodyCivInputs& body = context.bodies[i];
+          const gen::BodyKeys keys = gen::body_keys_in_system(context.system_key, body.slot);
+          const gen::PlanetParams params = gen::planet_params_for_slot(system, body.slot, gen::BodyHandle{keys.entity, keys.params});
+          gen::TerrainField field(keys.entity, params);
+          const gen::Race& race = resolver.candidates(context.position_m)[owner.candidate];
+          const gen::SettlementPlanner planner(keys.entity, field, race.params, states[i].domed);
+          const gen::SettlementPlan plan = planner.plan(states[i], race.factions);
+          const gen::SiteField sites(keys.entity, field, plan, race.params, race.factions, states[i]);
+          // The best town's visible lots (the home is pinned at its level,
+          // so the count is constant; it must never drop).
+          std::uint32_t lots = 0;
+          for (const gen::Site& site : sites.sites()) {
+            if (site.tier == static_cast<int>(gen::SettlementTier::Town)) {
+              lots = sites.visible_count(site, site.progress);
+              break;
+            }
+          }
+          CHECK(lots >= last_lots);
+          last_lots = lots;
+        }
+      }
+    }
+  }
+  // --- a Precursor body: ruined after the race's end, level frozen ---
+  {
+    const gen::SystemCell precursor{3224, 3979, 4086, 13};
+    const gen::SystemCivContext context = gen::gather_system_context(seed, registry, precursor, true);
+    const core::WorldTime t = at_years(0.0);
+    const gen::Owner owner = resolver.owner(context, t);
+    REQUIRE(owner.owned);
+    const auto now = resolver.system_states(context, owner, t);
+    const auto later = resolver.system_states(context, owner, at_years(10.0));
+    int ruined = 0;
+    for (std::size_t i = 0; i < now.size(); ++i) {
+      if (!now[i].settled) continue;
+      CHECK(now[i].ruined);
+      CHECK(later[i].ruined);
+      CHECK(later[i].level == now[i].level);
+      ++ruined;
+    }
+    CHECK(ruined > 0);
+  }
+  // --- two clients a second apart: identical states away from a flip ---
+  {
+    const gen::SystemCivContext context = gen::gather_system_context(seed, registry, gen::SystemCell{}, false);
+    const core::WorldTime a = at_years(1.0);
+    const core::WorldTime b = core::WorldTime::from_ns(a.ns_since_epoch + 1000000000LL);
+    const gen::Owner oa = resolver.owner(context, a);
+    const gen::Owner ob = resolver.owner(context, b);
+    CHECK(oa.owned == ob.owned);
+    CHECK(oa.race_key == ob.race_key);
+    const auto sa = resolver.system_states(context, oa, a);
+    const auto sb = resolver.system_states(context, ob, b);
+    for (std::size_t i = 0; i < sa.size(); ++i) {
+      CHECK(sa[i].settled == sb[i].settled);
+      CHECK(sa[i].faction_index == sb[i].faction_index);
+      CHECK(sa[i].domed == sb[i].domed);
+      CHECK(std::abs(sa[i].level - sb[i].level) <= 1);  // only a flip within the second may differ
+    }
+  }
+  // --- performance acceptance (brief section 10; generous for CI noise) ---
+  {
+    const gen::SystemCivContext context = gen::gather_system_context(seed, registry, gen::SystemCell{}, false);
+    const core::WorldTime t = at_years(0.0);
+    const gen::Owner owner = resolver.owner(context, t);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < 2000; ++k) {
+      const gen::Owner o = resolver.owner(context, core::WorldTime::from_ns(t.ns_since_epoch + k));
+      CHECK(o.owned);
+    }
+    const double owner_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / 2000.0;
+    t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < 500; ++k) {
+      const auto states = resolver.system_states(context, owner, core::WorldTime::from_ns(t.ns_since_epoch + k));
+      CHECK(!states.empty());
+    }
+    const double states_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / 500.0;
+    CHECK(owner_us < 50.0);
+    CHECK(states_us < 20.0 * static_cast<double>(context.bodies.size()) * 5.0);
+    const gen::StarSystemParams system = gen::generate_system(context.system_key);
+    const auto states = resolver.system_states(context, owner, t);
+    for (std::size_t i = 0; i < states.size(); ++i) {
+      if (!states[i].is_home) continue;
+      const gen::BodyCivInputs& body = context.bodies[i];
+      const gen::BodyKeys keys = gen::body_keys_in_system(context.system_key, body.slot);
+      const gen::PlanetParams params = gen::planet_params_for_slot(system, body.slot, gen::BodyHandle{keys.entity, keys.params});
+      gen::TerrainField field(keys.entity, params);
+      const gen::Race& race = resolver.candidates(context.position_m)[owner.candidate];
+      const gen::SettlementPlanner planner(keys.entity, field, race.params, states[i].domed);
+      t0 = std::chrono::steady_clock::now();
+      const gen::SettlementPlan plan = planner.plan(states[i], race.factions);
+      const double plan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      CHECK(plan_ms < 25.0);
+      t0 = std::chrono::steady_clock::now();
+      const gen::SiteField sites(keys.entity, field, plan, race.params, race.factions, states[i]);
+      const double sites_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      CHECK(sites_ms / std::max<double>(1.0, static_cast<double>(sites.sites().size())) < 5.0);  // per city layout
+      // Terrain sample cost outside every site bound is unchanged by the
+      // modifier: the bound test is the only extra work.
+      const gen::CivilField civil(sites, field);
+      std::vector<gen::Dir3> outside;
+      for (int k = 0; k < 4000 && outside.size() < 200; ++k) {
+        const double a = 0.0031 * k;
+        const double b = 1.4 * std::sin(0.37 * k);
+        const gen::Dir3 d = gen::normalize(gen::Dir3{det::Real(std::cos(a) * std::cos(b)), det::Real(std::sin(a) * std::cos(b)), det::Real(std::sin(b))});
+        if (!civil.near(d)) outside.push_back(d);
+      }
+      REQUIRE(outside.size() >= 50);
+      double acc = 0.0;
+      t0 = std::chrono::steady_clock::now();
+      for (int rep = 0; rep < 5; ++rep) for (const gen::Dir3& d : outside) acc += field.elevation_m(d).to_double();
+      const double plain_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+      field.set_height_modifier(&civil);
+      t0 = std::chrono::steady_clock::now();
+      for (int rep = 0; rep < 5; ++rep) for (const gen::Dir3& d : outside) acc += field.elevation_m(d).to_double();
+      const double modified_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+      CHECK(acc != 0.0);
+      CHECK(modified_us < 1.5 * plain_us + 2000.0);
+    }
+  }
+}

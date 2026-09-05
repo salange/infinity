@@ -1368,21 +1368,20 @@ struct Rhi::Impl {
 
   void write_ppm(const std::string& path, std::uint32_t w, std::uint32_t h,
                  const std::uint8_t* rgb) {
-    std::FILE* file = std::fopen(path.c_str(), "wb");
+    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(std::fopen(path.c_str(), "wb"), &std::fclose);
     if (file == nullptr) {
       std::fprintf(stderr, "recorder: FAILED to open %s\n", path.c_str());
       return;
     }
-    std::fprintf(file, "P6\n%u %u\n255\n", w, h);
-    std::fwrite(rgb, 1, static_cast<std::size_t>(w) * h * 3, file);
-    std::fclose(file);
+    std::fprintf(file.get(), "P6\n%u %u\n255\n", w, h);
+    std::fwrite(rgb, 1, static_cast<std::size_t>(w) * h * 3, file.get());
   }
 
   void append_time_index(float time_s) {
-    std::FILE* file = std::fopen((rec_dir + "/times.txt").c_str(), "a");
+    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(
+        std::fopen((rec_dir + "/times.txt").c_str(), "a"), &std::fclose);
     if (file != nullptr) {
-      std::fprintf(file, "seq-%04d %.4f\n", rec_seq_index, time_s);
-      std::fclose(file);
+      std::fprintf(file.get(), "seq-%04d %.4f\n", rec_seq_index, time_s);
     }
   }
 
@@ -2543,9 +2542,9 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
           wgpuBufferGetConstMappedRange(read_buffer, 0, read_desc.size));
       const bool bgra = impl_->format == WGPUTextureFormat_BGRA8Unorm ||
                         impl_->format == WGPUTextureFormat_BGRA8UnormSrgb;
-      std::FILE* file = std::fopen(path.c_str(), "wb");
+      const std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(std::fopen(path.c_str(), "wb"), &std::fclose);
       if (file != nullptr && data != nullptr) {
-        std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+        std::fprintf(file.get(), "P6\n%u %u\n255\n", width, height);
         std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3);
         for (std::uint32_t y = 0; y < height; ++y) {
           const std::uint8_t* src_row = data + static_cast<std::size_t>(y) * bytes_per_row;
@@ -2554,17 +2553,13 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
             row[x * 3 + 1] = src_row[x * 4 + 1];
             row[x * 3 + 2] = src_row[x * 4 + (bgra ? 0 : 2)];
           }
-          std::fwrite(row.data(), 1, row.size(), file);
+          std::fwrite(row.data(), 1, row.size(), file.get());
         }
-        std::fclose(file);
         std::printf("capture: wrote %ux%u to %s (avg_lum %.5f exposure %.2f scotopic %.2f)\n",
                     width, height, path.c_str(), impl_->avg_luminance, impl_->exposure,
                     impl_->scotopic);
       } else {
         std::fprintf(stderr, "capture: FAILED to open %s\n", path.c_str());
-        if (file != nullptr) {
-          std::fclose(file);
-        }
       }
       wgpuBufferUnmap(read_buffer);
     } else {

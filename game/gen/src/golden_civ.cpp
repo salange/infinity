@@ -12,6 +12,7 @@
 #include "gen/sites.hpp"
 #include "gen/civil.hpp"
 #include "gen/buildings.hpp"
+#include "core/det/trig.hpp"
 #include "gen/ecumenopolis.hpp"
 #include "gen/terrain.hpp"
 #include "gen/universe.hpp"
@@ -19,6 +20,18 @@
 namespace inf::gen {
 
 namespace {
+
+// Deterministic trig on the det path (no libm in gen; ci grep gate).
+inline double cos_d(double a) {
+  det::Real s(0.0), c(0.0);
+  det::fast_sin_cos(det::Real(a), &s, &c);
+  return c.to_double();
+}
+inline double sin_d(double a) {
+  det::Real s(0.0), c(0.0);
+  det::fast_sin_cos(det::Real(a), &s, &c);
+  return s.to_double();
+}
 
 void feed_double(core::GoldenHash& hash, double value) {
   hash.feed(std::bit_cast<std::uint64_t>(value));
@@ -329,7 +342,7 @@ std::uint64_t hash_ecumenopolis_script(const core::Seed128& seed) {
       for (int k = 0; k < 12; ++k) {
         const double a = 0.5236 * k + 0.1;
         const double b = 0.37 * k - 1.2;
-        const Dir3 d = normalize(Dir3{det::Real(std::cos(a) * std::cos(b)), det::Real(std::sin(a) * std::cos(b)), det::Real(std::sin(b))});
+        const Dir3 d = normalize(Dir3{det::Real(cos_d(a) * cos_d(b)), det::Real(sin_d(a) * cos_d(b)), det::Real(sin_d(b))});
         feed_double(hash, ecum.plate_m(d));
         feed_double(hash, ecum.hole_factor(d));
         const EcumenopolisField::District district = ecum.district(d);

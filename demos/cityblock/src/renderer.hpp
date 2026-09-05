@@ -21,9 +21,12 @@ struct RenderSettings {
   bool shadows{true};
   bool bloom{true};
   bool fxaa{true};
-  int debug_view{0};  // 0 final, 1 albedo, 2 normals, 3 ao, 4 shadow cascades, 5 roughness
+  bool taa{true};   // temporal AA (jittered projection + depth reprojection)
+  int debug_view{0};  // 0 final, 1 albedo, 2 normals, 3 ao, 4 shadow cascades, 5 roughness, 6-9 lighting terms,
+                      // 10 raw ssao, 11 prepass normals, 12 material id (linear, no tonemap)
   float exposure_bias{0.0f};  // EV
   std::uint32_t shadow_size{2048};
+  float jitter_x{0.0f}, jitter_y{0.0f};  // projection offset in pixels (analysis / TAA)
 };
 
 class Renderer {
@@ -41,6 +44,12 @@ class Renderer {
   // final blit, e.g. for a capture-only frame).
   void render(const Camera& camera, float time_s, WGPUTextureView target);
   bool capture_png(const std::string& path);
+  // Reads back the final LDR frame (RGBA8, sRGB-encoded) into rgba.
+  bool read_frame(std::vector<std::uint8_t>* rgba, std::uint32_t* w, std::uint32_t* h);
+  // Reads back the 1x depth buffer (0..1, near = 0) and the unjittered view-projection.
+  bool read_depth(std::vector<float>* depth, std::uint32_t* w, std::uint32_t* h);
+  const Mat4& last_view_proj() const;
+  void reset_history();
   RenderSettings& settings() { return settings_; }
   std::uint32_t triangles() const { return triangles_; }
 

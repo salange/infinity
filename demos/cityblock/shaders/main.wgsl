@@ -217,6 +217,12 @@ struct FsOut { @location(0) color: vec4<f32> };
   }
   if (m.tex.y >= 0.0) {
     let nt = textureSample(normal_arr, mat_samp, uv, i32(m.tex.y)).xyz * 2.0 - 1.0;
+    // Toksvig: a mip-averaged normal is shorter than one; the lost length
+    // is the normal variance under this pixel — widen the specular lobe by
+    // it instead of letting a sub-pixel bump field sparkle.
+    let len = clamp(length(nt), 0.05, 1.0);
+    let var_n = (1.0 - len) / len;
+    roughness = clamp(sqrt(roughness * roughness + 0.6 * var_n), roughness, 1.0);
     let ns = m.params.w;
     N = normalize(T * (nt.x * ns) + B * (nt.y * ns) + N * nt.z);
   }
@@ -283,15 +289,23 @@ struct FsOut { @location(0) color: vec4<f32> };
     let light_far = mix(vec3<f32>(1.0, 0.86, 0.68), vec3<f32>(0.78, 0.88, 1.0), step(0.5, hc.y));
     let frac_y = fract(in.aux.y / m.room.y);
     let grad = 0.55 + 0.75 * frac_y * frac_y;  // ceilings brighter than floors
-    let mean_room = vec3<f32>(0.42, 0.40, 0.37) * light_far * mix(0.12, 0.7, lit_far) * grad;
+    let room_px_fade = clamp((px_per_room - 1.5) / 4.0, 0.0, 1.0);
+    let lit_expect = m.room.w * select(0.28, 0.62, night > 0.5) * 0.5;
+    let lit_eff = mix(lit_expect, lit_far, room_px_fade);
+    let mean_room = vec3<f32>(0.42, 0.40, 0.37) * light_far * mix(0.12, 0.7, lit_eff) * grad;
     inside = mix(mean_room, inside, detail);
     // By day a room is dark next to the sky; at night it is the light source.
     inside = inside * frame.params.x * mix(0.045, 0.6, night);
-    // Mullion grid at the room boundaries (thin dark frame lines).
+    // Mullion grid at the room boundaries (thin dark frame lines). When a
+    // room spans only a few pixels the lines beat against the pixel grid
+    // (moire), so their contrast fades into the uniform darkening their
+    // average coverage would produce.
     let gx = abs(fract(in.aux.x / m.room.x + 0.5) - 0.5) * m.room.x;
     let gy = abs(fract(in.aux.y / m.room.y + 0.5) - 0.5) * m.room.y;
     let line_w = max(0.04, fw.x * 0.9);
-    let frame_line = 1.0 - min(1.0, min(gx, gy) / line_w);
+    let line_fade = clamp((px_per_room - 5.0) / 14.0, 0.0, 1.0);
+    let avg_cover = clamp(2.0 * line_w / m.room.x + 2.0 * line_w / m.room.y, 0.0, 0.5);
+    let frame_line = mix(avg_cover, 1.0 - min(1.0, min(gx, gy) / line_w), line_fade);
     let tint = m.misc.yzw;
     color = refl * brdf + sun * spec_sun * shadow + inside * (1.0 - brdf) * tint;
     color = mix(color, vec3<f32>(0.02, 0.02, 0.022) * (sh_irradiance(N) / PI + sun * ndl * shadow / PI), frame_line * 0.85);
@@ -369,6 +383,7 @@ struct FsOut { @location(0) color: vec4<f32> };
   else if (dbg == 7) { color = dbg_ibl_d; }
   else if (dbg == 8) { color = dbg_ibl_s; }
   else if (dbg == 9) { color = dbg_spec; }
+  else if (dbg == 12) { color = vec3<f32>(f32(in.material) / 255.0, 0.0, 0.0); }
   var o: FsOut;
   o.color = vec4<f32>(color, alpha);
   return o;

@@ -58,6 +58,8 @@ class Gpu {
 
   // Synchronous readback of an RGBA8 texture (mip 0, layer 0) into rgba.
   bool read_rgba8(const Texture& tex, std::vector<std::uint8_t>* rgba);
+  // Synchronous readback of a Depth32Float texture.
+  bool read_depth32(const Texture& tex, std::vector<float>* depth);
 
   WGPUInstance instance{nullptr};
   WGPUSurface surface{nullptr};

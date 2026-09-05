@@ -144,12 +144,32 @@ outward wall normal is the right-hand normal of each edge.
   blinds, distance LOD, mullion grid), reflections from the environment,
 - up to 64 point lights (street lamps, night only), emissive materials,
 - alpha-to-coverage foliage with canopy-space normals,
+- temporal anti-aliasing: Halton-jittered projection, exact depth
+  reprojection (static world), 3×3 variance clipping, 0.92 history weight,
+  on top of MSAA — this is what removes the shimmer and moiré of sub-pixel
+  fins, tubes and window frames when the camera moves,
+- per-object draw ranges: three detail levels per tower chosen by camera
+  distance (200 m / 500 m), frustum culling per building block, shadows
+  from the coarse level,
 - bloom (13-tap downsample, tent upsample), ACES tonemap, FXAA,
 - day/night switch with automatic exposure from the environment.
 
 Materials are three RGBA8 texture arrays (albedo sRGB, tangent normal,
 AO/roughness/height) with CPU mip chains; the sets are CC0 from ambientCG
 listed in `assets/manifest.json`, fetched by `tools/fetch-assets.py`.
+
+## Measuring temporal artifacts
+
+`--sweep N [--sweep-step m] [--sweep-out name]` renders N frames while the
+camera slides sideways by `step` per frame, reads back each final frame
+and the depth buffer, reprojects every pixel into the previous frame
+(exact for a static world) and subtracts the change a band-limited image
+would show (local gradient × screen motion). What remains is temporal
+aliasing — shimmer, moiré, crawling edges. It prints the mean residual,
+the ten materials that contribute most (via the material-id debug view),
+and writes `name-heat.png` (amplified residual, dark = stable) and
+`name-frame.png`. `--no-taa` measures the MSAA-only path for comparison.
+`--bench N` renders N offscreen frames and prints ms/frame.
 
 ## Layout
 

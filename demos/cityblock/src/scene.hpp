@@ -42,10 +42,28 @@ struct PointLight {
   float intensity{1.0f};
 };
 
+// A contiguous index range of the opaque mesh with bounds, optionally one of
+// several detail levels of the same object (the renderer picks by camera
+// distance and culls by the frustum).
+struct DrawRange {
+  std::uint32_t first{0}, count{0};
+  Vec3 centre;
+  float radius{0.0f};          // 0 = unbounded (never culled)
+  int lod_group{-1};           // objects sharing a group are alternatives
+  int lod_level{0};            // 0 = finest
+  float lod_max_distance{1e30f};  // draw this level while camera distance < this
+};
+
 struct Scene {
   std::vector<MaterialDesc> materials;
   Mesh opaque;
   Mesh foliage;
+  std::vector<DrawRange> draws;  // finalised by finalize_draws(); unregistered geometry becomes static ranges
+  int lod_groups{0};
+  // Registers [first, end) of the opaque index buffer as one drawable.
+  void register_range(std::uint32_t first, std::uint32_t end, Vec3 centre, float radius, int lod_group = -1,
+                      int lod_level = 0, float lod_max_distance = 1e30f);
+  void finalize_draws();
   std::vector<PointLight> lights;  // on at night
   Vec3 camera_position{0, 40, 200};
   Vec3 camera_target{0, 60, 0};

@@ -464,6 +464,55 @@ bool Gpu::read_rgba8(const Texture& tex, std::vector<std::uint8_t>* rgba) {
   return true;
 }
 
+bool Gpu::read_depth32(const Texture& tex, std::vector<float>* depth) {
+  const std::uint32_t bpr = (tex.width * 4 + 255) & ~255u;
+  const std::uint64_t size = static_cast<std::uint64_t>(bpr) * tex.height;
+  WGPUBufferDescriptor bd{};
+  bd.label = sv("readback-depth");
+  bd.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+  bd.size = size;
+  WGPUBuffer buf = wgpuDeviceCreateBuffer(device, &bd);
+  WGPUCommandEncoderDescriptor ed{};
+  WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
+  WGPUTexelCopyTextureInfo src{};
+  src.texture = tex.texture;
+  src.aspect = WGPUTextureAspect_DepthOnly;
+  WGPUTexelCopyBufferInfo dst{};
+  dst.buffer = buf;
+  dst.layout.bytesPerRow = bpr;
+  dst.layout.rowsPerImage = tex.height;
+  const WGPUExtent3D extent{tex.width, tex.height, 1};
+  wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &extent);
+  WGPUCommandBufferDescriptor cd{};
+  WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
+  wgpuQueueSubmit(queue, 1, &cmd);
+  wgpuCommandBufferRelease(cmd);
+  wgpuCommandEncoderRelease(enc);
+  struct MapState { bool done{false}; bool ok{false}; } state;
+  WGPUBufferMapCallbackInfo mi{};
+  mi.mode = WGPUCallbackMode_AllowProcessEvents;
+  mi.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void*) {
+    auto* s = static_cast<MapState*>(u1);
+    s->ok = status == WGPUMapAsyncStatus_Success;
+    s->done = true;
+  };
+  mi.userdata1 = &state;
+  wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, mi);
+  while (!state.done) wgpuDevicePoll(device, 1U, nullptr);
+  if (!state.ok) {
+    wgpuBufferRelease(buf);
+    return false;
+  }
+  const auto* mapped = static_cast<const std::uint8_t*>(wgpuBufferGetConstMappedRange(buf, 0, size));
+  depth->resize(static_cast<std::size_t>(tex.width) * tex.height);
+  for (std::uint32_t y = 0; y < tex.height; ++y) {
+    std::memcpy(depth->data() + static_cast<std::size_t>(y) * tex.width, mapped + static_cast<std::size_t>(y) * bpr, static_cast<std::size_t>(tex.width) * 4);
+  }
+  wgpuBufferUnmap(buf);
+  wgpuBufferRelease(buf);
+  return true;
+}
+
 std::uint16_t float_to_half(float f) {
   std::uint32_t x;
   std::memcpy(&x, &f, 4);

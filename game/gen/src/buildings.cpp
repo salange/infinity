@@ -5,11 +5,39 @@
 
 #include "core/det/mix.hpp"
 #include "gen/material.hpp"
+#include "core/det/trig.hpp"
 #include "gen/names.hpp"
 
 namespace inf::gen {
 
 namespace {
+
+// Deterministic trig on the det path (no libm in gen; ci grep gate).
+inline double cos_d(double a) {
+  det::Real s(0.0), c(0.0);
+  det::fast_sin_cos(det::Real(a), &s, &c);
+  return c.to_double();
+}
+inline double sin_d(double a) {
+  det::Real s(0.0), c(0.0);
+  det::fast_sin_cos(det::Real(a), &s, &c);
+  return s.to_double();
+}
+// atan2 by a rational approximation (max error ~1e-4 rad): cosmetic
+// orientations only, and only +-*/ so every platform agrees.
+inline double atan2_d(double y, double x) {
+  const double ax = x < 0.0 ? -x : x;
+  const double ay = y < 0.0 ? -y : y;
+  const double mx = ax > ay ? ax : ay;
+  if (mx <= 0.0) return 0.0;
+  const double mn = ax > ay ? ay : ax;
+  const double a = mn / mx;
+  const double s = a * a;
+  double r = ((-0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a;
+  if (ay > ax) r = 1.57079637 - r;
+  if (x < 0.0) r = 3.14159274 - r;
+  return y < 0.0 ? -r : r;
+}
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -79,8 +107,8 @@ struct Scope {
 
 // Local (u along the yaw x axis, v along y) to site coordinates.
 void scope_point(const Scope& s, double u, double v, double z, double out[3]) {
-  const double c = std::cos(s.yaw);
-  const double sn = std::sin(s.yaw);
+  const double c = cos_d(s.yaw);
+  const double sn = sin_d(s.yaw);
   out[0] = s.cx + u * c - v * sn;
   out[1] = s.cy + u * sn + v * c;
   out[2] = z;
@@ -114,11 +142,11 @@ void emit_prism(Sink& sink, double cx, double cy, double z0, double r0, double r
   std::vector<double> upper(static_cast<std::size_t>(n) * 3);
   for (int i = 0; i < n; ++i) {
     const double a = phase + 2.0 * kPi * i / n;
-    bottom[i * 3] = cx + std::cos(a) * r0;
-    bottom[i * 3 + 1] = cy + std::sin(a) * r0;
+    bottom[i * 3] = cx + cos_d(a) * r0;
+    bottom[i * 3 + 1] = cy + sin_d(a) * r0;
     bottom[i * 3 + 2] = z0;
-    upper[i * 3] = cx + std::cos(a) * r1 + tilt_x * h;
-    upper[i * 3 + 1] = cy + std::sin(a) * r1 + tilt_y * h;
+    upper[i * 3] = cx + cos_d(a) * r1 + tilt_x * h;
+    upper[i * 3 + 1] = cy + sin_d(a) * r1 + tilt_y * h;
     upper[i * 3 + 2] = z0 + h;
   }
   for (int i = 0; i < n; ++i) {
@@ -147,15 +175,15 @@ void emit_dome(Sink& sink, double cx, double cy, double z0, double r, double squ
   for (int ring = 0; ring < rings; ++ring) {
     const double t0 = 0.5 * kPi * ring / rings;
     const double t1 = 0.5 * kPi * (ring + 1) / rings;
-    const double r0 = r * std::cos(t0), z0r = z0 + r * squash * std::sin(t0);
-    const double r1 = r * std::cos(t1), z1r = z0 + r * squash * std::sin(t1);
+    const double r0 = r * cos_d(t0), z0r = z0 + r * squash * sin_d(t0);
+    const double r1 = r * cos_d(t1), z1r = z0 + r * squash * sin_d(t1);
     for (int i = 0; i < segs; ++i) {
       const double a0 = 2.0 * kPi * i / segs;
       const double a1 = 2.0 * kPi * (i + 1) / segs;
-      const double p0[3] = {cx + std::cos(a0) * r0, cy + std::sin(a0) * r0, z0r};
-      const double p1[3] = {cx + std::cos(a1) * r0, cy + std::sin(a1) * r0, z0r};
-      const double p2[3] = {cx + std::cos(a1) * r1, cy + std::sin(a1) * r1, z1r};
-      const double p3[3] = {cx + std::cos(a0) * r1, cy + std::sin(a0) * r1, z1r};
+      const double p0[3] = {cx + cos_d(a0) * r0, cy + sin_d(a0) * r0, z0r};
+      const double p1[3] = {cx + cos_d(a1) * r0, cy + sin_d(a1) * r0, z0r};
+      const double p2[3] = {cx + cos_d(a1) * r1, cy + sin_d(a1) * r1, z1r};
+      const double p3[3] = {cx + cos_d(a0) * r1, cy + sin_d(a0) * r1, z1r};
       if (ring == rings - 1) {
         const double apex[3] = {cx, cy, z0 + r * squash};
         sink.tri(p0, p1, apex, slot);
@@ -696,13 +724,13 @@ void rules_mound(Ctx& c) {
     const int mouths = 1 + c.rng.pick(3);
     for (int i = 0; i < mouths; ++i) {
       const double a = c.yaw + i * 2.1 + c.rng.uniform(-0.4, 0.4);
-      const double mx = c.cx + std::cos(a) * (r - 0.3);
-      const double my = c.cy + std::sin(a) * (r - 0.3);
+      const double mx = c.cx + cos_d(a) * (r - 0.3);
+      const double my = c.cy + sin_d(a) * (r - 0.3);
       emit_prism(c.sink, mx, my, c.base_z + 0.8, 1.1, 1.1, 1.6, 8, 0.0, 3, 3);
     }
     for (int i = 0; i < 6; ++i) {
       const double a = c.yaw + i * kPi / 3.0;
-      Scope rib{c.cx + std::cos(a) * r * 0.7, c.cy + std::sin(a) * r * 0.7, a, r * 0.45, 0.25, c.base_z + 0.8, c.height * 0.5};
+      Scope rib{c.cx + cos_d(a) * r * 0.7, c.cy + sin_d(a) * r * 0.7, a, r * 0.45, 0.25, c.base_z + 0.8, c.height * 0.5};
       emit_box(c.sink, rib, 1, 1);
     }
   }
@@ -762,7 +790,7 @@ void rules_cap(Ctx& c) {
     for (int i = 0; i < pods; ++i) {
       const double a = c.yaw + i * 2.0 + c.rng.uniform(0.0, 1.0);
       const double d = std::min(c.hx, c.hy) * 0.9;
-      emit_dome(c.sink, c.cx + std::cos(a) * d, c.cy + std::sin(a) * d, c.base_z + 0.8, 1.2 + c.rng.u01(), 0.9, 3, 8, 3);
+      emit_dome(c.sink, c.cx + cos_d(a) * d, c.cy + sin_d(a) * d, c.base_z + 0.8, 1.2 + c.rng.u01(), 0.9, 3, 8, 3);
     }
   }
 }
@@ -782,9 +810,9 @@ void rules_hex(Ctx& c) {
       const double a0 = c.yaw + kPi / 3.0 * i;
       const double a1 = a0 + kPi / 3.0;
       Frame f;
-      f.ox = c.cx + std::cos(a0) * r; f.oy = c.cy + std::sin(a0) * r; f.oz = c.base_z + 0.8;
-      const double ex = std::cos(a1) * r - std::cos(a0) * r;
-      const double ey = std::sin(a1) * r - std::sin(a0) * r;
+      f.ox = c.cx + cos_d(a0) * r; f.oy = c.cy + sin_d(a0) * r; f.oz = c.base_z + 0.8;
+      const double ex = cos_d(a1) * r - cos_d(a0) * r;
+      const double ey = sin_d(a1) * r - sin_d(a0) * r;
       const double len = std::sqrt(ex * ex + ey * ey);
       f.ax = ex / len; f.ay = ey / len; f.nx = f.ay; f.ny = -f.ax;
       part_conduit(c.sink, f, 0.2, len - 0.2, 1.4, 0.25, 3);
@@ -807,8 +835,8 @@ void rules_crystal(Ctx& c) {
     const double h = (c.height + 0.8) * (i == 0 ? 1.0 : c.rng.uniform(0.35, 0.8));
     const double cr = r * (i == 0 ? 0.55 : c.rng.uniform(0.2, 0.4));
     const double tilt = c.rng.uniform(-0.12, 0.12);
-    emit_prism(c.sink, c.cx + std::cos(a) * d, c.cy + std::sin(a) * d, c.base_z, cr, cr * 0.15, h, 6,
-               c.rng.uniform(0.0, kPi), 0, 2, true, tilt * std::cos(a), tilt * std::sin(a));
+    emit_prism(c.sink, c.cx + cos_d(a) * d, c.cy + sin_d(a) * d, c.base_z, cr, cr * 0.15, h, 6,
+               c.rng.uniform(0.0, kPi), 0, 2, true, tilt * cos_d(a), tilt * sin_d(a));
   }
   if (c.parts && c.stage >= 0.7) {
     emit_prism(c.sink, c.cx, c.cy, c.base_z, r * 1.1, r * 1.05, 0.8, 12, c.yaw, 3, 3);  // the growth plinth
@@ -843,7 +871,7 @@ void rules_dome(Ctx& c) {
     const double len = std::sqrt(c.cx * c.cx + c.cy * c.cy);
     const double dx = len > 1.0 ? -c.cx / len : 1.0;
     const double dy = len > 1.0 ? -c.cy / len : 0.0;
-    Scope tube{c.cx + dx * (r + 1.5), c.cy + dy * (r + 1.5), std::atan2(dy, dx), 2.0, 1.1, c.base_z + 0.8, 2.2};
+    Scope tube{c.cx + dx * (r + 1.5), c.cy + dy * (r + 1.5), atan2_d(dy, dx), 2.0, 1.1, c.base_z + 0.8, 2.2};
     emit_box(c.sink, tube, 0, 1);
     if (c.stage >= 0.9) {
       emit_dome(c.sink, c.cx + dy * (r + 1.0), c.cy - dx * (r + 1.0), c.base_z + 0.8, 1.5, 0.9, 3, 10, 0);  // ancillary
@@ -979,10 +1007,10 @@ BuildingMesh build_building(const Lot& lot, const core::Key& lot_key, const Buil
   cy /= lot.vertex_count;
   const double ex = lot.footprint[1][0] - lot.footprint[0][0];
   const double ey = lot.footprint[1][1] - lot.footprint[0][1];
-  const double yaw = std::atan2(ey, ex);
+  const double yaw = atan2_d(ey, ex);
   // Half extents along the yaw axes.
-  const double c = std::cos(yaw);
-  const double s = std::sin(yaw);
+  const double c = cos_d(yaw);
+  const double s = sin_d(yaw);
   double hx = 0.0;
   double hy = 0.0;
   for (int k = 0; k < lot.vertex_count; ++k) {
@@ -1026,7 +1054,7 @@ BuildingMesh build_building(const Lot& lot, const core::Key& lot_key, const Buil
     for (int i = 0; i < piles; ++i) {
       const double a = ctx.rng.uniform(0.0, 2.0 * kPi);
       const double d = ctx.rng.uniform(0.6, 1.4) * std::max(hx, hy);
-      Scope pile{cx + std::cos(a) * d, cy + std::sin(a) * d, ctx.rng.uniform(0.0, kPi), ctx.rng.uniform(0.6, 1.8),
+      Scope pile{cx + cos_d(a) * d, cy + sin_d(a) * d, ctx.rng.uniform(0.0, kPi), ctx.rng.uniform(0.6, 1.8),
                  ctx.rng.uniform(0.5, 1.2), params.ground_z - 0.3, ctx.rng.uniform(0.5, 1.3)};
       emit_box(ctx.sink, pile, 1, 1);
     }

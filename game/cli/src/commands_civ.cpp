@@ -10,8 +10,7 @@
 #include <cstring>
 #include <vector>
 
-#include <chrono>
-
+#include "core/time/world_clock.hpp"
 #include "gen/civ_census.hpp"
 #include "gen/ecumenopolis.hpp"
 #include "gen/planet_texture.hpp"
@@ -415,16 +414,22 @@ int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot_
 
 // WP5: one site of a body — its lots as a top-down PNG, a summary, and
 // capture script lines (pos/aim) for the app at 20 km, 2 km and 200 m.
+// Wall-clock milliseconds since a LocalClock reading (tooling output only).
+double ms_since(const core::LocalClock& clock, std::int64_t start_ns) {
+  return static_cast<double>(clock.now().ns_since_epoch - start_ns) * 1e-6;
+}
+
 // WP7: an ecumenopolis world — the plate range, the block lattice, tile
 // costs, and capture lines from orbit down to street level over the
 // capital province.
 int describe_ecumenopolis(const core::Key& entity, gen::TerrainField& field, const gen::SettlementPlan& plan,
                           const gen::Race& race, const gen::CivState& state, const gen::BodyCivInputs& body,
                           const gen::PlanetParams& params) {
-  const auto t0 = std::chrono::steady_clock::now();
+  const core::LocalClock clock;
+  const std::int64_t t0 = clock.now().ns_since_epoch;
   const gen::EcumenopolisField ecum(entity, field, plan, race.params, race.factions, state);
   field.set_height_modifier(&ecum);
-  const double build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  const double build_ms = ms_since(clock, t0);
   const double r = field.planet().radius_m.to_double();
   std::printf("body slot %d%s %s L7 %s: ecumenopolis (field %.1f ms)\n", body.slot, body.moon >= 0 ? " (moon)" : "",
               gen::to_string(params.type), state.ruined ? "RUINED" : "Trantorian", build_ms);
@@ -439,9 +444,9 @@ int describe_ecumenopolis(const core::Key& entity, gen::TerrainField& field, con
               field.base_elevation_m(centre).to_double(), static_cast<int>(d.type), d.height_budget_m);
   // Tile costs at every detail.
   for (const auto& [shift, detail] : std::vector<std::pair<int, int>>{{3, 0}, {3, 1}, {3, 2}, {5, 2}, {6, 3}}) {
-    const auto t1 = std::chrono::steady_clock::now();
+    const std::int64_t t1 = clock.now().ns_since_epoch;
     const gen::EcumenopolisMesh mesh = gen::build_ecumenopolis_tile(ecum, ecum.tile_of(centre, shift), detail);
-    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    const double ms = ms_since(clock, t1);
     // Vertex bounds relative to the tile origin (a sanity check on the
     // geometry: horizontal extent ~ the tile, height ~ the tallest tower).
     double max_h = 0.0;
@@ -463,9 +468,9 @@ int describe_ecumenopolis(const core::Key& entity, gen::TerrainField& field, con
   // The far-view bake: how much of the surface carries urban albedo and
   // night light (the orbit impostor's alpha).
   {
-    const auto t1 = std::chrono::steady_clock::now();
+    const std::int64_t t1 = clock.now().ns_since_epoch;
     const gen::PlanetTexture bake = gen::bake_planet_texture(field, 64, nullptr);
-    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    const double ms = ms_since(clock, t1);
     std::size_t texels = 0;
     std::size_t lit = 0;
     double alpha_sum = 0.0;

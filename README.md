@@ -24,6 +24,25 @@ so nothing repeats and nothing swims at planetary radii. Vegetation colour
 follows the host star: green under a G star, red-orange under a K, near
 black under an M dwarf.
 
+![A level-7 world: one continuous city on plates over the terrain, streets
+from the cube-sphere lattice, towers from the building grammar](docs/ecumenopolis.png)
+
+Worlds are inhabited. Each galaxy seeds a handful of alien races (nine
+morphologies, from insectoid hives to crystalline lattices and machine
+minds) and, in the home galaxy, humanity; every race claims stars in a wave
+that spreads from its home at a fixed speed in real time, so the map of who
+owns which star is a closed-form function of the clock. Settled bodies climb
+a development ladder from outpost to ecumenopolis, faction by faction — a
+government core, independent settlers and outlaws on the frontier, android
+factions that split off later — and colonies of dead races stand in ruins.
+On the ground a settlement is a plan over the planet's provinces, sites with
+a race-specific layout, lots that appear one by one as the clock advances
+(never moving once placed), and buildings executed from a shape grammar
+with instanced parts; at level 7 the quadtree itself becomes the street plan
+of a planet-wide city. All of it is computed from the seed and the time —
+two players with synced clocks see the same towns going up, without
+exchanging a byte of world data.
+
 ## Build
 
 Requirements: CMake ≥ 3.24, a C++20 compiler, ninja (recommended). On Linux
@@ -66,7 +85,7 @@ cmake -B build-headless -DINFINITY_BUILD_APP=OFF
 | Module | Contents |
 |---|---|
 | `core/` | deterministic math, RNG, keys, chunk addressing |
-| `gen/` | planet parameters, provinces, climate, life, materials, density pipeline |
+| `gen/` | planet parameters, provinces, climate, life, materials, density pipeline, civilization (races, colonies, settlements, buildings, ecumenopolis) |
 | `tex/` | procedural surface tiles |
 | `world/` | chunk manager, LOD, diff overlay, effective-state API |
 | `sim/` | player controller, input |

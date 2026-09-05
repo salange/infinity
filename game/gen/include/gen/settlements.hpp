@@ -124,7 +124,6 @@ class SettlementPlanner {
   void build_roads(SettlementPlan* plan) const;
 
   core::Key key_;
-  const TerrainField& field_;
   RaceParams race_;
   bool domed_;
   std::uint32_t n_{0};

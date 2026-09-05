@@ -7,7 +7,7 @@
 namespace inf::gen {
 
 // The civilization clock (design/civilization-and-settlements.md section 3).
-// No new clock: everything takes a WorldTime. Two units —
+// No separate clock: everything takes a WorldTime. Two units —
 //  - REAL time: seconds of WorldTime. Every pacing constant in the
 //    civilization layers is specified in real seconds, because the
 //    requirements are about what a player sees in a real week or year.

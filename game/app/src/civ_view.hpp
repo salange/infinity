@@ -24,6 +24,7 @@ namespace inf::app {
 // functions; nothing is stored beyond mesh caches.
 struct CivAnchor {
   bool settled{false};
+  gen::BuildingMethod method{gen::BuildingMethod::GrammarParts};
   gen::CivState state;
   gen::RaceParams race;
   std::vector<gen::FactionParams> factions;

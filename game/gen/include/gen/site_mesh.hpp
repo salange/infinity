@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "gen/buildings.hpp"
 #include "gen/sites.hpp"
 #include "world/mesher.hpp"
 
@@ -20,6 +21,9 @@ namespace inf::gen {
 // mass per block only (far view).
 struct SiteMeshParams {
   int detail{0};
+  // The near-LOD terminal set (comparison renders switch it; the default
+  // is the WP6 decision).
+  BuildingMethod method{BuildingMethod::GrammarParts};
   // Camera-relative culling: only blocks whose centre lies within this
   // distance of `focus` (site-local metres) are built; 0 = all.
   double focus_x{0.0};
@@ -39,8 +43,9 @@ struct SiteMesh {
 SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const TerrainField& field,
                          const SiteMeshParams& params);
 
-// The four-material palette a site's masses use (by material family):
-// walls, roof, base, accent.
-void site_palette(const Site& site, std::uint8_t out[4]);
+// The four-material palette a site's buildings use: walls, roof, glass,
+// accent (building_palette of the site style); the mid LOD swaps the
+// walls for the facade-with-windows tile.
+void site_palette(const Site& site, int detail, std::uint8_t out[4]);
 
 }  // namespace inf::gen

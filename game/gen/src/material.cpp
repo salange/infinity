@@ -76,6 +76,10 @@ constexpr MaterialInfo kInfo[] = {
     {"resin_floor",    {0.55f, 0.46f, 0.30f}, 4.0f, 0.35f, TintGroup::None, false},
     {"crystal_floor",  {0.60f, 0.70f, 0.78f}, 4.0f, 0.15f, TintGroup::None, true},
     {"disturbed_soil", {0.50f, 0.42f, 0.32f}, 4.0f, 0.90f, TintGroup::Soil, false},
+    {"window_glass",   {0.35f, 0.42f, 0.50f}, 2.0f, 0.10f, TintGroup::None, true},
+    {"window_dark",    {0.12f, 0.14f, 0.18f}, 2.0f, 0.15f, TintGroup::None, false},
+    {"facade_windows", {0.55f, 0.52f, 0.47f}, 4.0f, 0.70f, TintGroup::None, true},
+    {"scrap_metal",    {0.38f, 0.33f, 0.28f}, 3.0f, 0.65f, TintGroup::None, false},
 };
 static_assert(sizeof(kInfo) / sizeof(kInfo[0]) == kMaterialCount,
               "material registry and enum out of sync");

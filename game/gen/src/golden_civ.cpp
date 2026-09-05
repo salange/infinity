@@ -11,6 +11,7 @@
 #include "gen/settlements.hpp"
 #include "gen/sites.hpp"
 #include "gen/civil.hpp"
+#include "gen/buildings.hpp"
 #include "gen/terrain.hpp"
 #include "gen/universe.hpp"
 
@@ -285,6 +286,45 @@ std::uint64_t hash_sites_script(const core::Seed128& seed) {
   return hash.value();
 }
 
+// WP6: the executor on synthetic lots of every rule set and state.
+std::uint64_t hash_buildings_script(const core::Seed128& seed) {
+  core::GoldenHash hash;
+  const core::Key base = core::derive_named(core::universe_key(seed), name::BuildingsV1);
+  int index = 0;
+  for (int race = 0; race < static_cast<int>(RaceType::Count); ++race) {
+    for (int faction = 0; faction < static_cast<int>(FactionType::Count); ++faction) {
+      for (const bool ruined : {false, true}) {
+        Lot lot;
+        lot.id = static_cast<std::uint32_t>(++index);
+        lot.vertex_count = 4;
+        lot.footprint[0][0] = -6.0f; lot.footprint[0][1] = -5.0f;
+        lot.footprint[1][0] = 6.0f; lot.footprint[1][1] = -5.0f;
+        lot.footprint[2][0] = 6.0f; lot.footprint[2][1] = 5.0f;
+        lot.footprint[3][0] = -6.0f; lot.footprint[3][1] = 5.0f;
+        lot.height_budget_m = 9.0f + 3.0f * static_cast<float>(faction);
+        lot.usage = static_cast<LotUsage>(index % static_cast<int>(LotUsage::Count));
+        lot.style.race_type = static_cast<RaceType>(race);
+        lot.style.faction_type = static_cast<FactionType>(faction);
+        lot.style.material_family = static_cast<std::uint8_t>(race_type_info(static_cast<RaceType>(race)).material_family);
+        lot.style.ruined = ruined;
+        lot.style.domed = race == 0 && faction == 3;
+        lot.style.tech_tier = 3;
+        lot.style.light_density = 0.6f;
+        lot.style.construction = ruined ? 1.0f : 0.5f + 0.5f * static_cast<float>(faction) / 4.0f;
+        BuildingParams bp;
+        bp.method = BuildingMethod::GrammarParts;
+        const BuildingMesh mesh = build_building(lot, core::derive_child(base, kind::Lot, lot.id), bp);
+        hash.feed(mesh.triangle_count);
+        hash.feed(std::bit_cast<std::uint32_t>(mesh.top_z));
+        for (std::size_t i = 0; i < mesh.vertices.size(); i += 97) {
+          hash.feed(std::bit_cast<std::uint32_t>(mesh.vertices[i]));
+        }
+      }
+    }
+  }
+  return hash.value();
+}
+
 }  // namespace
 
 std::string hash_civ_report() {
@@ -318,6 +358,11 @@ std::string hash_civ_report() {
   for (const core::Seed128& seed : kSeeds) {
     report += "sites seed=" + core::to_hex(seed) + " fnv=";
     append_hex(&report, hash_sites_script(seed));
+    report += "\n";
+  }
+  for (const core::Seed128& seed : kSeeds) {
+    report += "buildings seed=" + core::to_hex(seed) + " fnv=";
+    append_hex(&report, hash_buildings_script(seed));
     report += "\n";
   }
   return report;

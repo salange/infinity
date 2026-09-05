@@ -97,7 +97,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
       continue;
     }
     int detail = 2;
-    if (dist < 5000.0 + site.radius_m) detail = 0;
+    if (dist < 2500.0 + site.radius_m) detail = 0;
     else if (dist < 15000.0 + site.radius_m) detail = 1;
     // Near a big site only the blocks around the player are built at full
     // detail (a metropolis holds ~100k lots); the focus follows the player
@@ -105,7 +105,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
     double fx = 0.0;
     double fy = 0.0;
     site.frame.to_local(player_dir, &fx, &fy);
-    const double focus_radius = detail == 0 ? 2500.0 : 0.0;
+    const double focus_radius = detail == 0 ? 1200.0 : 0.0;
     const bool refocus = detail == 0 && site.radius_m > focus_radius &&
                          (std::fabs(fx - entry.focus_x) > 0.5 * focus_radius ||
                           std::fabs(fy - entry.focus_y) > 0.5 * focus_radius);
@@ -116,6 +116,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
       ++rebuilt;
       gen::SiteMeshParams params;
       params.detail = detail;
+      params.method = civ->method;
       if (detail == 0 && site.radius_m > focus_radius) {
         params.focus_x = fx;
         params.focus_y = fy;

@@ -14,6 +14,8 @@ namespace cb {
 
 const char* to_string(CitySize s) {
   switch (s) {
+    case CitySize::Outpost: return "outpost";
+    case CitySize::Village: return "village";
     case CitySize::Small: return "small";
     case CitySize::Medium: return "medium";
     case CitySize::Large: return "large";
@@ -23,14 +25,18 @@ const char* to_string(CitySize s) {
 
 CitySize city_size_for(Rng& rng) {
   const float u = rng.next();
-  if (u < 0.28f) return CitySize::Small;
-  if (u < 0.62f) return CitySize::Medium;
-  if (u < 0.88f) return CitySize::Large;
+  if (u < 0.12f) return CitySize::Outpost;
+  if (u < 0.30f) return CitySize::Village;
+  if (u < 0.52f) return CitySize::Small;
+  if (u < 0.74f) return CitySize::Medium;
+  if (u < 0.91f) return CitySize::Large;
   return CitySize::Metropolis;
 }
 
 bool parse_city_size(const std::string& t, CitySize* out) {
-  if (t == "small") *out = CitySize::Small;
+  if (t == "outpost") *out = CitySize::Outpost;
+  else if (t == "village") *out = CitySize::Village;
+  else if (t == "small") *out = CitySize::Small;
   else if (t == "medium") *out = CitySize::Medium;
   else if (t == "large") *out = CitySize::Large;
   else if (t == "metropolis") *out = CitySize::Metropolis;
@@ -66,14 +72,23 @@ struct SizeRules {
   bool groups;
   int diagonals;
   float plaza_p;
+  float cell_min, cell_max;  // grid spacing
+  float lot_area;            // target lot area before splitting stops (bigger = sparser)
+  float fill_p;              // probability a lot receives a building (else lawn / void)
+  int capitol_stage;
+  float tower_zone;          // fraction of the radius with full tower density
 };
 
+// Sizes grow non-linearly: each step roughly doubles the radius, from a
+// single settler couple to a metropolis that reaches the horizon.
 SizeRules rules_for(CitySize s) {
   switch (s) {
-    case CitySize::Small: return {260.0f, 12, 0.12f, false, false, 0, 0.16f};
-    case CitySize::Medium: return {430.0f, 24, 0.45f, false, false, 1, 0.14f};
-    case CitySize::Large: return {650.0f, 40, 0.6f, true, true, 1, 0.12f};
-    default: return {900.0f, 52, 0.72f, true, true, 2, 0.11f};
+    case CitySize::Outpost: return {40.0f, 0, 0.0f, false, false, 0, 0.0f, 80.0f, 80.0f, 9000.0f, 0.0f, 0, 0.0f};
+    case CitySize::Village: return {150.0f, 0, 0.0f, false, false, 0, 0.30f, 130.0f, 170.0f, 6000.0f, 0.45f, 1, 0.0f};
+    case CitySize::Small: return {320.0f, 12, 0.10f, false, false, 0, 0.20f, 125.0f, 165.0f, 3800.0f, 0.65f, 2, 0.25f};
+    case CitySize::Medium: return {620.0f, 24, 0.45f, false, false, 1, 0.14f, 115.0f, 160.0f, 2800.0f, 0.82f, 3, 0.35f};
+    case CitySize::Large: return {1250.0f, 40, 0.7f, true, true, 2, 0.12f, 110.0f, 155.0f, 2200.0f, 0.92f, 4, 0.36f};
+    default: return {2500.0f, 56, 0.9f, true, true, 3, 0.10f, 105.0f, 150.0f, 1900.0f, 1.0f, 5, 0.26f};
   }
 }
 
@@ -269,6 +284,27 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     g.polygon({{-far, -far}, {far, -far}, {far, far}, {-far, far}}, -0.02f, true);
   }
 
+  if (size == CitySize::Outpost) {
+    // one settler couple: a glass house on a small plate, the wreck of their
+    // landing pod where the unification ring will one day stand, a path, a
+    // few crates and a tree — nothing else
+    Rng r = root.child(2);
+    const std::vector<Vec2> plate = poly_world(plan_rounded_rect(28.0f, 20.0f, 6.0f, 6));
+    Emit s(&mesh, M_SIDEWALK);
+    s.polygon(plate, kCurb, true);
+    Emit c(&mesh, M_CURB);
+    c.wall(plate, 0.0f, kCurb, true, true);
+    build_government(sc, to_world(Vec2{-10.0f, -6.0f}), rot, 0.0f, kCurb, r, 2, 0);
+    build_pod_wreck(sc, to_world(Vec2{12.0f, 6.0f}), kCurb, r, 2, false);
+    Emit path(&mesh, M_PLAZA);
+    path.polygon(ribbon(spline({to_world(Vec2{-6.0f, -2.0f}), to_world(Vec2{2.0f, 1.0f}), to_world(Vec2{8.0f, 4.0f})}, 6), 1.2f), kCurb + 0.01f, true);
+    gen_tree(sc, r.child(1), P3(to_world(Vec2{-22.0f, 10.0f}), kCurb), 7.0f);
+    gen_lamp(sc, P3(to_world(Vec2{0.0f, -14.0f}), kCurb), rot + kPi * 0.5f);
+    st.blocks = 1;
+    st.plazas = 1;
+    return st;
+  }
+
   // ---- street grid (city-local coordinates) -------------------------------------------
   Rng grid = root.child(1);
   std::vector<float> xs, zs;
@@ -276,7 +312,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     float p = -R.radius;
     out->push_back(p);
     while (p < R.radius) {
-      p += r.range(105.0f, 150.0f);
+      p += r.range(R.cell_min, R.cell_max);
       out->push_back(std::min(p, R.radius + 1.0f));
     }
   };
@@ -349,7 +385,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
   // ---- road paint, crosswalks, artery medians -----------------------------------------
   {
     Rng rp = root.child(2);
-    int tree_budget_medians = size == CitySize::Small ? 10 : 40;
+    int tree_budget_medians = size <= CitySize::Small ? 10 : 40;
     for (std::size_t i = 0; i < xs.size(); ++i) {
       const float w = road_width(i, xs.size());
       const Vec2 a = to_world(Vec2{xs[i], -R.radius}), b = to_world(Vec2{xs[i], R.radius});
@@ -384,7 +420,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     for (std::size_t i = 1; i + 1 < xs.size(); ++i) {
       for (std::size_t j = 1; j + 1 < zs.size(); ++j) {
         const Vec2 c{xs[i], zs[j]};
-        if (length(c) > R.radius * 0.7f) continue;
+        if (length(c) > std::min(R.radius * 0.7f, 700.0f)) continue;
         const float wx = road_width(i, xs.size()), wz = road_width(j, zs.size());
         crosswalk(sc, to_world(c + Vec2{0, -(wz * 0.5f + 2.0f)}), rot2(Vec2{1, 0}, rot), wx, 0.006f);
         crosswalk(sc, to_world(c + Vec2{0, (wz * 0.5f + 2.0f)}), rot2(Vec2{1, 0}, rot), wx, 0.006f);
@@ -395,13 +431,15 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
   }
 
   // ---- blocks -------------------------------------------------------------------------
-  int tree_budget = size == CitySize::Small ? 40 : (size == CitySize::Medium ? 90 : 140);
+  int tree_budget = size <= CitySize::Small ? 40 : (size == CitySize::Medium ? 90 : (size == CitySize::Large ? 140 : 200));
   int lamp_budget = 60;
   std::vector<Vec2> plaza_centres;
   std::vector<std::vector<Vec2>> plaza_polys;
   Rng br = root.child(3);
   int idx = 0;
   int forced_family = 0;
+  int hi_budget = size == CitySize::Metropolis ? 14 : 10;
+  int mid_budget = size == CitySize::Metropolis ? 40 : 24;
   const float gov_rot = rot;  // government faces "south" of the grid
   for (const Block& b : blocks) {
     Rng r = br.child(idx++);
@@ -417,7 +455,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     if (b.centre_block) {
       // government building on its block, facing the front block (+z on the grid)
       const float half = std::min(plan_inradius(b.poly) * 0.9f, 42.0f);
-      build_government(sc, to_world(b.centre + Vec2{0, -half * 0.15f}), gov_rot, half, kCurb, r, 2);
+      build_government(sc, to_world(b.centre + Vec2{0, -half * 0.15f}), gov_rot, half, kCurb, r, 2, R.capitol_stage);
       // lamps around
       for (int k = 0; k < 4 && lamp_budget > 0; ++k, --lamp_budget) {
         const Vec2 q = plate[static_cast<std::size_t>(k) % plate.size()];
@@ -430,7 +468,8 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
       Emit floor(&mesh, M_MARBLE_WHITE);
       floor.polygon(plan_offset(plate, -1.0f), kCurb + 0.01f, true);
       const Vec2 cw = to_world(b.centre);
-      build_unification_ring(sc, cw, kCurb, std::min(14.0f, plan_inradius(b.poly) * 0.35f), rot + kPi * 0.5f, 2);
+      if (R.capitol_stage >= 3) build_unification_ring(sc, cw, kCurb, std::min(14.0f, plan_inradius(b.poly) * 0.35f), rot + kPi * 0.5f, 2);
+      else build_pod_wreck(sc, cw, kCurb, r, 2, R.capitol_stage >= 1);  // the founders' pod, kept where the ring will stand
       build_hedge_ring(sc, plate, 3.0f, 0.9f, 0.9f, kCurb, 16.0f, r);
       const Vec2 axis = rot2(Vec2{1, 0}, rot);
       for (float sgn : {-1.0f, 1.0f}) {
@@ -448,7 +487,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     // plaza?
     if (r.chance(R.plaza_p) && b.area > 3000.0f) {
       PlazaKind kind = static_cast<PlazaKind>(r.irange(0, 5));
-      if (kind == PlazaKind::Landing && size == CitySize::Small) kind = PlazaKind::Garden;
+      if (kind == PlazaKind::Landing && size <= CitySize::Small) kind = PlazaKind::Garden;
       build_plaza(sc, kind, plan_offset(plate, -1.0f), kCurb, r.child(5), detail, &tree_budget);
       plaza_centres.push_back(to_world(b.centre));
       plaza_polys.push_back(plate);
@@ -457,7 +496,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     }
     // tower?
     const float inrad = plan_inradius(b.poly);
-    const float tower_p = b.t < 0.42f ? R.tower_density : (b.t < 0.7f ? R.tower_density * 0.4f : 0.0f);
+    const float tower_p = b.t < R.tower_zone ? R.tower_density : (b.t < R.tower_zone + 0.22f ? R.tower_density * 0.35f : 0.0f);
     if (inrad > 18.0f && r.chance(tower_p)) {
       const float half = std::min(inrad - 9.0f, 20.0f);
       TowerSpec spec;
@@ -465,17 +504,24 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
       // Three detail levels of the same object, chosen per frame by camera
       // distance: fins, mullions and lattice spheres below a pixel would
       // otherwise alias into moire whenever the camera moves.
+      // Geometry budget: full detail exists only for the core towers (and at
+      // most `hi_budget` of them), mid detail out to the tower zone, the
+      // rest is generated once at the coarse level. Levels a tower lacks are
+      // simply the next coarser one.
       const int group = sc.lod_groups++;
       const float switch_hi = 200.0f, switch_mid = 500.0f;
+      const int finest = (b.t < 0.28f && hi_budget > 0) ? 0 : (b.t < R.tower_zone + 0.1f && mid_budget > 0 ? 1 : 2);
+      if (finest == 0) --hi_budget;
+      if (finest == 1) --mid_budget;
       auto register_lod = [&](std::uint32_t first, std::uint32_t end, int level, float height) {
         const Vec2 cw = to_world(b.centre);
-        sc.register_range(first, end, Vec3{cw.x, height * 0.5f, cw.y}, height * 0.5f + inrad, group, level,
-                          level == 0 ? switch_hi : (level == 1 ? switch_mid : 1e30f));
+        const float max_d = level == 0 ? switch_hi : (level == 1 ? switch_mid : 1e30f);
+        sc.register_range(first, end, Vec3{cw.x, height * 0.5f, cw.y}, height * 0.5f + inrad, group, level, max_d);
       };
       if (R.groups && inrad > 40.0f && r.chance(0.25f)) {
         const float grot = rot + (r.chance(0.5f) ? 0.0f : kPi * 0.5f);
         const Rng gr = r.child(7);
-        for (int level = 0; level < 3; ++level) {
+        for (int level = finest; level < 3; ++level) {
           const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
           build_tower_group(sc, gr, to_world(b.centre), grot, 2 - level);
           register_lod(first, static_cast<std::uint32_t>(sc.opaque.indices.size()), level, 180.0f);
@@ -483,7 +529,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
         st.towers += 2;
       } else {
         spec = random_tower(r, half, max_floors);
-        if (size == CitySize::Metropolis && forced_family < 6 && b.t < 0.45f) {
+        if (size == CitySize::Metropolis && forced_family < 6 && b.t < 0.35f) {
           // a metropolis shows every family in its core, in a fixed order
           switch (forced_family) {
             case 0: spec = spec_diagrid(half, max_floors); break;
@@ -503,7 +549,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
         spec.rot += rot;
         const Rng tr = r.child(8);
         const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
-        for (int level = 0; level < 3; ++level) {
+        for (int level = finest; level < 3; ++level) {
           const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
           build_tower(sc, spec, to_world(b.centre), kCurb, tr, 2 - level);
           register_lod(first, static_cast<std::uint32_t>(sc.opaque.indices.size()), level, height);
@@ -525,13 +571,24 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
     // standard buildings on lots (one culling range per block)
     const std::uint32_t block_first = static_cast<std::uint32_t>(sc.opaque.indices.size());
     std::vector<std::vector<Vec2>> lots;
-    subdivide(b.poly, r, r.range(1400.0f, 2600.0f), 7.0f, &lots, 0);
+    subdivide(b.poly, r, R.lot_area * r.range(0.8f, 1.25f), 7.0f, &lots, 0);
     for (const std::vector<Vec2>& lot : lots) {
       const std::vector<Vec2> fp_local = plan_offset(lot, -3.0f);
       if (fp_local.size() < 3 || plan_area(fp_local) < 120.0f) continue;
       const std::vector<Vec2> fp = poly_world(fp_local);
+      if (!r.chance(R.fill_p)) {
+        // an unbuilt lot: lawn with a hedge or a tree — the voids that make
+        // small settlements read as sparse
+        Emit lawn(&mesh, M_GRASS);
+        lawn.polygon(plan_offset(fp, -1.0f), kCurb + 0.02f, true);
+        if (r.chance(0.4f) && tree_budget > 0) { gen_tree(sc, r.child(77), P3(plan_centroid(fp), kCurb), r.range(6.0f, 9.0f)); --tree_budget; }
+        continue;
+      }
+      // the outer districts of large cities get the cheapest standards
+      const int std_detail = (size >= CitySize::Large && b.t > (size == CitySize::Metropolis ? 0.4f : 0.6f)) ? 0 : detail;
       StandardSpec s = random_standard(r, plan_area(fp_local), b.t);
-      build_standard(sc, s, fp, kCurb, r.child(static_cast<std::uint32_t>(st.lots)), detail);
+      if (std_detail == 0) { s.pilasters = false; s.balconies = false; }
+      build_standard(sc, s, fp, kCurb, r.child(static_cast<std::uint32_t>(st.lots)), std_detail);
       ++st.lots;
       ++st.standards;
       // occasional low wall around the lot
@@ -546,7 +603,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
   // ---- overpasses between plazas across an artery ---------------------------------------
   {
     Rng orr = root.child(4);
-    const int wanted = size == CitySize::Small ? 1 : (size == CitySize::Medium ? 2 : 4);
+    const int wanted = size <= CitySize::Small ? 1 : (size == CitySize::Medium ? 2 : (size == CitySize::Large ? 4 : 8));
     for (std::size_t i = 0; i < plaza_centres.size() && st.overpasses < wanted; ++i) {
       // find the nearest other plaza 60–220 m away
       int best = -1;

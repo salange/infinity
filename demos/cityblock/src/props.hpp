@@ -38,6 +38,13 @@ void build_landing_pad(Scene& sc, Vec2 c, float radius, float y, Rng& rng, int d
 // Curved pedestrian deck along a spline through ctrl (world xz) at deck_y,
 // with stair towers at both ends down to ground_y.
 void build_overpass(Scene& sc, const std::vector<Vec2>& ctrl, float deck_y, float ground_y, Rng& rng, int detail);
-void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rng, int detail);
+// The civic centre grows with the settlement: stage 0 = a settler couple's
+// glass house next to the wreck of their landing pod; 1 = the house gets a
+// deck and a colonnade ring; 2 = a two-storey civic hall on a low plinth;
+// 3 = foundation, hall and small dome; 4 = the full capitol; 5 = taller
+// dome and a flag court.
+void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rng, int detail, int stage = 4);
+void build_settler_house(Scene& sc, Vec2 c, float rot, float y, Rng& rng, int detail, bool deck);
+void build_pod_wreck(Scene& sc, Vec2 c, float y, Rng& rng, int detail, bool memorial);
 
 }  // namespace cb

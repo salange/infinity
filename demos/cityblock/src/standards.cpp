@@ -65,7 +65,7 @@ void build_standard(Scene& sc, const StandardSpec& spec, const std::vector<Vec2>
       float lo = spec.glass_lo, hi = spec.glass_hi;
       if (f == 0 && spec.retail_ground) { lo = 0.15f; hi = 0.35f; }
       const float g0 = y0 + lo, g1 = y1 - hi;
-      const bool punched = (spec.type == StdType::Residential || spec.type == StdType::Civic) && !(f == 0 && spec.retail_ground);
+      const bool punched = detail >= 1 && (spec.type == StdType::Residential || spec.type == StdType::Civic) && !(f == 0 && spec.retail_ground);
       if (punched) {
         // solid wall with individual windows standing 3 cm proud of it
         wall.quad(P3(b, y0), P3(a, y0), P3(a, y1), P3(b, y1), QuadUV{{u + w, 0}, {u, 0}, {u, y1 - y0}, {u + w, y1 - y0}});
@@ -122,13 +122,13 @@ void build_standard(Scene& sc, const StandardSpec& spec, const std::vector<Vec2>
     }
   }
   const float top = y + spec.floor_h * spec.storeys;
-  build_roof(sc, spec.roof, fp, top, rng, detail, spec.wall);
-  // entrance on the longest edge
+  build_roof(sc, detail == 0 ? RoofKind::Flat : spec.roof, fp, top, rng, detail, spec.wall);
+  // entrance on the longest edge (far buildings: just the door)
   {
     const Vec2 a = fp[best], b = fp[(best + 1) % n];
     const Vec2 d = normalize(b - a);
     const Vec2 nrm{d.y, -d.x};
-    build_entrance(sc, spec.entrance, (a + b) * 0.5f, nrm, y, spec.floor_h, rng, detail);
+    build_entrance(sc, detail == 0 ? EntranceKind::Portal : spec.entrance, (a + b) * 0.5f, nrm, y, spec.floor_h, rng, detail);
   }
   // retail awning
   if (spec.retail_ground && detail >= 1) {

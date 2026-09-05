@@ -18,7 +18,7 @@ void wall_quad(Emit& e, Vec3 A, Vec3 B, Vec3 C, Vec3 D, Vec2 uvA, Vec2 uvB, Vec2
 int sides_for(int detail, int full) { return std::max(4, detail >= 2 ? full : (detail == 1 ? full * 2 / 3 : full / 2)); }
 
 std::vector<Vec2> base_plan(const TowerSpec& s, int detail) {
-  const int seg = detail >= 2 ? 96 : (detail == 1 ? 56 : 32);
+  const int seg = detail >= 2 ? 96 : (detail == 1 ? 48 : 24);
   switch (s.plan) {
     case PlanKind::Superellipse: return plan_superellipse(s.a, s.b, s.exponent, seg, Vec2{0, 0}, 0.0f);
     case PlanKind::Circle: return plan_circle(s.a, seg);
@@ -129,7 +129,8 @@ void facade_floor(Ctx& c, int f, const std::vector<Vec2>& p0, const std::vector<
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t j = (i + 1) % n;
     const float elen = length(p0[j] - p0[i]);
-    const int k = std::max(1, static_cast<int>(std::round(elen / s.module_w)));
+    const float module = c.detail >= 2 ? s.module_w : (c.detail == 1 ? s.module_w * 1.5f : s.module_w * 3.0f);
+    const int k = std::max(1, static_cast<int>(std::round(elen / module)));
     for (int m = 0; m < k; ++m) {
       const float ta = static_cast<float>(m) / k, tb = static_cast<float>(m + 1) / k;
       const Vec2 a0 = p0[i] + (p0[j] - p0[i]) * ta, b0 = p0[i] + (p0[j] - p0[i]) * tb;
@@ -235,24 +236,27 @@ void lattice(Ctx& c, int first_row, int rows_total, float offset, bool crown_row
     const float shrink = (crown_rows && j >= J - 2) ? 0.8f : 1.0f;
     const float thick = (j == 0 && s.base == BaseKind::Legs) ? 1.35f : 1.0f;
     if (s.facade == FacadeKind::HexLattice) {
+      // A hexagon with vertical sides is one cell tall; the next row is
+      // shifted half a cell sideways and 0.75 of a cell up, so the top
+      // zigzag of one row IS the bottom zigzag of the next. Pitching rows a
+      // full cell apart (the earlier bug) left a 0.25-cell gap between rows.
       const float shift = (j % 2) ? 0.5f : 0.0f;
+      const float base = static_cast<float>(j) * 0.75f;
       for (int i = 0; i < M; ++i) {
         const float x = static_cast<float>(i) + shift;
-        // vertical side of the hexagon (middle half of the row)
-        member(node(x, static_cast<float>(j) + 0.25f), node(x, static_cast<float>(j) + 0.75f), r * shrink);
-        // bottom zigzag
-        member(node(x, static_cast<float>(j) + 0.25f), node(x + 0.5f, static_cast<float>(j)), r * shrink);
-        member(node(x + 0.5f, static_cast<float>(j)), node(x + 1.0f, static_cast<float>(j) + 0.25f), r * shrink);
+        member(node(x, base + 0.25f), node(x, base + 0.75f), r * shrink);  // vertical side
+        member(node(x, base + 0.25f), node(x + 0.5f, base), r * shrink);  // bottom zigzag
+        member(node(x + 0.5f, base), node(x + 1.0f, base + 0.25f), r * shrink);
         if (j == J - 1) {
-          member(node(x, static_cast<float>(j) + 0.75f), node(x + 0.5f, static_cast<float>(j) + 1.0f), r * shrink);
-          member(node(x + 0.5f, static_cast<float>(j) + 1.0f), node(x + 1.0f, static_cast<float>(j) + 0.75f), r * shrink);
+          member(node(x, base + 0.75f), node(x + 0.5f, base + 1.0f), r * shrink);
+          member(node(x + 0.5f, base + 1.0f), node(x + 1.0f, base + 0.75f), r * shrink);
         }
       }
       if (c.detail >= 1) {
         for (int i = 0; i < M; ++i) {
           const float x = static_cast<float>(i) + shift;
-          mem.sphere(node(x, static_cast<float>(j) + 0.25f), r * 1.15f, 6, 8);
-          mem.sphere(node(x, static_cast<float>(j) + 0.75f), r * 1.15f, 6, 8);
+          mem.sphere(node(x, base + 0.25f), r * 1.15f, 6, 8);
+          mem.sphere(node(x, base + 0.75f), r * 1.15f, 6, 8);
         }
       }
     } else {
@@ -489,7 +493,7 @@ void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rn
     const float y1 = y0 + spec.floor_h;
     const std::vector<Vec2> p0 = c.prof.at(f), p1 = c.prof.at(f + 1);
     facade_floor(c, f, p0, p1, y0, y1);
-    if (spec.floor_bands && f > first_floor) floor_band(c, p0, y0);
+    if (spec.floor_bands && f > first_floor && detail >= 1) floor_band(c, p0, y0);
     if (spec.setback_floor == f && f > 0) {
       slab(sc.opaque, c.prof.at(f - 1), y0, 0.6f, M_ROOF);
       parapet(sc.opaque, plan_offset(c.prof.at(f - 1), -0.2f), y0, 1.0f, 0.3f, spec.member);
@@ -497,7 +501,8 @@ void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rn
   }
   const float top = shaft_base + spec.floor_h * static_cast<float>(spec.floors);
   if (lattice_facade) {
-    const int rows = std::max(1, (spec.floors - first_floor * 0) / std::max(1, spec.lattice_rows));
+    int rows = std::max(1, spec.floors / std::max(1, spec.lattice_rows));
+    if (spec.facade == FacadeKind::HexLattice) rows = std::max(1, static_cast<int>(std::ceil(static_cast<float>(rows) / 0.75f)) - 1);
     const int extra = spec.crown == CrownKind::Lattice ? 2 : 0;
     lattice(c, 0, rows + extra, 0.75f, extra > 0);
   }

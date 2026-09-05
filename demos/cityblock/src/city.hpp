@@ -11,7 +11,7 @@
 
 namespace cb {
 
-enum class CitySize : std::uint8_t { Small, Medium, Large, Metropolis };
+enum class CitySize : std::uint8_t { Outpost, Village, Small, Medium, Large, Metropolis };
 const char* to_string(CitySize s);
 CitySize city_size_for(Rng& rng);
 bool parse_city_size(const std::string& text, CitySize* out);

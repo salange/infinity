@@ -51,7 +51,8 @@ void build_entrance(Scene& sc, EntranceKind kind, Vec2 p, Vec2 n, float y, float
       break;
     }
     case EntranceKind::Portal: {
-      Emit c(&mesh, M_MARBLE_WHITE);
+      if (detail == 0) break;  // far buildings keep only the door
+      Emit c(&mesh, M_WHITE_METAL);
       const float pw = door_w + 2.4f, ph = door_h + 1.2f, pd = 1.4f;
       // a proud portal frame: two jambs and a lintel
       c.box(P3(p, y + ph * 0.5f) + n3 * (pd * 0.5f) - t3 * (pw * 0.5f - 0.5f), Vec3{0.5f, ph * 0.5f, pd * 0.5f}, t3, Vec3{0, 1, 0}, n3);
@@ -486,18 +487,125 @@ void build_overpass(Scene& sc, const std::vector<Vec2>& ctrl, float deck_y, floa
 
 // ---- government building ----------------------------------------------------------------
 
-void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rng, int detail) {
+void build_settler_house(Scene& sc, Vec2 c, float rot, float y, Rng& rng, int detail, bool deck) {
   Mesh& mesh = sc.opaque;
-  // marble foundation with wide stairs toward the front (+z on paper = south)
-  const std::vector<Vec2> base = plan_transform(plan_rect(half * 1.25f, half * 1.05f), c, rot);
-  const float fh = 3.2f;
-  build_foundation(sc, base, y, fh, 2, detail);  // edge 2 = the +z (front) edge of plan_rect
+  // a small glass pavilion for two: rounded plan, floor-to-ceiling glass,
+  // a thin white roof slab, a solar array on top
+  const std::vector<Vec2> plan = plan_transform(plan_rounded_rect(5.0f, 3.6f, 1.4f, 4), c, rot);
+  const float h = 3.4f;
+  Emit g(&mesh, M_GLASS_CLEAR);
+  g.element_random = rng.next();
+  float u = 0.0f;
+  for (std::size_t i = 0; i < plan.size(); ++i) {
+    const std::size_t j = (i + 1) % plan.size();
+    const float w = length(plan[j] - plan[i]);
+    glass_wall(g, plan[i], plan[j], y + 0.3f, y + h, u);
+    u += w;
+  }
+  Emit w(&mesh, M_WHITE_METAL);
+  w.wall(plan_offset(plan, 0.05f), y, y + 0.3f, true, true);
+  Emit fl(&mesh, M_TERRAZZO);
+  fl.polygon(plan, y + 0.31f, true);
+  Emit l(&mesh, M_LOBBY_LIGHT);
+  l.polygon(plan_offset(plan, -0.6f), y + h - 0.1f, false);
+  slab(mesh, plan_offset(plan, 0.9f), y + h + 0.25f, 0.25f, M_WHITE_METAL);
+  Emit sol(&mesh, M_GLASS_DARK);
+  sol.element_random = rng.next();
+  sol.polygon(plan_offset(plan, 0.3f), y + h + 0.28f, true);
+  if (detail >= 1) {
+    for (std::size_t i = 0; i < plan.size(); i += 3) {
+      const Vec2 q = plan[i] + normalize(plan[i] - c) * 0.6f;
+      w.tube(P3(q, y), P3(q, y + h), 0.06f, 6, false);
+    }
+  }
+  if (deck) {
+    const std::vector<Vec2> deck_plan = plan_transform(plan_rounded_rect(9.0f, 7.0f, 2.0f, 4), c, rot);
+    Emit d(&mesh, M_CONCRETE_WHITE);
+    d.wall(deck_plan, y - 0.3f, y, true, true);
+    d.polygon(deck_plan, y, true);
+    build_hedge_ring(sc, deck_plan, 0.6f, 0.6f, 0.6f, y, 8.0f, rng);
+  }
+  // the couple's utilities: a water tank and an antenna
+  Emit u2(&mesh, M_SILVER);
+  const Vec2 t = c + plan_transform({Vec2{6.5f, 2.5f}}, Vec2{0, 0}, rot)[0];
+  u2.tube(P3(t, y), P3(t, y + 1.6f), 0.7f, 12, true);
+  u2.tube(P3(t + Vec2{1.5f, 0}, y), P3(t + Vec2{1.5f, 0}, y + 5.0f), 0.05f, 6, true);
+}
+
+void build_pod_wreck(Scene& sc, Vec2 c, float y, Rng& rng, int detail, bool memorial) {
+  Mesh& mesh = sc.opaque;
+  const int seg = detail >= 1 ? 40 : 20;
+  // the scorched pad ring the pod came down on
+  Emit dark(&mesh, M_PANEL_DARK);
+  dark.polygon(plan_circle(9.0f, seg, c), y + 0.005f, true);
+  Emit rim(&mesh, memorial ? M_MARBLE_WHITE : M_CONCRETE);
+  rim.ring_cap(plan_circle(9.6f, seg, c), plan_circle(8.8f, seg, c), y + 0.15f, true);
+  rim.wall(plan_circle(9.6f, seg, c), y, y + 0.15f, true, true);
+  // the pod: a truncated cone hull, tilted, landing legs
+  Emit hull(&mesh, M_SILVER);
+  const Vec3 base = P3(c + Vec2{1.5f, -0.8f}, y + 0.9f);
+  const Vec3 tilt = normalize(Vec3{0.18f, 1.0f, -0.12f});
+  hull.frustum(base, base + tilt * 4.2f, 2.6f, 1.4f, detail >= 1 ? 20 : 10, true);
+  hull.frustum(base + tilt * 4.2f, base + tilt * 5.4f, 1.4f, 0.4f, detail >= 1 ? 16 : 8, true);
+  Emit leg(&mesh, M_DARK_METAL);
+  for (int i = 0; i < 4; ++i) {
+    const float a = static_cast<float>(i) / 4.0f * 2.0f * kPi + 0.4f;
+    const Vec3 foot = P3(c + Vec2{1.5f, -0.8f} + Vec2{std::cos(a), std::sin(a)} * 3.6f, y + 0.15f);
+    leg.tube(base + Vec3{std::cos(a) * 2.0f, 0.4f, std::sin(a) * 2.0f}, foot, 0.12f, 6, true);
+    leg.frustum(foot, foot + Vec3{0, 0.12f, 0}, 0.45f, 0.5f, 8, true);
+  }
+  // hatch door lying on the ground, a couple of crates
+  Emit door(&mesh, M_SILVER);
+  door.box(P3(c + Vec2{-3.0f, 2.5f}, y + 0.2f), Vec3{1.1f, 0.05f, 0.8f}, Vec3{0.9f, 0, 0.44f}, Vec3{0, 1, 0}, Vec3{-0.44f, 0, 0.9f});
+  Emit crate(&mesh, M_PANEL_DARK);
+  crate.box(P3(c + Vec2{-4.0f, -3.0f}, y + 0.5f), Vec3{0.6f, 0.5f, 0.6f});
+  crate.box(P3(c + Vec2{-2.7f, -3.4f}, y + 0.35f), Vec3{0.5f, 0.35f, 0.5f});
+  if (memorial) {
+    Emit lt(&mesh, M_PAD_LIGHT);
+    for (int i = 0; i < 8; ++i) {
+      const float a = static_cast<float>(i) / 8.0f * 2.0f * kPi;
+      lt.box(P3(c + Vec2{std::cos(a), std::sin(a)} * 9.2f, y + 0.22f), Vec3{0.15f, 0.06f, 0.15f});
+    }
+  } else {
+    Emit deb(&mesh, M_DARK_METAL);
+    for (int i = 0; i < 6; ++i) {
+      const Vec2 q = c + Vec2{rng.range(-8.0f, 8.0f), rng.range(-8.0f, 8.0f)};
+      const float a = rng.range(0.0f, 3.0f);
+      deb.box(P3(q, y + 0.1f), Vec3{rng.range(0.2f, 0.6f), 0.08f, rng.range(0.2f, 0.5f)}, Vec3{std::cos(a), 0, std::sin(a)}, Vec3{0, 1, 0}, Vec3{-std::sin(a), 0, std::cos(a)});
+    }
+  }
+}
+
+void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rng, int detail, int stage) {
+  Mesh& mesh = sc.opaque;
+  if (stage <= 0) {
+    build_settler_house(sc, c, rot, y, rng, detail, false);
+    return;
+  }
+  if (stage == 1) {
+    build_settler_house(sc, c, rot, y, rng, detail, true);
+    Emit col(&mesh, M_CONCRETE_WHITE);
+    for (int i = 0; i < 8; ++i) {
+      const float a = static_cast<float>(i) / 8.0f * 2.0f * kPi;
+      const Vec2 q = c + Vec2{std::cos(a), std::sin(a)} * 13.0f;
+      col.tube(P3(q, y), P3(q, y + 4.5f), 0.3f, 10, false);
+    }
+    Emit ring(&mesh, M_WHITE_METAL);
+    ring.torus(P3(c, y + 4.6f), Vec3{0, 1, 0}, 13.0f, 0.18f, 48, 8);
+    return;
+  }
+  // stage >= 2: a civic building. Marble is for the foundation only; walls,
+  // columns and entablature are the clean white the towers use.
+  const float body_scale = stage == 2 ? 0.55f : (stage == 3 ? 0.8f : 1.0f);
+  const float h2 = half * body_scale;
+  const float fh = stage == 2 ? 0.9f : (stage == 3 ? 2.2f : 3.2f);
+  const std::vector<Vec2> base = plan_transform(plan_rect(h2 * 1.25f, h2 * 1.05f), c, rot);
+  build_foundation(sc, base, y, fh, 2, detail);
   const float top = y + fh;
-  // body: rounded-square white building with a full colonnade
-  const std::vector<Vec2> body = plan_transform(plan_superellipse(half * 0.78f, half * 0.62f, 4.0f, detail >= 1 ? 64 : 32), c, rot);
-  const float storey = 5.2f;
-  const int storeys = 4;
-  Emit wall(&mesh, M_MARBLE_WHITE);
+  const std::vector<Vec2> body = plan_transform(plan_superellipse(h2 * 0.78f, h2 * 0.62f, 4.0f, detail >= 1 ? 64 : 32), c, rot);
+  const float storey = stage == 2 ? 4.6f : 5.2f;
+  const int storeys = stage == 2 ? 2 : (stage == 3 ? 3 : (stage == 4 ? 4 : 5));
+  Emit wall(&mesh, M_WHITE_METAL);
   Emit glass(&mesh, M_GLASS_CLEAR);
   glass.element_random = rng.next();
   const float body_top = top + storey * storeys;
@@ -505,7 +613,6 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
   for (std::size_t i = 0; i < body.size(); ++i) {
     const Vec2 a = body[i], b = body[(i + 1) % body.size()];
     const float w = length(b - a);
-    // alternating tall glass slots and marble piers per storey
     for (int f = 0; f < storeys; ++f) {
       const float y0 = top + storey * f, y1 = y0 + storey;
       glass.quad(P3(b, y0 + 0.6f), P3(a, y0 + 0.6f), P3(a, y1 - 0.4f), P3(b, y1 - 0.4f), QuadUV{{u + w, y0 + 0.6f}, {u, y0 + 0.6f}, {u, y1 - 0.4f}, {u + w, y1 - 0.4f}});
@@ -514,50 +621,57 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
     }
     u += w;
   }
-  // colonnade: columns on an outer ring carrying a thin entablature
-  const std::vector<Vec2> ring = plan_offset(body, 4.5f);
-  Emit col(&mesh, M_MARBLE_WHITE);
+  const std::vector<Vec2> ring = plan_offset(body, stage == 2 ? 3.0f : 4.5f);
+  Emit col(&mesh, M_WHITE_METAL);
   const float per = plan_perimeter(ring);
   const int cols = std::max(12, static_cast<int>(per / 6.0f));
-  Sampled s = plan_sample(ring, per / cols);
-  for (std::size_t i = 0; i < s.points.size(); ++i) {
-    col.tube(P3(s.points[i], top), P3(s.points[i], body_top - 0.2f), 0.55f, detail >= 1 ? 14 : 8, false);
-    if (detail >= 1) col.frustum(P3(s.points[i], body_top - 0.9f), P3(s.points[i], body_top - 0.2f), 0.55f, 0.8f, 12, false);
+  Sampled sm = plan_sample(ring, per / cols);
+  for (std::size_t i = 0; i < sm.points.size(); ++i) {
+    col.tube(P3(sm.points[i], top), P3(sm.points[i], body_top - 0.2f), 0.5f, detail >= 1 ? 14 : 8, false);
+    if (detail >= 1) col.frustum(P3(sm.points[i], body_top - 0.9f), P3(sm.points[i], body_top - 0.2f), 0.5f, 0.75f, 12, false);
   }
-  slab(mesh, plan_offset(ring, 1.0f), body_top + 0.6f, 0.8f, M_MARBLE_WHITE);
-  parapet(mesh, plan_offset(ring, 1.0f), body_top + 0.6f, 0.9f, 0.4f, M_MARBLE_WHITE);
-  // glass dome with ribs
-  const float dome_r = half * 0.5f;
-  const Vec3 dc = P3(c, body_top + 0.6f);
-  Emit dome(&mesh, M_GLASS_CLEAR);
-  dome.element_random = rng.next();
-  dome.sphere(dc, dome_r, detail >= 1 ? 12 : 6, detail >= 1 ? 32 : 16);
-  Emit ribs(&mesh, M_WHITE_METAL);
-  const int nribs = detail >= 1 ? 16 : 8;
-  for (int r = 0; r < nribs; ++r) {
-    const float a = static_cast<float>(r) / nribs * 2.0f * kPi;
-    Vec3 prev = dc + Vec3{std::cos(a) * dome_r, 0, std::sin(a) * dome_r};
-    for (int k = 1; k <= 8; ++k) {
-      const float ph = static_cast<float>(k) / 8.0f * kPi * 0.5f;
-      const Vec3 p = dc + Vec3{std::cos(a) * std::cos(ph) * dome_r, std::sin(ph) * dome_r, std::sin(a) * std::cos(ph) * dome_r};
-      ribs.tube(prev, p, 0.18f, 6, false);
-      prev = p;
+  slab(mesh, plan_offset(ring, 1.0f), body_top + 0.6f, 0.8f, M_WHITE_METAL);
+  parapet(mesh, plan_offset(ring, 1.0f), body_top + 0.6f, 0.9f, 0.4f, M_WHITE_METAL);
+  if (stage >= 3) {
+    const float dome_r = h2 * (stage == 3 ? 0.4f : (stage == 5 ? 0.6f : 0.5f));
+    const Vec3 dc = P3(c, body_top + 0.6f);
+    Emit dome(&mesh, M_GLASS_CLEAR);
+    dome.element_random = rng.next();
+    dome.sphere(dc, dome_r, detail >= 1 ? 12 : 6, detail >= 1 ? 32 : 16);
+    Emit ribs(&mesh, M_WHITE_METAL);
+    const int nribs = detail >= 1 ? 16 : 8;
+    for (int r = 0; r < nribs; ++r) {
+      const float a = static_cast<float>(r) / nribs * 2.0f * kPi;
+      Vec3 prev = dc + Vec3{std::cos(a) * dome_r, 0, std::sin(a) * dome_r};
+      for (int k = 1; k <= 8; ++k) {
+        const float ph = static_cast<float>(k) / 8.0f * kPi * 0.5f;
+        const Vec3 p = dc + Vec3{std::cos(a) * std::cos(ph) * dome_r, std::sin(ph) * dome_r, std::sin(a) * std::cos(ph) * dome_r};
+        ribs.tube(prev, p, 0.18f, 6, false);
+        prev = p;
+      }
     }
+    ribs.torus(dc + Vec3{0, dome_r * 0.5f, 0}, Vec3{0, 1, 0}, dome_r * 0.866f, 0.16f, 48, 6);
+    Emit lantern(&mesh, M_CHROME);
+    lantern.tube(dc + Vec3{0, dome_r, 0}, dc + Vec3{0, dome_r + 6.0f, 0}, 0.3f, 8, true);
+    Emit beacon(&mesh, M_SIGN);
+    beacon.sphere(dc + Vec3{0, dome_r + 6.3f, 0}, 0.6f, 6, 10);
+  } else {
+    Emit roof(&mesh, M_ROOF);
+    roof.polygon(plan_offset(body, -0.3f), body_top + 0.62f, true);
   }
-  ribs.torus(dc + Vec3{0, dome_r * 0.5f, 0}, Vec3{0, 1, 0}, dome_r * 0.866f, 0.16f, 48, 6);
-  Emit lantern(&mesh, M_CHROME);
-  lantern.tube(dc + Vec3{0, dome_r, 0}, dc + Vec3{0, dome_r + 6.0f, 0}, 0.3f, 8, true);
-  Emit beacon(&mesh, M_SIGN);
-  beacon.sphere(dc + Vec3{0, dome_r + 6.3f, 0}, 0.6f, 6, 10);
-  // front stairs are part of the foundation; flank the approach with flags/pillars
-  const Vec2 front = plan_transform({Vec2{0, half * 1.05f + 6.0f}}, c, rot)[0];
-  const Vec2 side = plan_transform({Vec2{half * 0.9f, 0}}, Vec2{0, 0}, rot)[0];
-  for (float sgn : {-1.0f, 1.0f}) {
-    Emit m(&mesh, M_CHROME);
-    const Vec2 q = front + side * sgn;
-    m.tube(P3(q, y), P3(q, y + 12.0f), 0.12f, 8, true);
-    Emit flag(&mesh, M_SIGN);
-    flag.box(P3(q, y + 11.0f), Vec3{0.05f, 0.8f, 1.2f});
+  if (stage >= 4) {
+    const Vec2 front = plan_transform({Vec2{0, h2 * 1.05f + 6.0f}}, c, rot)[0];
+    const Vec2 side = plan_transform({Vec2{h2 * 0.9f, 0}}, Vec2{0, 0}, rot)[0];
+    const int flags = stage == 5 ? 3 : 1;
+    for (int k = 0; k < flags; ++k) {
+      for (float sgn : {-1.0f, 1.0f}) {
+        Emit m(&mesh, M_CHROME);
+        const Vec2 q = front + side * (sgn * (1.0f - 0.25f * static_cast<float>(k)));
+        m.tube(P3(q, y), P3(q, y + 12.0f), 0.12f, 8, true);
+        Emit flag(&mesh, M_SIGN);
+        flag.box(P3(q, y + 11.0f), Vec3{0.05f, 0.8f, 1.2f});
+      }
+    }
   }
 }
 

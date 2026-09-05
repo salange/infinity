@@ -757,6 +757,21 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
       const float dist = length(d.centre - camera.position);
       if (dist < d.lod_max_distance) chosen[static_cast<std::size_t>(d.lod_group)] = std::min(chosen[static_cast<std::size_t>(d.lod_group)], d.lod_level);
     }
+    // the finest level a group actually has may be coarser than the pick
+    for (const DrawRange& d : I.draws) {
+      if (d.lod_group < 0) continue;
+      int& c = chosen[static_cast<std::size_t>(d.lod_group)];
+      if (c < d.lod_level) {
+        bool has = false;
+        for (const DrawRange& e : I.draws) if (e.lod_group == d.lod_group && e.lod_level == c) { has = true; break; }
+        if (!has) c = d.lod_level;
+      }
+    }
+    // coarsest level present per group (shadows use it; also the fallback)
+    std::vector<int> coarsest(chosen.size(), -1);
+    for (const DrawRange& d : I.draws) {
+      if (d.lod_group >= 0) coarsest[static_cast<std::size_t>(d.lod_group)] = std::max(coarsest[static_cast<std::size_t>(d.lod_group)], d.lod_level);
+    }
     for (const DrawRange& d : I.draws) {
       const bool in_view = d.radius <= 0.0f || frustum.visible(d.centre, d.radius);
       if (d.lod_group < 0) {
@@ -765,8 +780,9 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
         continue;
       }
       const int pick = chosen[static_cast<std::size_t>(d.lod_group)];
+      const int lo = coarsest[static_cast<std::size_t>(d.lod_group)];
       if (d.lod_level == pick && in_view) I.sel_main.emplace_back(d.first, d.count);
-      if (d.lod_level == 2 || (pick > 2 && d.lod_level == pick)) I.sel_shadow.emplace_back(d.first, d.count);  // shadows from the coarse level
+      if (d.lod_level == lo) I.sel_shadow.emplace_back(d.first, d.count);  // shadows from the coarsest level
     }
     // merge contiguous ranges to cut draw calls
     auto merge = [](std::vector<std::pair<std::uint32_t, std::uint32_t>>& v) {

@@ -96,12 +96,12 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--sweep-out")) a.sweep_out = next("--sweep-out");
     else if (!std::strcmp(argv[i], "--size")) {
       const std::string t = next("--size");
-      a.size = t == "small" ? 0 : (t == "medium" ? 1 : (t == "large" ? 2 : (t == "metropolis" ? 3 : -1)));
+      a.size = t == "outpost" ? 0 : (t == "village" ? 1 : (t == "small" ? 2 : (t == "medium" ? 3 : (t == "large" ? 4 : (t == "metropolis" ? 5 : -1)))));
     }
     else if (!std::strcmp(argv[i], "--context-detail")) a.context_detail = std::atoi(next("--context-detail"));
     else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
       std::printf("cityblock [--seed S] [--width W --height H] [--hidden] [--capture out.png --frames N]\n"
-                  "          [--sky day|night|sunset|file.hdr] [--sky-yaw deg] [--night] [--assets dir]\n"
+                  "          [--sky day|night|sunset|file.hdr] [--sky-yaw deg] [--night] [--assets dir] [--size outpost|village|small|medium|large|metropolis] [--showcase]\n"
                   "          [--cam x,y,z --target x,y,z] [--msaa 1|4] [--no-context] [--debug 0-5] [--ev bias]\n");
       std::exit(0);
     } else {
@@ -387,9 +387,9 @@ int main(int argc, char** argv) {
     if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) up += 1;
     if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) up -= 1;
     float mult = 1.0f;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) mult = 4.0f;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) mult = 0.25f;
-    cam.move(fwd, strafe, up, dt, mult);
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) mult = 5.0f;
+    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) mult = 0.2f;
+    cam.update(fwd, strafe, up, dt, mult);
     if (pressed(GLFW_KEY_N)) {
       night = !night;
       renderer.set_environment(night ? &env_night : &env_day, night);

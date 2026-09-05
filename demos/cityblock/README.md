@@ -23,8 +23,10 @@ build/demos/cityblock/cityblock
 Without the assets the demo still runs: every material has a procedural
 fallback and the sky falls back to an analytic gradient.
 
-Controls: click to capture the mouse (Esc releases), mouse look, `W A S D`
-move, `Q`/`E` down/up, Shift fast, Ctrl slow, scroll changes speed, `N`
+Controls: click to capture the mouse (Esc releases), mouse look (yaw is
+unbounded), `W A S D` move, `Q`/`E` down/up, Shift 5× fast, Ctrl slow,
+scroll changes the cruise speed (72 m/s default; movement accelerates and
+brakes over ~0.25 s), `N`
 day/night, `F1` cycles debug views (albedo, normals, ambient occlusion,
 shadow cascades, roughness, direct sun, IBL diffuse, IBL specular, sun
 specular), `F2`–`F5` toggle SSAO / shadows / bloom / FXAA, `+`/`-`
@@ -38,7 +40,18 @@ Flags: `--seed S`, `--width W --height H`, `--sky day|night|sunset|file.hdr`,
 
 ## The city
 
-`--size small|medium|large|metropolis` (default: from the seed). The city
+`--size outpost|village|small|medium|large|metropolis` (default: from the
+seed). Sizes grow non-linearly, each step roughly doubling the radius:
+outpost 40 m (one settler couple's glass house beside the wreck of their
+landing pod, nothing else), village 150 m (the house gains a deck and a
+colonnade ring, the pod becomes a memorial where the unification ring will
+stand, a few sparse buildings and gardens), small 320 m (a two-storey civic
+hall on a plinth, one modest tower at most), medium 620 m (hall with a
+dome, towers in the core), large 1.25 km (the full capitol, lattice
+families unlocked), metropolis 2.5 km (taller dome and flag court, a dense
+downtown of towers, standard buildings to the horizon). Building density
+scales with size: small settlements leave lots unbuilt as lawns and voids
+and use larger lots; the metropolis fills every lot. The city
 (`src/city.cpp`) is a jittered street grid: every third line is an artery
 (26 m, raised median with hedges and sparse trees), the rest secondary
 roads (14 m); blocks are split into lots along alleys; one or two diagonal
@@ -77,8 +90,11 @@ the blocks carry standard buildings; some blocks become plazas.
 - Trees are budgeted per city size and used sparsely (medians, plazas,
   gardens); point lights are capped at the 64 nearest the centre.
 
-Triangle counts: small ≈ 80 k, medium ≈ 250 k, large ≈ 700 k,
-metropolis ≈ 1.4 M.
+Geometry budget: full tower detail exists only for the core towers (at
+most 10–14), mid detail out to the tower zone, the rest at the coarse
+level; outer standard buildings drop trims and balconies. Triangle counts:
+outpost 1 k, village 5 k, small 50 k, medium 0.4 M, large ≈ 3 M,
+metropolis ≈ 5–6 M.
 
 ## What is generated (the original hero block, kept as families)
 

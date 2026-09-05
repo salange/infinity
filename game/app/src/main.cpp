@@ -3232,6 +3232,19 @@ int main(int argc, char** argv) {
                             static_cast<double>(frame_params.sun_dir[1]) * frame_params.planet_up[1] +
                             static_cast<double>(frame_params.sun_dir[2]) * frame_params.planet_up[2];
       city_settings.night = static_cast<float>(std::clamp((0.03 - sun_up) / 0.12, 0.0, 1.0));
+      {
+        // Twilight: the sun's light through the long atmospheric path at
+        // the horizon — dim and warm as it sets, gone a few degrees under
+        // (until now a sun just below the horizon still lit tower tops and
+        // far hills at full strength, blowing out under night exposure).
+        // Cosmetic; the terrain, the city and the dome share the tint.
+        const double t = std::clamp((sun_up + 0.03) / 0.15, 0.0, 1.0);
+        const double tw = t * t * (3.0 - 2.0 * t);
+        const double warm[3] = {1.0, 0.55 + 0.45 * tw, 0.35 + 0.65 * tw};
+        for (int c = 0; c < 3; ++c) {
+          frame_params.sun_color[c] *= static_cast<float>((0.02 + 0.98 * tw) * warm[c]);
+        }
+      }
       city_settings.debug_view = city_debug;
       city_settings.ssao = !no_ssao;
       city_settings.shadows = !no_shadows;

@@ -596,11 +596,11 @@ Texel generic(Kind kind, std::uint64_t seed, double u, double v) {
       t.roughness = 0.75;
       t.emissive = 0.0;
       if (window) {
-        const bool lit = pane > 0.4;
+        const bool lit = pane > 0.65;  // a third of the windows lit
         t.color = lit ? Rgb{0.92, 0.80, 0.58} : Rgb{0.16, 0.20, 0.26};
         t.height = 0.35;
         t.roughness = 0.1;
-        t.emissive = lit ? 0.8 : 0.0;
+        t.emissive = lit ? 0.6 : 0.0;
       }
       return t;
     }

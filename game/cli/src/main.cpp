@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[2], "site") == 0) {
       return inf::cli::cmd_civ_site(*seed, have_cell ? cell : nullptr, slot, moon, tier_text, site_index,
-                                    time_text, out_path);
+                                    time_text, out_path, have_at ? at : nullptr);
     }
     if (std::strcmp(argv[2], "map") == 0) {
       return inf::cli::cmd_civ_map(*seed, have_cell ? cell : nullptr, slot, moon, time_text, out_path);

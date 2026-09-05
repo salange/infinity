@@ -9,6 +9,7 @@
 #include "gen/civ_names.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/civilization.hpp"
+#include "gen/ecumenopolis.hpp"
 #include "gen/system.hpp"
 #include "gen/universe.hpp"
 
@@ -944,6 +945,129 @@ TEST_CASE("buildings/v1: determinism, budgets, ruins, construction, asset-less (
       const gen::BuildingMesh r = gen::build_building(ruin, key, bp);
       CHECK(!r.emissive_windows);
       CHECK(r.top_z <= a.top_z);  // stilt decks and plinths keep their height
+    }
+  }
+}
+
+TEST_CASE("ecumenopolis/v1: plates over terrain, block determinism, tile cost (WP7)") {
+  const core::Seed128 seed{0, 0x83};
+  const core::Key galaxy_key = gen::home_galaxy_key(seed);
+  const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
+  const gen::CivilizationParams civ = gen::derive_civilization(galaxy_key, galaxy, true);
+  gen::RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(gen::human_race(galaxy_key, galaxy));
+  const gen::ColonyResolver resolver(registry);
+  const gen::SystemCivContext context = gen::gather_system_context(seed, registry, gen::SystemCell{}, false);
+  const gen::StarSystemParams system = gen::generate_system(context.system_key);
+  const gen::Owner owner = resolver.owner(context, gen::kLaunchReference);
+  const auto states = resolver.system_states(context, owner, gen::kLaunchReference);
+  int home = -1;
+  for (std::size_t i = 0; i < states.size(); ++i) if (states[i].is_home) home = static_cast<int>(i);
+  REQUIRE(home >= 0);
+  const gen::BodyCivInputs& body = context.bodies[static_cast<std::size_t>(home)];
+  const gen::BodyKeys keys = gen::body_keys_in_system(context.system_key, body.slot);
+  const gen::PlanetParams params = gen::planet_params_for_slot(system, body.slot, gen::BodyHandle{keys.entity, keys.params});
+  gen::TerrainField field(keys.entity, params);
+  const gen::Race race = resolver.candidates(context.position_m)[owner.candidate];
+  for (const bool ruined : {false, true}) {
+    gen::CivState state = states[static_cast<std::size_t>(home)];
+    state.level = 7;
+    state.max_level = 7;
+    state.ruined = ruined;
+    const gen::SettlementPlanner planner(keys.entity, field, race.params, false);
+    const gen::SettlementPlan plan = planner.plan(state, race.factions);
+    // Level 7: every province is the city, one capital.
+    for (const gen::ProvinceSite& p : plan.provinces) {
+      CHECK(p.settled);
+      CHECK(p.tier == gen::SettlementTier::Ecumenopolis);
+    }
+    CHECK(plan.capital >= 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    const gen::EcumenopolisField ecum(keys.entity, field, plan, race.params, race.factions, state);
+    const double build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(build_ms < 3000.0);
+    CHECK(ecum.block_m() > 80.0);
+    CHECK(ecum.block_m() < 180.0);
+    field.set_height_modifier(&ecum);
+    // The plate is at or above the terrain everywhere (preserved peaks
+    // keep the terrain), continuous across province borders, and over
+    // the sea where the province is ocean.
+    const double sea = params.sea_level_m.to_double();
+    double max_step = 0.0;
+    int above = 0;
+    int samples = 0;
+    for (int k = 0; k < 400; ++k) {
+      const double a = 0.0157 * k;
+      const double b = 1.5 * std::sin(0.61 * k);
+      const gen::Dir3 d = gen::normalize(gen::Dir3{det::Real(std::cos(a) * std::cos(b)), det::Real(std::sin(a) * std::cos(b)), det::Real(std::sin(b))});
+      const double base = field.base_elevation_m(d).to_double();
+      const double h = field.elevation_m(d).to_double();
+      const double plate = ecum.plate_m(d);
+      CHECK(h >= base - 1e-6);
+      if (!ruined) {
+        CHECK(h >= std::min(plate, base) - 1e-6);
+        CHECK(plate >= sea + gen::EcumenopolisField::kPlateAboveSeaM - 0.5);  // float plate storage
+      }
+      above += h > base + 1.0 ? 1 : 0;
+      ++samples;
+      // Continuity: a 5 m step moves the plate by less than 1 m.
+      gen::Dir3 e{};
+      gen::Dir3 n{};
+      gen::tangent_basis(d, &e, &n);
+      const double eps = 5.0 / params.radius_m.to_double();
+      const gen::Dir3 d2 = gen::normalize(gen::Dir3{d.x + e.x * det::Real(eps), d.y + e.y * det::Real(eps), d.z + e.z * det::Real(eps)});
+      max_step = std::max(max_step, std::fabs(ecum.plate_m(d2) - plate));
+    }
+    CHECK(max_step < 1.0);
+    CHECK(above > samples / 2);  // the city stands above the terrain almost everywhere
+    // Block determinism: the same block from two tiles' frames gives the
+    // same towers (in the two frames' coordinates), and a tile builds
+    // identically twice.
+    const gen::Dir3 c = field.provinces().representative(plan.provinces[static_cast<std::size_t>(plan.capital)].cell);
+    const gen::EcumenopolisField::BlockId block = ecum.block_of(c);
+    const gen::EcumenopolisField::TileId near = ecum.tile_of(c, 3);
+    const gen::EcumenopolisField::TileId mid = ecum.tile_of(c, 5);
+    std::vector<gen::Lot> a;
+    std::vector<gen::Lot> b;
+    ecum.towers_in_block(block, ecum.tile_frame(near), &a);
+    ecum.towers_in_block(block, ecum.tile_frame(mid), &b);
+    CHECK(a.size() == b.size());
+    for (std::size_t i = 0; i < a.size() && i < b.size(); ++i) {
+      CHECK(a[i].height_budget_m == b[i].height_budget_m);
+      CHECK(a[i].usage == b[i].usage);
+      CHECK(a[i].datum_m == b[i].datum_m);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const gen::EcumenopolisMesh m1 = gen::build_ecumenopolis_tile(ecum, near, 2);
+    const double near_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    const gen::EcumenopolisMesh m2 = gen::build_ecumenopolis_tile(ecum, near, 2);
+    CHECK(m1.mesh.vertices == m2.mesh.vertices);
+    CHECK(m1.tower_count > 0);
+    CHECK(near_ms < 50.0);
+    const auto t2 = std::chrono::steady_clock::now();
+    const gen::EcumenopolisMesh far = gen::build_ecumenopolis_tile(ecum, ecum.tile_of(c, 6), 3);
+    const double far_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count();
+    CHECK(far.triangle_count > 0);
+    CHECK(far_ms < 120.0);
+    const auto t3 = std::chrono::steady_clock::now();
+    const gen::EcumenopolisMesh parts = gen::build_ecumenopolis_tile(ecum, near, 0);
+    const double parts_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t3).count();
+    CHECK(parts.triangle_count >= m1.triangle_count);
+    CHECK(parts_ms < 400.0);
+    // Modifier cost per sample stays within the terrain budget.
+    const auto t4 = std::chrono::steady_clock::now();
+    double acc = 0.0;
+    for (int k = 0; k < 20000; ++k) {
+      const double a = 0.00031 * k;
+      const gen::Dir3 d = gen::normalize(gen::Dir3{det::Real(std::cos(a)), det::Real(std::sin(a) * 0.7), det::Real(0.3 + 0.0001 * k)});
+      acc += ecum.plate_m(d);
+    }
+    const double per_sample_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t4).count() / 20000.0;
+    CHECK(acc != 0.0);
+    CHECK(per_sample_us < 6.0);
+    if (ruined) {
+      CHECK(!ecum.style().ruined == false);
+      CHECK(ecum.urban(c, det::Real(ecum.plate_m(c))).night_light < 0.05);
     }
   }
 }

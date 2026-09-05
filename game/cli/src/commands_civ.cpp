@@ -10,7 +10,11 @@
 #include <cstring>
 #include <vector>
 
+#include <chrono>
+
 #include "gen/civ_census.hpp"
+#include "gen/ecumenopolis.hpp"
+#include "gen/planet_texture.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/colony.hpp"
 #include "gen/settlements.hpp"
@@ -241,12 +245,25 @@ int cmd_civ_state(const core::Seed128& seed, const long long* cell_xyzl, const c
   return 0;
 }
 
-int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text) {
+int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text, int min_level) {
   const core::WorldTime t = parse_time(time_text);
   const gen::CivCensus census = gen::run_civ_census(seed, t, max_systems);
   std::printf("census at %+.3f yr from launch\n%s", 
               gen::ns_to_real_years(t.ns_since_epoch - gen::kLaunchReference.ns_since_epoch),
               census.report().c_str());
+  if (min_level > 0) {
+    std::printf("systems with a body at level >= %d:\n", min_level);
+    int count = 0;
+    for (const gen::CivCensus::Listed& l : census.listed) {
+      if (l.level < min_level) continue;
+      ++count;
+      std::printf("  --system %lld %lld %lld %d  slot %d moon %d  L%d%s  %.0f ly from home\n",
+                  static_cast<long long>(l.cell.x), static_cast<long long>(l.cell.y),
+                  static_cast<long long>(l.cell.z), l.cell.level, l.slot, l.moon, l.level,
+                  l.domed ? " domed" : "", l.dist_ly);
+    }
+    if (count == 0) std::printf("  none among the %d sampled human systems\n", census.systems_human);
+  }
   return 0;
 }
 
@@ -398,6 +415,112 @@ int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot_
 
 // WP5: one site of a body — its lots as a top-down PNG, a summary, and
 // capture script lines (pos/aim) for the app at 20 km, 2 km and 200 m.
+// WP7: an ecumenopolis world — the plate range, the block lattice, tile
+// costs, and capture lines from orbit down to street level over the
+// capital province.
+int describe_ecumenopolis(const core::Key& entity, gen::TerrainField& field, const gen::SettlementPlan& plan,
+                          const gen::Race& race, const gen::CivState& state, const gen::BodyCivInputs& body,
+                          const gen::PlanetParams& params) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const gen::EcumenopolisField ecum(entity, field, plan, race.params, race.factions, state);
+  field.set_height_modifier(&ecum);
+  const double build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  const double r = field.planet().radius_m.to_double();
+  std::printf("body slot %d%s %s L7 %s: ecumenopolis (field %.1f ms)\n", body.slot, body.moon >= 0 ? " (moon)" : "",
+              gen::to_string(params.type), state.ruined ? "RUINED" : "Trantorian", build_ms);
+  std::printf("blocks: level %d, %u per face, %.1f m; plates %.0f..%.0f m (sea %.0f m)\n", ecum.block_level(),
+              ecum.blocks_per_face(), ecum.block_m(), ecum.plate_min_m(), ecum.plate_max_m(),
+              field.planet().sea_level_m.to_double());
+  const gen::Dir3 centre = plan.capital >= 0 ? field.provinces().representative(plan.provinces[static_cast<std::size_t>(plan.capital)].cell)
+                                             : gen::Dir3{det::Real(0.0), det::Real(0.0), det::Real(1.0)};
+  const double plate = ecum.plate_m(centre);
+  const gen::EcumenopolisField::District d = ecum.district(centre);
+  std::printf("capital province %d: plate %.0f m, terrain %.0f m, district %d budget %.0f m\n", plan.capital, plate,
+              field.base_elevation_m(centre).to_double(), static_cast<int>(d.type), d.height_budget_m);
+  // Tile costs at every detail.
+  for (const auto& [shift, detail] : std::vector<std::pair<int, int>>{{3, 0}, {3, 1}, {3, 2}, {5, 2}, {6, 3}}) {
+    const auto t1 = std::chrono::steady_clock::now();
+    const gen::EcumenopolisMesh mesh = gen::build_ecumenopolis_tile(ecum, ecum.tile_of(centre, shift), detail);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    // Vertex bounds relative to the tile origin (a sanity check on the
+    // geometry: horizontal extent ~ the tile, height ~ the tallest tower).
+    double max_h = 0.0;
+    double max_z = -1e300;
+    double min_z = 1e300;
+    const double ox = mesh.mesh.origin[0], oy = mesh.mesh.origin[1], oz = mesh.mesh.origin[2];
+    const double olen = std::sqrt(ox * ox + oy * oy + oz * oz);
+    for (std::size_t v = 0; v + 2 < mesh.mesh.vertices.size(); v += 10) {
+      const double px = mesh.mesh.vertices[v], py = mesh.mesh.vertices[v + 1], pz = mesh.mesh.vertices[v + 2];
+      const double radial = (px * ox + py * oy + pz * oz) / olen;
+      const double h2 = px * px + py * py + pz * pz - radial * radial;
+      max_h = std::max(max_h, std::sqrt(std::max(0.0, h2)));
+      max_z = std::max(max_z, radial);
+      min_z = std::min(min_z, radial);
+    }
+    std::printf("tile shift %d (%.0f m) detail %d: %u blocks, %u towers, %u triangles, %.1f ms; extent %.0f m, z %.0f..%.0f m\n", shift,
+                ecum.tile_m(shift), detail, mesh.block_count, mesh.tower_count, mesh.triangle_count, ms, max_h, min_z, max_z);
+  }
+  // The far-view bake: how much of the surface carries urban albedo and
+  // night light (the orbit impostor's alpha).
+  {
+    const auto t1 = std::chrono::steady_clock::now();
+    const gen::PlanetTexture bake = gen::bake_planet_texture(field, 64, nullptr);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    std::size_t texels = 0;
+    std::size_t lit = 0;
+    double alpha_sum = 0.0;
+    for (const auto& face : bake.faces) {
+      for (std::size_t i = 3; i < face.rgba.size(); i += 4) {
+        ++texels;
+        alpha_sum += face.rgba[i] / 255.0;
+        lit += face.rgba[i] > 8 ? 1 : 0;
+      }
+    }
+    std::printf("bake 64: %zu texels, night alpha > 0.03 on %.1f%%, mean alpha %.3f, %.0f ms\n", texels,
+                texels > 0 ? 100.0 * lit / texels : 0.0, texels > 0 ? alpha_sum / texels : 0.0, ms);
+  }
+  // Capture lines: orbit, 50 km, 2 km, street.
+  gen::Dir3 east{};
+  gen::Dir3 north{};
+  gen::tangent_basis(centre, &east, &north);
+  const double cx = centre.x.to_double();
+  const double cy = centre.y.to_double();
+  const double cz = centre.z.to_double();
+  std::printf("centre dir (%.6f, %.6f, %.6f)  planet-local (%.1f, %.1f, %.1f)\n", cx, cy, cz, cx * (r + plate),
+              cy * (r + plate), cz * (r + plate));
+  std::printf("# capture script lines (app --script):\n");
+  for (const double range : {2.5 * r, 50000.0, 2000.0}) {
+    const double back = range * 0.8;
+    const double height = range * 0.6;
+    const double px = cx * (r + plate + height) - north.x.to_double() * back;
+    const double py = cy * (r + plate + height) - north.y.to_double() * back;
+    const double pz = cz * (r + plate + height) - north.z.to_double() * back;
+    const double tx = cx * (r + plate) - px;
+    const double ty = cy * (r + plate) - py;
+    const double tz = cz * (r + plate) - pz;
+    const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+    std::printf("pos %.1f %.1f %.1f\naim dir %.5f %.5f %.5f   # %.0f m\n", px, py, pz, tx / len, ty / len, tz / len,
+                range);
+  }
+  {
+    // Street level: on an arterial 30 m above the plate, looking along it.
+    const gen::EcumenopolisField::BlockId block = ecum.block_of(centre);
+    const gen::EcumenopolisField::BlockId on_arterial{block.face, (block.bi >> 3) << 3, block.bj};
+    const gen::Dir3 corner = ecum.block_corner(on_arterial, 0);
+    const double h = ecum.plate_m(corner) + 30.0;
+    const double px = corner.x.to_double() * (r + h);
+    const double py = corner.y.to_double() * (r + h);
+    const double pz = corner.z.to_double() * (r + h);
+    const gen::Dir3 ahead = ecum.block_corner(gen::EcumenopolisField::BlockId{on_arterial.face, on_arterial.bi, on_arterial.bj + 6}, 0);
+    const double tx = ahead.x.to_double() * (r + h - 10.0) - px;
+    const double ty = ahead.y.to_double() * (r + h - 10.0) - py;
+    const double tz = ahead.z.to_double() * (r + h - 10.0) - pz;
+    const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+    std::printf("pos %.1f %.1f %.1f\naim dir %.5f %.5f %.5f   # street\n", px, py, pz, tx / len, ty / len, tz / len);
+  }
+  return 0;
+}
+
 int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot_arg, int moon_arg,
                  const char* tier_text, int site_index, const char* time_text,
                  const char* out_path) {
@@ -450,6 +573,9 @@ int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot
   gen::TerrainField field(keys.entity, params);
   const gen::SettlementPlanner planner(keys.entity, field, race.params, state.domed);
   const gen::SettlementPlan plan = planner.plan(state, race.factions);
+  if (state.level >= 7) {
+    return describe_ecumenopolis(keys.entity, field, plan, race, state, body, params);
+  }
   const gen::SiteField sites(keys.entity, field, plan, race.params, race.factions, state);
   const gen::CivilField civil(sites, field);
   field.set_height_modifier(&civil);

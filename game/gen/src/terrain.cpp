@@ -815,7 +815,7 @@ MaterialInputs TerrainField::material_inputs(double px, double py, double pz, do
                             planet_.land_fraction.to_double() < 0.999 ? above_sea
                                                                      : elevation);
   if (modifier_ != nullptr && modifier_->near(dir)) {
-    const HeightModifier::Urban urban = modifier_->urban(dir);
+    const HeightModifier::Urban urban = modifier_->urban(dir, Real(elevation));
     in.urban = urban.weight;
     in.urban_family = urban.family;
     in.night_light = urban.night_light;

@@ -576,7 +576,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Settlement lights (T0020): the bake's alpha is the night-light
     // mask; warm sodium glow that fades in as the sun sets over it.
     let night6 = 1.0 - smoothstep(-0.05, 0.12, dot(n, light));
-    c6 += vec3<f32>(1.0, 0.72, 0.38) * alb4.a * night6 * 0.9;
+    c6 += vec3<f32>(1.0, 0.72, 0.38) * alb4.a * night6 * 0.5;
     return vec4<f32>(c6, 1.0);
   }
   if (mode == 1u) {
@@ -755,14 +755,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let k_far = smoothstep(2500.0, 14000.0, dist_far);
     if (k_far > 0.0) {
       let fuv_far = cube_face_uv(normalize(world_far));
-      let far = textureSampleLevel(planet_material, planet_sampler, fuv_far.xy,
-                                   i32(fuv_far.z), 0.0).rgb;
+      let far4 = textureSampleLevel(planet_material, planet_sampler, fuv_far.xy,
+                                    i32(fuv_far.z), 0.0);
+      let far = far4.rgb;
       base = mix(base, far, k_far);
       n = normalize(mix(n, n_geo, k_far));
       ndl = max(dot(n, light), 0.0);
       wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
       ao = mix(ao, 1.0, k_far);
-      emissive = emissive * (1.0 - k_far);
+      // Settlement lights (T0020): the bake's alpha is the night-light
+      // mask; the far field carries the same warm glow the impostor does,
+      // fading in as the sun sets over it.
+      let night_far = 1.0 - smoothstep(-0.05, 0.12, dot(n_geo, light));
+      emissive = emissive * (1.0 - k_far) +
+                 vec3<f32>(1.0, 0.72, 0.38) * far4.a * night_far * k_far * 0.5;
       rough = mix(rough, 0.9, k_far);
     }
   }

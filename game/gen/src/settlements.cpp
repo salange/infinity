@@ -267,6 +267,22 @@ void SettlementPlanner::update(SettlementPlan* plan, const CivState& state,
 void SettlementPlanner::assign_tiers(SettlementPlan* plan) const {
   const int level = plan->level;
   const std::uint32_t settled = plan->level >= 7 ? suitable_count_ : plan->settled_count;
+  if (level >= 7) {
+    // The ecumenopolis: every province (oceans included) is one
+    // continuous city; ecumenopolis/v1 takes over from the site list. The
+    // best-ranked province keeps the capital flag for tooling.
+    for (ProvinceSite& site : plan->provinces) {
+      site.tier = SettlementTier::Ecumenopolis;
+      site.capital = false;
+      site.radius_m = 0.0f;
+      site.site_progress = 0.999999f;
+    }
+    if (!by_rank_.empty()) {
+      plan->provinces[by_rank_[0]].capital = true;
+      plan->capital = static_cast<int>(by_rank_[0]);
+    }
+    return;
+  }
   // Tier by rank among the SETTLED provinces (design 13.3): top 20 %
   // towns from level 3, top 8 % cities from level 4, 3-8 metropolises at
   // level 6, exactly one capital from level 5.

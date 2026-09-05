@@ -12,6 +12,7 @@
 #include "gen/sites.hpp"
 #include "gen/civil.hpp"
 #include "gen/buildings.hpp"
+#include "gen/ecumenopolis.hpp"
 #include "gen/terrain.hpp"
 #include "gen/universe.hpp"
 
@@ -287,6 +288,81 @@ std::uint64_t hash_sites_script(const core::Seed128& seed) {
 }
 
 // WP6: the executor on synthetic lots of every rule set and state.
+// WP7: the ecumenopolis of the human home world under a forced level-7
+// state (live and ruined): plate datums, districts, block towers, tile
+// counts. The field is a pure function of (body, state), so the golden
+// needs no level-7 body to exist at launch.
+std::uint64_t hash_ecumenopolis_script(const core::Seed128& seed) {
+  core::GoldenHash hash;
+  const core::Key galaxy_key = home_galaxy_key(seed);
+  const GalaxyParams galaxy = home_galaxy_params(seed);
+  const CivilizationParams civ = derive_civilization(galaxy_key, galaxy, true);
+  RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(human_race(galaxy_key, galaxy));
+  const ColonyResolver resolver(registry);
+  const SystemCivContext context = gather_system_context(seed, registry, SystemCell{}, false);
+  const StarSystemParams system = generate_system(context.system_key);
+  const core::WorldTime t = kLaunchReference;
+  const Owner owner = resolver.owner(context, t);
+  const auto states = resolver.system_states(context, owner, t);
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    if (!states[i].is_home) continue;
+    const BodyCivInputs& body = context.bodies[i];
+    const BodyKeys keys = body_keys_in_system(context.system_key, body.slot);
+    const PlanetParams params = planet_params_for_slot(system, body.slot, BodyHandle{keys.entity, keys.params});
+    TerrainField field(keys.entity, params);
+    const Race& race = resolver.candidates(context.position_m)[owner.candidate];
+    for (const bool ruined : {false, true}) {
+      CivState state = states[i];
+      state.level = 7;
+      state.max_level = 7;
+      state.progress = 0.5;
+      state.ruined = ruined;
+      const SettlementPlanner planner(keys.entity, field, race.params, false);
+      const SettlementPlan plan = planner.plan(state, race.factions);
+      hash.feed(static_cast<std::uint64_t>(plan.capital + 1));
+      const EcumenopolisField ecum(keys.entity, field, plan, race.params, race.factions, state);
+      hash.feed(static_cast<std::uint64_t>(ecum.block_level()));
+      feed_double(hash, ecum.plate_min_m());
+      feed_double(hash, ecum.plate_max_m());
+      // Fixed directions around the sphere.
+      for (int k = 0; k < 12; ++k) {
+        const double a = 0.5236 * k + 0.1;
+        const double b = 0.37 * k - 1.2;
+        const Dir3 d = normalize(Dir3{det::Real(std::cos(a) * std::cos(b)), det::Real(std::sin(a) * std::cos(b)), det::Real(std::sin(b))});
+        feed_double(hash, ecum.plate_m(d));
+        feed_double(hash, ecum.hole_factor(d));
+        const EcumenopolisField::District district = ecum.district(d);
+        hash.feed(static_cast<std::uint64_t>(district.type));
+        feed_double(hash, district.height_budget_m);
+        const double surface = std::max(field.base_elevation_m(d).to_double(), ecum.plate_m(d));
+        const HeightModifier::Urban urban = ecum.urban(d, det::Real(surface));
+        feed_double(hash, urban.weight);
+        feed_double(hash, urban.night_light);
+        if (k < 4) {
+          const EcumenopolisField::BlockId block = ecum.block_of(d);
+          const EcumenopolisField::TileId tile = ecum.tile_of(d, 3);
+          const SiteFrame frame = ecum.tile_frame(tile);
+          std::vector<Lot> lots;
+          ecum.towers_in_block(block, frame, &lots);
+          hash.feed(lots.size());
+          for (const Lot& lot : lots) {
+            hash.feed(std::bit_cast<std::uint32_t>(lot.footprint[0][0]));
+            hash.feed(std::bit_cast<std::uint32_t>(lot.footprint[2][1]));
+            hash.feed(std::bit_cast<std::uint32_t>(lot.height_budget_m));
+            hash.feed(static_cast<std::uint64_t>(lot.usage));
+          }
+          const EcumenopolisMesh mesh = build_ecumenopolis_tile(ecum, tile, 2);
+          hash.feed(mesh.block_count);
+          hash.feed(mesh.tower_count);
+          hash.feed(mesh.triangle_count);
+        }
+      }
+    }
+  }
+  return hash.value();
+}
+
 std::uint64_t hash_buildings_script(const core::Seed128& seed) {
   core::GoldenHash hash;
   const core::Key base = core::derive_named(core::universe_key(seed), name::BuildingsV1);
@@ -363,6 +439,11 @@ std::string hash_civ_report() {
   for (const core::Seed128& seed : kSeeds) {
     report += "buildings seed=" + core::to_hex(seed) + " fnv=";
     append_hex(&report, hash_buildings_script(seed));
+    report += "\n";
+  }
+  for (const core::Seed128& seed : kSeeds) {
+    report += "ecumenopolis seed=" + core::to_hex(seed) + " fnv=";
+    append_hex(&report, hash_ecumenopolis_script(seed));
     report += "\n";
   }
   return report;

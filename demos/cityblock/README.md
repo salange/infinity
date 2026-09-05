@@ -56,10 +56,34 @@ sidewalks, lane paint and crosswalks around it, and holds:
   tree groves, planters, paths, bollards, street lamps,
 - **context towers** around the block so the sky has a skyline.
 
-The generators live in `src/scene.cpp` on top of the geometry builders in
-`src/geometry.cpp` (plans, offsets, ear clipping, extrusions, tubes,
-beams, spheres, frusta). Facades are panelised per floor and module;
-each panel emits recessed glass, mullions, transoms, spandrels or fins.
+## Parametric towers
+
+`src/towers.hpp/.cpp` is the building system. A `TowerSpec` has five
+independent axes, so one generator produces the hero buildings *and*
+endless variants for the rest of the city:
+
+| Axis | Options |
+|---|---|
+| Plan | superellipse (exponent), lens (half width/thickness), circle, rounded rectangle, polygon; rotation |
+| Profile | floors, floor height, quadratic taper, tip pinch, twist, one setback |
+| Facade | curtain wall, sail (smooth glass, shader grid), ribbon (horizontal fins), fin weave (offset vertical fins with a depth wave), louvre blades, diagrid, X-frame (flat beams, legs to the ground), hex lattice |
+| Base | two-storey lobby with columns and canopy, podium with roof terrace, colonnade, plinth with steps, splayed legs |
+| Crown | parapet, lattice continuing past the roof, mast, glass lantern, louvre rings |
+
+`spec_diagrid`, `spec_lens`, `spec_sail`, `spec_finweave`, `spec_xframe`
+and `spec_hex` are the named families; `random_tower` picks a family and
+jitters every axis inside its plausible ranges; `build_tower_group` puts
+two or three towers of one family on a shared podium with a roof garden.
+`build_tower` takes a detail level (2 full, 1 near context without mullion
+boxes, 0 far context) so the same building costs a fraction outside the
+centre. Glass materials are bound to floor heights so the interior-mapped
+room grid always matches the real floors.
+
+The site generators (streets, park, pavilion, trees, lamps, planters) live
+in `src/scene.cpp` on top of the geometry builders in `src/geometry.cpp`
+(plans, offsets, ear clipping, extrusions, tubes, beams, spheres, frusta).
+Plans are counter-clockwise on paper (x right, z up on the page); the
+outward wall normal is the right-hand normal of each edge.
 
 ## Renderer
 
@@ -96,6 +120,7 @@ demos/cityblock/
   src/ibl.*                HDRI → sun + IBL
   src/textures.*           texture arrays, procedural fallbacks, leaf texture
   src/mesh.hpp geometry.cpp   vertex format and geometry builders
-  src/scene.*              materials, the block, the buildings
+  src/towers.*             parametric tower system (families, variants, groups)
+  src/scene.*              materials, the block, site and landscape
   src/camera.hpp rng.hpp math.hpp main.cpp
 ```

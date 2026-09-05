@@ -271,11 +271,15 @@ void Emit::wall(const std::vector<Vec2>& xz, float y0, float y1, bool closed, bo
     const Vec2 p = xz[i], q = xz[(i + 1) % n];
     const Vec3 a{p.x, y0, p.y}, b{q.x, y0, q.y}, c{q.x, y1, q.y}, d{p.x, y1, p.y};
     const float w = length(q - p);
-    // ccw polygon seen from above: outward normal is to the right of the
-    // travel direction (p->q), which cross(b-a, d-a) gives for (a,b,c,d)
-    // ordered a=p b=q ... wait: cross((q-p), up) points right of travel.
-    if (outward) quad(a, b, c, d, QuadUV{{u, 0}, {u + w, 0}, {u + w, y1 - y0}, {u, y1 - y0}});
-    else quad(b, a, d, c, QuadUV{{u + w, 0}, {u, 0}, {u, y1 - y0}, {u + w, y1 - y0}});
+    // Plans are counter-clockwise on paper (x right, z up on the page). In
+    // the y-up world that page's z points toward +z, so the outward normal
+    // of an edge p->q is its RIGHT-hand normal (d.z, -d.x). The quad
+    // (a,b,c,d) = (p,q,q^,p^) has normal cross(q-p, up) = the LEFT normal,
+    // i.e. inward — hence the reversed order for outward walls. (This was
+    // the "two sides missing" bug: every wall faced inward and back-face
+    // culling showed the far walls through the near ones.)
+    if (outward) quad(b, a, d, c, QuadUV{{u + w, 0}, {u, 0}, {u, y1 - y0}, {u + w, y1 - y0}});
+    else quad(a, b, c, d, QuadUV{{u, 0}, {u + w, 0}, {u + w, y1 - y0}, {u, y1 - y0}});
     u += w;
   }
 }

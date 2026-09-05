@@ -507,11 +507,11 @@ Texel generic(Kind kind, std::uint64_t seed, double u, double v) {
                                  static_cast<std::int64_t>(std::floor(gy)), 0x77);
       const double grain = pfbm(seed ^ 0x3, u, v, 40, 3, 0.5);
       Texel t;
-      t.color = mix({0.42, 0.41, 0.39}, {0.56, 0.54, 0.51}, 0.3 + 0.7 * slab);
+      t.color = mix({0.30, 0.29, 0.27}, {0.41, 0.39, 0.36}, 0.3 + 0.7 * slab);
       t.color = scale(t.color, 0.92 + 0.08 * grain);
-      t.color = mix(t.color, {0.22, 0.21, 0.19}, 1.0 - bevel);
+      t.color = mix(t.color, {0.16, 0.15, 0.14}, 1.0 - bevel);
       t.height = clamp01(0.55 + 0.35 * bevel + 0.04 * grain);
-      t.roughness = 0.72 + 0.15 * (1.0 - bevel);
+      t.roughness = 0.93 + 0.07 * (1.0 - bevel);  // matte stone: no glare on a city floor
       t.emissive = 0.0;
       return t;
     }

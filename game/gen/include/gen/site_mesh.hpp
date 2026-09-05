@@ -16,9 +16,14 @@ namespace inf::gen {
 // WP6 replaces the box with the building executor's output through the
 // same interface; the app never learns the difference.
 //
-// LOD: `detail` 0 = every lot; 1 = every lot taller than 1.5x the
-// site's mean, plus one merged block mass per lattice block; 2 = one
-// mass per block only (far view).
+// LOD: `detail` 2 = superblock masses only (k x k blocks merged, k by
+// the site's block count, heights from the ring formula — no lots
+// generated); 1 = on big sites (tier >= City) superblocks outside the
+// focus plus, inside it, block masses with the tall lots as grammar,
+// on small sites every lot as a mass with the tall ones as grammar; 0 =
+// every lot inside the focus, the terminal set by distance from the
+// focus (parts < 350 m, grammar < 900 m, masses beyond) and superblocks
+// outside it.
 struct SiteMeshParams {
   int detail{0};
   // The near-LOD terminal set (comparison renders switch it; the default

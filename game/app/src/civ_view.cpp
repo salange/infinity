@@ -334,8 +334,8 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
     double fx = 0.0;
     double fy = 0.0;
     site.frame.to_local(player_dir, &fx, &fy);
-    const double focus_radius = detail == 0 ? 1200.0 : 0.0;
-    const bool refocus = detail == 0 && site.radius_m > focus_radius &&
+    const double focus_radius = detail == 0 ? 1200.0 : (detail == 1 ? 4000.0 : 0.0);
+    const bool refocus = detail <= 1 && site.radius_m > focus_radius &&
                          (std::fabs(fx - entry.focus_x) > 0.5 * focus_radius ||
                           std::fabs(fy - entry.focus_y) > 0.5 * focus_radius);
     if (entry.mesh == 0 || entry.detail != detail || refocus) {
@@ -346,7 +346,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
       gen::SiteMeshParams params;
       params.detail = detail;
       params.method = civ->method;
-      if (detail == 0 && site.radius_m > focus_radius) {
+      if (detail <= 1 && site.radius_m > focus_radius) {
         params.focus_x = fx;
         params.focus_y = fy;
         params.focus_radius_m = focus_radius;

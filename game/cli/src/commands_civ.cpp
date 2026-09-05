@@ -638,6 +638,21 @@ int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot
   const double cz = up.z.to_double();
   std::printf("centre dir (%.6f, %.6f, %.6f)  planet-local (%.1f, %.1f, %.1f)\n", cx, cy, cz,
               cx * (r + site->datum_m), cy * (r + site->datum_m), cz * (r + site->datum_m));
+  // Mesh cost per detail level (what the app uploads for this site).
+  {
+    const core::LocalClock clock;
+    for (int detail = 2; detail >= 0; --detail) {
+      gen::SiteMeshParams mp;
+      mp.detail = detail;
+      if (detail == 0 && site->radius_m > 1200.0) {
+        mp.focus_radius_m = 1200.0;
+      }
+      const std::int64_t t0 = clock.now().ns_since_epoch;
+      const gen::SiteMesh mesh = gen::build_site_mesh(sites, *site, field, mp);
+      std::printf("site mesh detail %d: %u lots, %u triangles, %.1f MB, %.0f ms\n", detail, mesh.lot_count,
+                  mesh.triangle_count, mesh.mesh.vertices.size() * 4.0 / 1048576.0, ms_since(clock, t0));
+    }
+  }
   // Capture script lines: the camera above and to the south of the site,
   // looking down at ~35 degrees, at three ranges.
   std::printf("# capture script lines (app --script):\n");

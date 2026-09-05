@@ -2007,6 +2007,15 @@ std::uint32_t Rhi::create_mesh(const float* vertices, std::size_t float_count) {
 }
 
 std::uint32_t Rhi::create_mesh_mat(const float* vertices, std::size_t float_count) {
+  // A buffer past the device limit is a validation error that wgpu
+  // escalates to a fatal panic on the next submit; refuse it here (the
+  // caller draws nothing for this mesh) and say so once.
+  constexpr std::size_t kMaxMeshBytes = 200u * 1024u * 1024u;
+  if (float_count * sizeof(float) > kMaxMeshBytes) {
+    std::fprintf(stderr, "rhi: refusing a %.0f MB mesh (limit %zu MB)\n",
+                 static_cast<double>(float_count * sizeof(float)) / 1048576.0, kMaxMeshBytes / 1048576u);
+    return 0;
+  }
   WGPUBufferDescriptor desc{};
   desc.label = sv("chunk-mesh");
   desc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;

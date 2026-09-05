@@ -1,0 +1,29 @@
+{
+  "_comment": "CC0 assets for the city-block demo. Textures: ambientCG (1K JPG sets). Skies: Poly Haven HDRIs. Fetched by tools/fetch-assets.py into assets/textures and assets/sky (git-ignored); the demo falls back to flat materials and an analytic sky when files are missing.",
+  "license": "CC0 1.0",
+  "resolution": "1K-JPG",
+  "materials": {
+    "concrete_smooth": "Concrete034",
+    "concrete_panels": "Concrete031",
+    "concrete_light": "Concrete042A",
+    "metal_plates": "MetalPlates006",
+    "metal_brushed": "Metal032",
+    "asphalt": "Asphalt020L",
+    "marble": "Marble012",
+    "grass": "Grass004",
+    "soil": "Ground037",
+    "bark": "Bark012",
+    "metal_dark": "Metal046A",
+    "paving_slabs": "PavingStones136",
+    "pavement_light": "Tiles038",
+    "concrete_white": "Concrete046",
+    "metal_silver": "Metal049A",
+    "metal_black": "Metal028",
+    "terrazzo": "Tiles043"
+  },
+  "skies": {
+    "day": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_48d_partly_cloudy_puresky_2k.hdr",
+    "night": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/dikhololo_night_2k.hdr",
+    "sunset": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/belfast_sunset_puresky_2k.hdr"
+  }
+}

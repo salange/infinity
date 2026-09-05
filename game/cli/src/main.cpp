@@ -48,7 +48,11 @@ int print_usage() {
       "                       land-fraction + pattern report across seeds\n"
       "  civ enclaves [--seed <hex128>]\n"
       "                       human enclaves + dead gates across the home cluster\n"
-      "  civ races [--seed <hex128>] [--at x y z]\n"
+      "  civ state [--seed <hex128>] [--system x y z L] [--time <+yr|YYYY-MM-DD>]\n"
+      "                       owner + per-body civilization state of a system\n"
+      "  civ census [--seed <hex128>] [--samples N] [--time <+yr|YYYY-MM-DD>]\n"
+      "                       pacing census over the human sphere\n"
+      "  civ races [--seed <hex128>] [--at x y z | --all]\n"
       "                       races whose reach covers a point (galactocentric ly;\n"
       "                       default: the home system)\n"
       "  (types: EarthLike|Barren|Desert|Ice)\n");
@@ -110,16 +114,33 @@ int main(int argc, char** argv) {
       return 2;
     }
     const char* seed_text = "83";
+    const char* time_text = nullptr;
     double at[3] = {0.0, 0.0, 0.0};
     bool have_at = false;
+    long long cell[4] = {0, 0, 0, 0};
+    bool have_cell = false;
+    int samples = 800;
+    bool all = false;
     for (int i = 3; i < argc; ++i) {
       if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
         seed_text = argv[++i];
+      } else if (std::strcmp(argv[i], "--all") == 0) {
+        all = true;
       } else if (std::strcmp(argv[i], "--at") == 0 && i + 3 < argc) {
         at[0] = std::atof(argv[++i]);
         at[1] = std::atof(argv[++i]);
         at[2] = std::atof(argv[++i]);
         have_at = true;
+      } else if (std::strcmp(argv[i], "--system") == 0 && i + 4 < argc) {
+        cell[0] = std::atoll(argv[++i]);
+        cell[1] = std::atoll(argv[++i]);
+        cell[2] = std::atoll(argv[++i]);
+        cell[3] = std::atoll(argv[++i]);
+        have_cell = true;
+      } else if (std::strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
+        time_text = argv[++i];
+      } else if (std::strcmp(argv[i], "--samples") == 0 && i + 1 < argc) {
+        samples = std::atoi(argv[++i]);
       }
     }
     const std::optional<inf::core::Seed128> seed = inf::core::parse_seed(seed_text);
@@ -128,10 +149,16 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (std::strcmp(argv[2], "races") == 0) {
-      return inf::cli::cmd_civ_races(*seed, have_at ? at : nullptr);
+      return inf::cli::cmd_civ_races(*seed, have_at ? at : nullptr, all);
     }
     if (std::strcmp(argv[2], "enclaves") == 0) {
       return inf::cli::cmd_civ_enclaves(*seed);
+    }
+    if (std::strcmp(argv[2], "state") == 0) {
+      return inf::cli::cmd_civ_state(*seed, have_cell ? cell : nullptr, time_text);
+    }
+    if (std::strcmp(argv[2], "census") == 0) {
+      return inf::cli::cmd_civ_census(*seed, samples, time_text);
     }
     std::fprintf(stderr, "unknown civ subcommand: %s\n", argv[2]);
     return 2;

@@ -7,8 +7,13 @@ namespace inf::cli {
 // T0020: civilization inspection. All commands take the home galaxy of
 // the seed; positions are galactocentric light-years, "here" = the home
 // system.
-int cmd_civ_races(const core::Seed128& seed, const double* at_ly);
+int cmd_civ_races(const core::Seed128& seed, const double* at_ly, bool all = false);
 int cmd_civ_enclaves(const core::Seed128& seed);
+// Owner + per-body state of one system at a time (--time: ISO date
+// "YYYY-MM-DD", or "+N" real years after the launch reference).
+int cmd_civ_state(const core::Seed128& seed, const long long* cell_xyzl, const char* time_text);
+// The pacing census over the human sphere.
+int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_text);
 int cmd_hash_civ();
 
 }  // namespace inf::cli

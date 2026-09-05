@@ -200,17 +200,16 @@ CivilizationParams derive_civilization(const core::Key& galaxy_entity_key,
   if (force_home_minimum && civ.race_count < 6) {
     civ.race_count = 6;
   }
-  // L_civ: ~1 500 ly cells. Pure halving loop, no libm.
+  // L_civ: macro cells are 1/64 of the octree root — 1 560 ly on a
+  // 100 000 ly galaxy (the design's ~1 500 ly figure), 168 ly on a
+  // 9 756 ly dwarf. The level is fixed rather than solved from a fixed
+  // width so that a race's reach (kReach cells) is the same FRACTION of
+  // any home galaxy: alien empires stay regional powers whether the
+  // galaxy is a dwarf or a giant (the seed-83 lesson — fixed 1 342 ly
+  // cells let seven races own 58 % of a dwarf galaxy).
   {
     const double root_ly = galaxy.diameter_ly.to_double() * 1.1;
-    double ratio = root_ly / 1500.0;
-    int level = 0;
-    // round(log2(ratio)): count doublings until ratio < sqrt(2).
-    while (ratio >= 1.4142135623730951 && level < 9) {
-      ratio *= 0.5;
-      ++level;
-    }
-    civ.l_civ = level < 2 ? 2 : level;
+    civ.l_civ = 6;
     civ.cell_width_ly = root_ly / static_cast<double>(std::uint64_t{1} << civ.l_civ);
   }
   // Type tilt (design section 5): ellipticals toward Crystalline /
@@ -592,11 +591,20 @@ void draw_factions(Race* race, const CivilizationParams& civ, double cell_width_
 }  // namespace
 
 const std::vector<Race>& RaceRegistry::races_around(const MacroCell& center) const {
-  if (block_valid_ && block_center_.x == center.x && block_center_.y == center.y &&
-      block_center_.z == center.z && block_center_.level == center.level) {
-    return block_;
+  for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
+    if (it->center.x == center.x && it->center.y == center.y && it->center.z == center.z &&
+        it->center.level == center.level) {
+      blocks_.splice(blocks_.begin(), blocks_, it);  // touch; storage stays put
+      return blocks_.front().races;
+    }
   }
-  block_.clear();
+  if (static_cast<int>(blocks_.size()) >= kCachedBlocks) {
+    blocks_.pop_back();
+  }
+  blocks_.emplace_front();
+  Block& block = blocks_.front();
+  block.center = center;
+  std::vector<Race>& block_ = block.races;
   if (civ_.race_count > 0) {
     for (std::int64_t dx = -kReach; dx <= kReach; ++dx) {
       for (std::int64_t dy = -kReach; dy <= kReach; ++dy) {
@@ -619,8 +627,6 @@ const std::vector<Race>& RaceRegistry::races_around(const MacroCell& center) con
   std::sort(block_.begin(), block_.end(), [](const Race& a, const Race& b) {
     return a.key.k0 != b.key.k0 ? a.key.k0 < b.key.k0 : a.key.k1 < b.key.k1;
   });
-  block_center_ = center;
-  block_valid_ = true;
   return block_;
 }
 
@@ -631,6 +637,32 @@ const std::vector<Race>& RaceRegistry::candidates_around(const MacroCell& center
     candidates_.push_back(human_);
   }
   return candidates_;
+}
+
+std::vector<Race> RaceRegistry::all_races() const {
+  std::vector<Race> out;
+  if (civ_.race_count == 0) {
+    return out;
+  }
+  const std::int64_t extent = std::int64_t{1} << civ_.l_civ;
+  for (std::int64_t x = 0; x < extent; ++x) {
+    for (std::int64_t y = 0; y < extent; ++y) {
+      for (std::int64_t z = 0; z < extent; ++z) {
+        const MacroCell cell{x, y, z, civ_.l_civ};
+        const int homes = home_count(cell);
+        for (int i = 0; i < homes; ++i) {
+          Race race = home(cell, i);
+          if (!race.void_home) {
+            out.push_back(std::move(race));
+          }
+        }
+      }
+    }
+  }
+  std::sort(out.begin(), out.end(), [](const Race& a, const Race& b) {
+    return a.key.k0 != b.key.k0 ? a.key.k0 < b.key.k0 : a.key.k1 < b.key.k1;
+  });
+  return out;
 }
 
 std::optional<SystemOverride> RaceRegistry::home_override(const SystemCell& cell) const {

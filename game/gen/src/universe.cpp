@@ -291,6 +291,31 @@ core::Key galaxy_key_in_cluster(const core::Seed128& seed, std::int64_t cx,
   return tree->get(address)->key();
 }
 
+core::Key system_key_in_galaxy(const core::Key& galaxy_entity_key, const SystemCell& cell) {
+  const core::Key children = core::derive_named(galaxy_entity_key, core::tree::kChildrenName);
+  const core::Key axis = core::derive_named(children, name::SystemsAxis);
+  return core::derive_child(axis, kind::System, cell.x, cell.y, cell.z, cell.level);
+}
+
+BodyKeys body_keys_in_system(const core::Key& system_entity_key, int slot) {
+  const core::Key children = core::derive_named(system_entity_key, core::tree::kChildrenName);
+  const core::Key axis = core::derive_named(children, name::PlanetsAxis);
+  BodyKeys keys;
+  keys.entity = core::derive_child(axis, kind::Body, slot);
+  keys.params = core::derive_named(keys.entity, core::tree::kParamsName);
+  return keys;
+}
+
+BodyKeys moon_keys_in_system(const core::Key& system_entity_key, int slot, int moon_index) {
+  const BodyKeys planet = body_keys_in_system(system_entity_key, slot);
+  const core::Key children = core::derive_named(planet.entity, core::tree::kChildrenName);
+  const core::Key axis = core::derive_named(children, name::MoonsAxis);
+  BodyKeys keys;
+  keys.entity = core::derive_child(axis, kind::Body, moon_index);
+  keys.params = core::derive_named(keys.entity, core::tree::kParamsName);
+  return keys;
+}
+
 core::Key home_galaxy_key(const core::Seed128& seed) {
   const auto tree = make_tree(seed);
   const auto address =

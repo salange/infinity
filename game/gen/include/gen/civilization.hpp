@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <list>
 #include <optional>
 #include <vector>
 
@@ -97,8 +98,11 @@ class RaceRegistry {
   Race home(const MacroCell& cell, int index) const;
 
   // Every non-void race whose home lies in the block around `center` —
-  // sorted by race key, cached for the last block queried. Humans (WP2)
-  // and enclave sources are appended by the owner resolution, not here.
+  // sorted by race key. Blocks are cached in a small LRU (kCachedBlocks)
+  // with stable storage: a returned reference stays valid until that
+  // many OTHER blocks have been queried. Copy the vector when iterating
+  // across queries of other cells.
+  static constexpr int kCachedBlocks = 16;
   const std::vector<Race>& races_around(const MacroCell& center) const;
   const std::vector<Race>& races_around(const Dir3& p_m) const {
     return races_around(macro_cell_of(p_m));
@@ -123,15 +127,21 @@ class RaceRegistry {
   // The key of a macro cell under races/v1 (tests, goldens).
   core::Key cell_key(const MacroCell& cell) const;
 
+  // Every non-void race of the galaxy: a scan of all 64^3 macro cells
+  // (~0.3 s). Tooling and tests only — gameplay never needs the galaxy.
+  std::vector<Race> all_races() const;
+
  private:
   core::Key races_key_;
   GalaxyParams galaxy_;
   CivilizationParams civ_;
   GalaxyOctree octree_;
   Dir3 home_position_m_;
-  mutable bool block_valid_{false};
-  mutable MacroCell block_center_{};
-  mutable std::vector<Race> block_;
+  struct Block {
+    MacroCell center;
+    std::vector<Race> races;
+  };
+  mutable std::list<Block> blocks_;  // front = most recently used
   mutable std::vector<Race> candidates_;
   bool has_human_{false};
   Race human_;

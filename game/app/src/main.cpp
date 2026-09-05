@@ -26,7 +26,11 @@
 #include "gen/system.hpp"
 #include "gen/galaxy.hpp"
 #include "gen/deep_sky.hpp"
+#include "gen/civ_time.hpp"
+#include "gen/civilization.hpp"
+#include "gen/colony.hpp"
 #include "gen/galaxy_octree.hpp"
+#include "gen/human.hpp"
 #include "gen/planet_texture.hpp"
 #include "gen/terrain.hpp"
 #include "gen/terrain_sampler.hpp"
@@ -490,8 +494,71 @@ int main(int argc, char** argv) {
   // T0017: `system` is mutable state — the J-jump regenerates it for the
   // octree cell it arrives in.
   inf::gen::SystemCell current_cell{};  // {0,0,0,0} = the home system
-  inf::gen::StarSystemParams system =
-      inf::gen::generate_system(inf::gen::default_system_key(*seed));
+  // T0020: the civilization registry for the home galaxy (aliens in the
+  // 125-cell block around the current system + humans), the owner
+  // resolver, and the race-home override planets/v1 consults.
+  const inf::gen::GalaxyParams civ_galaxy_params = inf::gen::home_galaxy_params(*seed);
+  const inf::core::Key civ_galaxy_key = inf::gen::home_galaxy_key(*seed);
+  inf::gen::RaceRegistry civ_registry(
+      civ_galaxy_key, civ_galaxy_params,
+      inf::gen::derive_civilization(civ_galaxy_key, civ_galaxy_params, true));
+  civ_registry.set_human(inf::gen::human_race(civ_galaxy_key, civ_galaxy_params));
+  const inf::gen::ColonyResolver civ_resolver(civ_registry);
+  const auto generate_system_at = [&](const inf::gen::SystemCell& cell) {
+    const auto over = civ_registry.home_override(cell);
+    inf::gen::HomeSlotOverride slot_override;
+    if (over.has_value()) {
+      slot_override.habitat = over->habitat;
+      slot_override.preferred_flux = over->preferred_flux;
+      slot_override.force_biosphere = over->force_biosphere;
+    }
+    return inf::gen::generate_system(inf::gen::system_key_for(*seed, cell),
+                                     over.has_value() ? &slot_override : nullptr);
+  };
+  inf::gen::StarSystemParams system = generate_system_at(current_cell);
+  // Per-slot civilization readout lines for the current system (owner
+  // race, faction, level), refreshed on arrival and every few minutes —
+  // the state is a closed-form function of the clock, so a refresh is a
+  // recomputation, never an accumulation.
+  std::string civ_slot_line[inf::gen::kMaxPlanetSlots];
+  std::string civ_system_line;
+  const auto refresh_civ = [&](const inf::gen::SystemCell& cell, inf::core::WorldTime now) {
+    for (auto& line : civ_slot_line) {
+      line.clear();
+    }
+    civ_system_line.clear();
+    const inf::gen::SystemCivContext context =
+        inf::gen::gather_system_context(*seed, civ_registry, cell, false);
+    const inf::gen::Owner owner = civ_resolver.owner(context, now);
+    if (!owner.owned) {
+      civ_system_line = "Uninhabited";
+      return;
+    }
+    const auto& races = civ_resolver.candidates(context.position_m);
+    const inf::gen::Race& race = races[owner.candidate];
+    civ_system_line = race.params.name + " space";
+    const auto states = civ_resolver.system_states(context, owner, now);
+    for (std::size_t i = 0; i < states.size(); ++i) {
+      const inf::gen::CivState& st = states[i];
+      const int slot = context.bodies[i].slot;
+      if (!st.settled) {
+        continue;
+      }
+      const inf::gen::FactionParams* f =
+          st.faction_index >= 0 && st.faction_index < static_cast<int>(race.factions.size())
+              ? &race.factions[static_cast<std::size_t>(st.faction_index)]
+              : nullptr;
+      char line[160];
+      std::snprintf(line, sizeof(line), "%s%s - %s%s%s - L%d %s", race.params.name.c_str(),
+                    st.is_home ? " (home)" : "", f != nullptr ? f->name.c_str() : "",
+                    f != nullptr ? " / " : "",
+                    f != nullptr ? inf::gen::faction_type_label(f->type, race.params.type,
+                                                                 race.params.is_human)
+                                 : "",
+                    st.level, st.ruined ? "ruins" : (st.domed ? "domed" : inf::gen::to_string(static_cast<inf::gen::DevLevel>(st.level))));
+      civ_slot_line[static_cast<std::size_t>(slot)] = line;
+    }
+  };
   const int home_slot =
       spawn_slot >= 0 && spawn_slot < inf::gen::kMaxPlanetSlots &&
               system.planets[static_cast<std::size_t>(spawn_slot)].occupied
@@ -878,6 +945,7 @@ int main(int argc, char** argv) {
   double last_my = 0.0;
   glfwGetCursorPos(window, &last_mx, &last_my);
   const inf::core::LocalClock world_clock;
+  refresh_civ(current_cell, world_clock.now());
   inf::core::WorldTime last_time = world_clock.now();
   double fps_accum = 0.0;
   int fps_frames = 0;
@@ -1530,7 +1598,8 @@ int main(int argc, char** argv) {
         }
         body_textures.clear();
         current_cell = jump_target.cell;
-        system = inf::gen::generate_system(inf::gen::system_key_for(*seed, current_cell));
+        system = generate_system_at(current_cell);
+        refresh_civ(current_cell, world_clock.now());
         const int arrival_slot = inf::gen::default_landable_slot(system);
         anchor = make_anchor(*seed, seed_text, system, current_cell, arrival_slot, -1,
                              std::nullopt, nullptr);
@@ -2762,6 +2831,7 @@ int main(int argc, char** argv) {
           target.distance_m = dist - radius;
           const double closing = player.speed() * cos_ang;
           target.eta_s = closing > 1.0 ? target.distance_m / closing : -1.0;
+          target.civ_line = civ_slot_line[static_cast<std::size_t>(slot)];
         }
       }
       // Moons under the crosshair (T0016: full bodies with names).
@@ -2874,6 +2944,10 @@ int main(int argc, char** argv) {
       std::snprintf(buf, sizeof(buf), "Moons %zu   Atmosphere %s", entry.moons.size(),
                     entry.phys.atmosphere.height_m.to_double() > 0.0 ? "yes" : "no");
       lines.emplace_back(buf);
+      // T0020: who owns it (design/map-mode: extend the card, no new widget).
+      lines.push_back(civ_slot_line[static_cast<std::size_t>(hovered_slot)].empty()
+                          ? civ_system_line
+                          : civ_slot_line[static_cast<std::size_t>(hovered_slot)]);
       const std::size_t card_start = items.size();
       hud->build_map_card(&items, lines, pointer_ndc_x, pointer_ndc_y, input.aspect,
                           state.height);

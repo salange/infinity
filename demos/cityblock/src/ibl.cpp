@@ -246,7 +246,7 @@ Environment build_environment(Gpu& gpu, Equirect env, float yaw, std::uint32_t b
           if (!out.has_sun) {
             // night maps: stars are sub-texel points that would bloom into
             // blobs at cube resolution — cap them at a few times the sky level
-            const float cap = std::max(sky_mean * 12.0f, 0.5f);
+            const float cap = std::max(sky_mean * 6.0f, 0.3f);
             c = Vec3{std::min(c.x, cap), std::min(c.y, cap), std::min(c.z, cap)};
           }
           if (out.has_sun && mip == 0) {

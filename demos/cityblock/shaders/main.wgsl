@@ -115,8 +115,11 @@ fn interior_color(aux: vec2<f32>, view_ts: vec3<f32>, room: vec4<f32>, seed: f32
   let rw = room.x; let rh = room.y; let rd = room.z;
   let cell = floor(vec2<f32>(aux.x / rw, aux.y / rh));
   let h = hash33(vec3<f32>(cell.x + 3.1, cell.y + 7.7, seed * 91.7));
-  let lit_p = room.w * select(0.28, 0.62, night > 0.5);
-  let lit = select(0.0, 1.0, h.x < lit_p);
+  // Lit rooms cluster by floor (offices light whole floors), with a
+  // per-room brightness so the pattern is not a binary checkerboard.
+  let floor_h = hash13(vec3<f32>(17.0, cell.y + 3.3, seed * 51.3));
+  let floor_on = floor_h < room.w * select(0.28, 0.62, night > 0.5);
+  let lit = select(select(0.0, 1.0, h.x < 0.10), select(0.0, 1.0, h.x < 0.85), floor_on) * (0.45 + 0.55 * h.z);
   let blinds = select(0.0, 1.0, h.z < 0.18);
   let p = vec2<f32>(aux.x - cell.x * rw, aux.y - cell.y * rh);
   var d = -view_ts;
@@ -275,7 +278,8 @@ struct FsOut { @location(0) color: vec4<f32> };
     let detail = clamp((px_per_room - 6.0) / 30.0, 0.0, 1.0);
     let cell = floor(in.aux.xy / m.room.xy);
     let hc = hash33(vec3<f32>(cell.x + 3.1, cell.y + 7.7, in.aux.z * 91.7));
-    let lit_far = select(0.0, 1.0, hc.x < m.room.w * select(0.28, 0.62, night > 0.5));
+    let floor_far = hash13(vec3<f32>(17.0, cell.y + 3.3, in.aux.z * 51.3)) < m.room.w * select(0.28, 0.62, night > 0.5);
+    let lit_far = select(select(0.0, 1.0, hc.x < 0.10), select(0.0, 1.0, hc.x < 0.85), floor_far) * (0.45 + 0.55 * hc.z);
     let light_far = mix(vec3<f32>(1.0, 0.86, 0.68), vec3<f32>(0.78, 0.88, 1.0), step(0.5, hc.y));
     let frac_y = fract(in.aux.y / m.room.y);
     let grad = 0.55 + 0.75 * frac_y * frac_y;  // ceilings brighter than floors

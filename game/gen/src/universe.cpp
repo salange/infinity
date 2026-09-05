@@ -24,22 +24,24 @@ NodeSpec universe_spec(const core::Key&, const core::tree::Node*) {
   return spec;
 }
 
-NodeSpec cluster_spec(const core::Key& entity_key, const core::tree::Node*) {
+NodeSpec cluster_spec(const core::Key&, const core::tree::Node*) {
   NodeSpec spec;
   AxisDesc galaxies;
   galaxies.name = name::GalaxiesAxis;
   galaxies.child_kind = kind::Galaxy;
   galaxies.topo = Topology::IndexedList;
   // Real galaxy counts (T0017 WP5): 10-1000 per cluster, drawn from
-  // galaxy-layout/v1 off the cluster entity; positions come from the
-  // same layer (galaxy_position_in_cluster).
-  galaxies.count = [entity_key](const core::tree::Node&, const core::Key&) {
-    return static_cast<std::uint64_t>(galaxy_count_in_cluster(entity_key));
+  // galaxy-layout/v1 off the cluster ENTITY key (the owner node's key —
+  // the generator's first argument is the params key, and counting from
+  // it made the axis disagree with galaxy_count_in_cluster(entity), so
+  // indices past the smaller count materialized as null); positions come
+  // from the same layer (galaxy_position_in_cluster).
+  galaxies.count = [](const core::tree::Node& owner, const core::Key&) {
+    return static_cast<std::uint64_t>(galaxy_count_in_cluster(owner.key()));
   };
-  galaxies.occupied = [entity_key](const core::tree::Node&, const core::Key&,
-                                   const Cell& cell) {
+  galaxies.occupied = [](const core::tree::Node& owner, const core::Key&, const Cell& cell) {
     return cell.x >= 0 &&
-           cell.x < static_cast<std::int64_t>(galaxy_count_in_cluster(entity_key));
+           cell.x < static_cast<std::int64_t>(galaxy_count_in_cluster(owner.key()));
   };
   spec.axes = {galaxies};
   return spec;
@@ -83,7 +85,14 @@ NodeSpec galaxy_spec(const core::Key&, const core::tree::Node*) {
     return cell.x >= 0 && cell.x < 32 && cell.y >= 0 && cell.y < 32 && cell.z >= 0 &&
            cell.z < 32;
   };
-  spec.axes = {systems, nebulae, star_clusters};
+  // Deep-space objects (T0020 WP2): dead wormhole gates of the human
+  // enclaves live here (kind Wormhole). Data only; occupancy is the
+  // human-enclaves/v1 enumeration (home_galaxy_gates), not a cell test.
+  AxisDesc deepspace;
+  deepspace.name = name::DeepSpaceAxis;
+  deepspace.child_kind = kind::Wormhole;
+  deepspace.topo = Topology::IndexedList;
+  spec.axes = {systems, nebulae, star_clusters, deepspace};
   return spec;
 }
 
@@ -157,6 +166,7 @@ GeneratorRegistry make_registry() {
   registry.register_kind(kind::Star, leaf_spec);
   registry.register_kind(kind::Belt, leaf_spec);
   registry.register_kind(kind::Barycenter, leaf_spec);
+  registry.register_kind(kind::Wormhole, leaf_spec);
   return registry;
 }
 

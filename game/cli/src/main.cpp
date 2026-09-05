@@ -46,6 +46,8 @@ int print_usage() {
       "                       write every procedural surface tile as PNGs\n"
       "  macro-stats [--seeds N]\n"
       "                       land-fraction + pattern report across seeds\n"
+      "  civ enclaves [--seed <hex128>]\n"
+      "                       human enclaves + dead gates across the home cluster\n"
       "  civ races [--seed <hex128>] [--at x y z]\n"
       "                       races whose reach covers a point (galactocentric ly;\n"
       "                       default: the home system)\n"
@@ -127,6 +129,9 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[2], "races") == 0) {
       return inf::cli::cmd_civ_races(*seed, have_at ? at : nullptr);
+    }
+    if (std::strcmp(argv[2], "enclaves") == 0) {
+      return inf::cli::cmd_civ_enclaves(*seed);
     }
     std::fprintf(stderr, "unknown civ subcommand: %s\n", argv[2]);
     return 2;

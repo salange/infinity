@@ -14,6 +14,7 @@ add_library(game_gen STATIC
   src/civ_names.cpp
   src/civ_types.cpp
   src/civilization.cpp
+  src/human.cpp
   src/golden_civ.cpp
   src/caves.cpp
   src/climate.cpp

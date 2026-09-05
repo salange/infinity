@@ -9,6 +9,7 @@
 #include "gen/civ_time.hpp"
 #include "gen/civilization.hpp"
 #include "gen/golden.hpp"
+#include "gen/human.hpp"
 #include "gen/universe.hpp"
 
 namespace inf::cli {
@@ -17,7 +18,8 @@ int cmd_civ_races(const core::Seed128& seed, const double* at_ly) {
   const core::Key galaxy_key = gen::home_galaxy_key(seed);
   const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
   const gen::CivilizationParams civ = gen::derive_civilization(galaxy_key, galaxy, true);
-  const gen::RaceRegistry registry(galaxy_key, galaxy, civ);
+  gen::RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(gen::human_race(galaxy_key, galaxy));
   gen::Dir3 at = gen::home_system_position_m(galaxy);
   if (at_ly != nullptr) {
     at = gen::Dir3{det::Real(at_ly[0] * gen::kLightYearM), det::Real(at_ly[1] * gen::kLightYearM),
@@ -32,8 +34,8 @@ int cmd_civ_races(const core::Seed128& seed, const double* at_ly) {
               at.z.to_double() / gen::kLightYearM, static_cast<long long>(centre.x),
               static_cast<long long>(centre.y), static_cast<long long>(centre.z),
               gen::RaceRegistry::kBlockCells, gen::RaceRegistry::kReach);
-  const auto& races = registry.races_around(centre);
-  std::printf("%zu race(s) can reach this point:\n", races.size());
+  const auto& races = registry.candidates_around(centre);
+  std::printf("%zu race(s) can reach this point (humans included):\n", races.size());
   for (const gen::Race& race : races) {
     const gen::RaceParams& p = race.params;
     const gen::Dir3& home = p.sources[0].position_m;
@@ -73,6 +75,38 @@ int cmd_civ_races(const core::Seed128& seed, const double* at_ly) {
     }
   }
   std::printf("%d of them within their own reach of this point.\n", in_reach);
+  return 0;
+}
+
+int cmd_civ_enclaves(const core::Seed128& seed) {
+  const std::uint32_t count = gen::galaxy_count_in_cluster(gen::home_cluster_key(seed));
+  int with = 0;
+  int total = 0;
+  for (std::uint32_t g = 1; g < count; ++g) {
+    const auto enclaves = gen::human_enclaves(seed, 0, 0, 0, g);
+    if (enclaves.empty()) {
+      continue;
+    }
+    ++with;
+    total += static_cast<int>(enclaves.size());
+    for (const gen::HumanEnclave& e : enclaves) {
+      std::printf("galaxy %3u enclave %u: at (%.0f, %.0f, %.0f) ly, arrived %+.2f yr, reach %.0f ly, "
+                  "cap L%d, dead gate at (%.0f, %.0f, %.0f) ly in the home galaxy\n",
+                  g, e.index, e.source.position_m.x.to_double() / gen::kLightYearM,
+                  e.source.position_m.y.to_double() / gen::kLightYearM,
+                  e.source.position_m.z.to_double() / gen::kLightYearM,
+                  gen::ns_to_real_years(e.source.t_source.ns_since_epoch -
+                                        gen::kHumanExpansionStart.ns_since_epoch),
+                  e.source.r_max_ly, e.source.level_cap,
+                  e.gate_partner_m.x.to_double() / gen::kLightYearM,
+                  e.gate_partner_m.y.to_double() / gen::kLightYearM,
+                  e.gate_partner_m.z.to_double() / gen::kLightYearM);
+    }
+  }
+  std::printf("%u galaxies in the home cluster; %d (%.1f%%) hold human enclaves, %d beachheads, "
+              "%zu dead gates in the home galaxy\n",
+              count, with, count > 1 ? 100.0 * with / static_cast<double>(count - 1) : 0.0, total,
+              gen::home_galaxy_gates(seed).size());
   return 0;
 }
 

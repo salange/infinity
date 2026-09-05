@@ -8,6 +8,7 @@ namespace inf::cli {
 // the seed; positions are galactocentric light-years, "here" = the home
 // system.
 int cmd_civ_races(const core::Seed128& seed, const double* at_ly);
+int cmd_civ_enclaves(const core::Seed128& seed);
 int cmd_hash_civ();
 
 }  // namespace inf::cli

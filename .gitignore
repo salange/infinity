@@ -9,3 +9,9 @@ debug-rec-*/
 
 # Surface tile library binaries (fetched by tools/fetch-textures.py; CC0)
 assets/textures/
+
+# City-block demo assets (fetched by demos/cityblock/tools/fetch-assets.py; CC0)
+demos/cityblock/assets/textures/
+demos/cityblock/assets/sky/
+demos/cityblock/assets/fetched.json
+cityblock-*.png

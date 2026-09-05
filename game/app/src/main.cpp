@@ -26,6 +26,8 @@
 #include "gen/system.hpp"
 #include "gen/galaxy.hpp"
 #include "gen/deep_sky.hpp"
+#include <stb_image_write.h>
+
 #include "city/materials.hpp"
 #include "city/showcase.hpp"
 #include "city_render.hpp"
@@ -477,6 +479,12 @@ int main(int argc, char** argv) {
   inf::gen::BuildingMethod building_method = inf::gen::BuildingMethod::GrammarParts;  // --buildings
   bool city_showcase = false;  // --city-showcase: T0021 pipeline check (catalog scene at the first town)
   int city_debug = 0;          // --city-debug N: city pipeline debug view
+  bool no_ssao = false;        // --no-ssao / --no-shadows / --no-taa: renderer feature toggles
+  bool no_shadows = false;
+  bool no_taa = false;
+  int sweep_frames = 0;        // --sweep N: temporal-artifact analysis (the demo's tool)
+  double sweep_step = 0.03;    // --sweep-step m
+  std::string sweep_out = "sweep";  // --sweep-out name
   const char* assets_text = nullptr;  // --assets <dir>: tile library root
   std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
   int spawn_slot = -1;                // --slot N: spawn on this system slot
@@ -523,6 +531,18 @@ int main(int argc, char** argv) {
       city_showcase = true;
     } else if (std::strcmp(argv[i], "--city-debug") == 0 && i + 1 < argc) {
       city_debug = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--sweep") == 0 && i + 1 < argc) {
+      sweep_frames = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--sweep-step") == 0 && i + 1 < argc) {
+      sweep_step = std::atof(argv[++i]);
+    } else if (std::strcmp(argv[i], "--sweep-out") == 0 && i + 1 < argc) {
+      sweep_out = argv[++i];
+    } else if (std::strcmp(argv[i], "--no-ssao") == 0) {
+      no_ssao = true;
+    } else if (std::strcmp(argv[i], "--no-shadows") == 0) {
+      no_shadows = true;
+    } else if (std::strcmp(argv[i], "--no-taa") == 0) {
+      no_taa = true;
     } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
       // Shift the world clock (planet rotation, orbits): capture aid to
       // put a site into daylight. A per-save constant offset is exactly
@@ -1227,6 +1247,21 @@ int main(int argc, char** argv) {
   inf::app::CityUpload city_upload;
   Mat4 city_prev_view_proj = Mat4::identity();
   RVec3 city_prev_camera{0.0, 0.0, 0.0};
+  // --sweep: temporal-artifact analysis (the demo's tool): after the
+  // script/warm-up the camera slides sideways per frame; each final frame
+  // and depth buffer are read back, every pixel is reprojected into the
+  // previous frame and the band-limited change (gradient x motion) is
+  // subtracted. What remains is temporal aliasing.
+  struct Sweep {
+    int step{0};
+    std::vector<std::uint8_t> prev;
+    std::vector<float> resid, raw;
+    Mat4 prev_vp = Mat4::identity();
+    RVec3 prev_cam{0.0, 0.0, 0.0};
+    std::uint32_t w{0}, h{0};
+    int measured{0};
+  } sweep;
+  const long sweep_warmup = 40;
   bool city_active = false;
   const auto build_city_showcase = [&]() {
     city_active = false;
@@ -2278,6 +2313,7 @@ int main(int argc, char** argv) {
       }
       inf::render::Rhi::DrawItem item;
       item.mesh = chunk.mesh_id;
+      item.shadow_caster = true;  // T0021: terrain shadows the city and itself
       const RVec3 translation = chunk.origin - camera_pos;
       const Mat4 model = inf::render::translate(translation);
       const Mat4 mvp = inf::render::mul(view_projection, model);
@@ -2370,6 +2406,7 @@ int main(int argc, char** argv) {
         const Mat4 mvp = inf::render::mul(view_projection, model);
         inf::render::Rhi::DrawItem item;
         item.mesh = land_mesh;
+        item.prepass = true;  // T0021: occluder for the screen-space passes
         std::memcpy(item.material_palette, land_palette, sizeof(item.material_palette));
         if (const auto tex_it = body_textures.find(body_tex_key(anchor->slot, anchor->moon));
             tex_it != body_textures.end()) {
@@ -3152,6 +3189,23 @@ int main(int argc, char** argv) {
       }
       frame_params.tan_half_x = static_cast<float>(tan_half * input.aspect);
       frame_params.tan_half_y = static_cast<float>(tan_half);
+      {
+        // Camera basis as the view matrix uses it (T0021: the city frame,
+        // cascade fitting and the screen-space passes rebuild the view
+        // from these).
+        const RVec3 f = inf::render::normalize(cam_forward);
+        const RVec3 s = inf::render::normalize(inf::render::cross(f, cam_up));
+        const RVec3 u = inf::render::cross(s, f);
+        frame_params.cam_right[0] = static_cast<float>(s.x);
+        frame_params.cam_right[1] = static_cast<float>(s.y);
+        frame_params.cam_right[2] = static_cast<float>(s.z);
+        frame_params.cam_up[0] = static_cast<float>(u.x);
+        frame_params.cam_up[1] = static_cast<float>(u.y);
+        frame_params.cam_up[2] = static_cast<float>(u.z);
+        frame_params.cam_fwd[0] = static_cast<float>(f.x);
+        frame_params.cam_fwd[1] = static_cast<float>(f.y);
+        frame_params.cam_fwd[2] = static_cast<float>(f.z);
+      }
       frame_params.altitude_frac = static_cast<float>(std::clamp(dome_alt_frac, 0.0, 9.0));
       set3(frame_params.planet_center, RVec3{0.0, 0.0, 0.0} - camera_pos);
       frame_params.sea_radius_m = static_cast<float>(sea_radius);
@@ -3179,6 +3233,9 @@ int main(int argc, char** argv) {
                             static_cast<double>(frame_params.sun_dir[2]) * frame_params.planet_up[2];
       city_settings.night = static_cast<float>(std::clamp((0.03 - sun_up) / 0.12, 0.0, 1.0));
       city_settings.debug_view = city_debug;
+      city_settings.ssao = !no_ssao;
+      city_settings.shadows = !no_shadows;
+      city_settings.taa = !no_taa;
       rhi->set_city_settings(city_settings);
       if (city_active) {
         std::vector<inf::render::Rhi::CityLight> lights;
@@ -3232,6 +3289,114 @@ int main(int argc, char** argv) {
     }
 
     ++frame;
+    if (sweep_frames > 0 && frame >= sweep_warmup) {
+      std::vector<std::uint8_t> cur;
+      std::vector<float> depth;
+      std::uint32_t w = 0, h = 0;
+      if (rhi->take_readback(&cur, &depth, &w, &h)) {
+        if (sweep.prev.empty() || sweep.w != w || sweep.h != h) {
+          sweep.prev.swap(cur);
+          sweep.w = w;
+          sweep.h = h;
+          sweep.resid.assign(static_cast<std::size_t>(w) * h, 0.0f);
+          sweep.raw.assign(sweep.resid.size(), 0.0f);
+        } else {
+          const auto lum = [](const std::vector<std::uint8_t>& img, std::size_t px) {
+            return (0.299f * img[px * 4] + 0.587f * img[px * 4 + 1] + 0.114f * img[px * 4 + 2]) / 255.0f;
+          };
+          // Column-major 4x4 inverse (cofactors), doubles.
+          const auto inverse4 = [](const Mat4& a, double* out) {
+            double inv[16];
+            const float* m = a.m;
+            inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+            inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+            inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+            inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+            inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+            inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+            inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+            inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+            inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+            inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+            inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+            inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+            inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+            inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+            inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+            inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+            const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+            const double id = det != 0.0 ? 1.0 / det : 0.0;
+            for (int i = 0; i < 16; ++i) out[i] = inv[i] * id;
+          };
+          const auto xform = [](const double* m, const double* v, double* o) {
+            for (int r = 0; r < 4; ++r) o[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
+          };
+          double inv_cur[16];
+          inverse4(view_projection, inv_cur);
+          // Previous VP in this frame's camera-relative space.
+          const Mat4 prev_rel_f = inf::render::mul(sweep.prev_vp, inf::render::translate(camera_pos - sweep.prev_cam));
+          double prev_rel[16];
+          for (int i = 0; i < 16; ++i) prev_rel[i] = prev_rel_f.m[i];
+          for (std::uint32_t y = 1; y + 1 < h; ++y) {
+            for (std::uint32_t x = 1; x + 1 < w; ++x) {
+              const std::size_t px = static_cast<std::size_t>(y) * w + x;
+              const float d = std::fabs(lum(cur, px) - lum(sweep.prev, px));
+              sweep.raw[px] += d;
+              const double ndc[4] = {(static_cast<double>(x) + 0.5) / w * 2.0 - 1.0,
+                                     1.0 - (static_cast<double>(y) + 0.5) / h * 2.0, depth[px], 1.0};
+              double wp[4];
+              xform(inv_cur, ndc, wp);
+              const double world[4] = {wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3], 1.0};
+              double pc[4];
+              xform(prev_rel, world, pc);
+              float mx = 0.0f, my = 0.0f;
+              if (pc[3] > 1e-4 && depth[px] > 1e-7) {
+                mx = static_cast<float>((pc[0] / pc[3] * 0.5 + 0.5) * w - (static_cast<double>(x) + 0.5));
+                my = static_cast<float>((0.5 - pc[1] / pc[3] * 0.5) * h - (static_cast<double>(y) + 0.5));
+              }
+              const float gx = 0.5f * std::fabs(lum(cur, px + 1) - lum(cur, px - 1));
+              const float gy = 0.5f * std::fabs(lum(cur, px + w) - lum(cur, px - w));
+              const float expected = std::fabs(mx) * gx + std::fabs(my) * gy;
+              sweep.resid[px] += std::max(0.0f, d - 1.5f * expected - 0.004f);
+            }
+          }
+          sweep.prev.swap(cur);
+          ++sweep.measured;
+        }
+        sweep.prev_vp = view_projection;
+        sweep.prev_cam = camera_pos;
+      }
+      if (sweep.step < sweep_frames) {
+        // slide sideways for the next frame and ask for its readback
+        const SVec3 right = inf::sim::normalize(inf::sim::cross(player.forward(), player.up()));
+        player.set_position(player.position() + right * sweep_step);
+        rhi->request_readback();
+        ++sweep.step;
+      } else if (sweep.measured > 0) {
+        const float norm = 1.0f / static_cast<float>(sweep.measured);
+        double total = 0.0, total_raw = 0.0;
+        std::vector<std::uint8_t> heat(sweep.resid.size() * 4, 255);
+        for (std::size_t px = 0; px < sweep.resid.size(); ++px) {
+          const float f = sweep.resid[px] * norm;
+          total += f;
+          total_raw += sweep.raw[px] * norm;
+          const float v = std::min(1.0f, f * 10.0f);
+          heat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
+          heat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
+          heat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+        }
+        std::printf("sweep: %d steps of %.3f m; mean temporal residual %.5f (raw frame difference %.5f) at %ux%u\n",
+                    sweep.measured, sweep_step, total / static_cast<double>(sweep.resid.size()),
+                    total_raw / static_cast<double>(sweep.resid.size()), sweep.w, sweep.h);
+        stbi_write_png((sweep_out + "-heat.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                       heat.data(), static_cast<int>(sweep.w * 4));
+        stbi_write_png((sweep_out + "-frame.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                       sweep.prev.data(), static_cast<int>(sweep.w * 4));
+        std::printf("sweep: wrote %s-heat.png and %s-frame.png\n", sweep_out.c_str(), sweep_out.c_str());
+        std::fflush(stdout);
+        break;
+      }
+    }
     if (max_frames > 0 && frame >= max_frames) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);
     }

@@ -143,6 +143,7 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
     render::Rhi::DrawItem item;
     item.mesh = mesh;
     item.mode = 8;
+    item.shadow_caster = true;
     std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
     item.aux[0] = static_cast<float>(translation.x);
     item.aux[1] = static_cast<float>(translation.y);

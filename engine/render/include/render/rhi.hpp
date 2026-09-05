@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -160,6 +161,12 @@ class Rhi {
     // draws the whole mesh.
     std::uint32_t first_index{0};
     std::uint32_t index_count{0};
+    // T0021: casts shadows and joins the depth/normal prepass (terrain
+    // chunks and city meshes; never the planet impostors or glows).
+    bool shadow_caster = false;
+    // Depth/normal prepass only (screen-space occlusion), not a shadow
+    // caster — e.g. the far-field body sphere under the streamed chunks.
+    bool prepass = false;
     // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
     // T0018: overlay items (HUD, map cards, reticles) are drawn AFTER the
@@ -221,6 +228,14 @@ class Rhi {
   // it as a binary PPM (P6) to path. Blocks that frame on the GPU
   // readback — a debug/verification tool, not a per-frame feature.
   void request_capture(const std::string& path);
+
+  // T0021: frame + depth readback for tooling (the app's --sweep). The
+  // next render_frame renders the identical scene offscreen and keeps
+  // its final LDR image (RGBA8, sRGB-encoded) and its depth buffer
+  // (reversed-Z, 0..1); take_readback hands them over once.
+  void request_readback();
+  bool take_readback(std::vector<std::uint8_t>* rgba, std::vector<float>* depth,
+                     std::uint32_t* width, std::uint32_t* height);
 
   // --- debug frame recorder (ring buffer + triggered sequences) --------
   // While the ring is enabled (debug mode), every few frames the scene

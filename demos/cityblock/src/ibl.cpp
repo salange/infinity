@@ -243,6 +243,12 @@ Environment build_environment(Gpu& gpu, Equirect env, float yaw, std::uint32_t b
           const float t = 2.0f * (static_cast<float>(y) + 0.5f) / static_cast<float>(size) - 1.0f;
           const Vec3 d = face_dir(f, s, t);
           Vec3 c = sample_lod(d, std::max(0.0f, lod));
+          if (!out.has_sun) {
+            // night maps: stars are sub-texel points that would bloom into
+            // blobs at cube resolution — cap them at a few times the sky level
+            const float cap = std::max(sky_mean * 12.0f, 0.5f);
+            c = Vec3{std::min(c.x, cap), std::min(c.y, cap), std::min(c.z, cap)};
+          }
           if (out.has_sun && mip == 0) {
             const float dd = dot(d, out.sun_dir);
             if (dd > sun_disc_cos) c = sun_radiance;

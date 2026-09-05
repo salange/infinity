@@ -4,22 +4,15 @@
 #include <cmath>
 #include <cstdio>
 
+#include "materials.hpp"
 #include "rng.hpp"
+#include "towers.hpp"
 
 namespace cb {
-
-namespace {
 
 // ---------------------------------------------------------------------------
 // Materials
 // ---------------------------------------------------------------------------
-enum Mat : std::uint32_t {
-  M_ASPHALT = 0, M_LANE_WHITE, M_LANE_YELLOW, M_CURB, M_SIDEWALK, M_PLAZA, M_TERRAZZO, M_GRASS, M_SOIL,
-  M_CONCRETE_WHITE, M_CONCRETE, M_CONCRETE_DARK, M_WHITE_METAL, M_SILVER, M_DARK_METAL, M_BRONZE,
-  M_GLASS_BLUE, M_GLASS_SILVER, M_GLASS_DARK, M_GLASS_CLEAR, M_SPANDREL, M_ROOF, M_BARK, M_LEAF, M_LAMP,
-  M_MARBLE, M_LOBBY_LIGHT, M_SIGN, M_WATER, M_GLASS_XFRAME, M_GLASS_CONTEXT, M_COUNT
-};
-
 std::vector<MaterialDesc> make_materials() {
   std::vector<MaterialDesc> m(M_COUNT);
   auto set = [&](Mat id, const char* name, Vec3 color, float rough, float metal, const char* tex, float scale, std::uint32_t flags = 0) {
@@ -41,10 +34,10 @@ std::vector<MaterialDesc> make_materials() {
   set(M_TERRAZZO, "terrazzo", {1.0f, 1.0f, 1.0f}, 0.35f, 0, "terrazzo", 3.0f, kMatPlanarXZ);
   set(M_GRASS, "grass", {0.95f, 1.0f, 0.9f}, 0.9f, 0, "grass", 3.0f, kMatPlanarXZ);
   set(M_SOIL, "soil", {0.9f, 0.9f, 0.9f}, 0.95f, 0, "soil", 2.0f, kMatPlanarXZ);
-  set(M_CONCRETE_WHITE, "concrete_white", {1.0f, 1.0f, 1.0f}, 0.6f, 0, "concrete_white", 3.0f, kMatTriplanar);
+  set(M_CONCRETE_WHITE, "concrete_white", {0.86f, 0.86f, 0.84f}, 0.6f, 0, "concrete_white", 3.0f, kMatTriplanar);
   set(M_CONCRETE, "concrete", {1.0f, 1.0f, 1.0f}, 0.7f, 0, "concrete_smooth", 4.0f, kMatTriplanar);
   set(M_CONCRETE_DARK, "concrete_dark", {0.9f, 0.9f, 0.9f}, 0.7f, 0, "concrete_panels", 3.0f, kMatTriplanar);
-  set(M_WHITE_METAL, "white_metal", {0.92f, 0.92f, 0.90f}, 0.42f, 0.0f, "", 1.0f);
+  set(M_WHITE_METAL, "white_metal", {0.80f, 0.80f, 0.78f}, 0.42f, 0.0f, "", 1.0f);
   set(M_SILVER, "silver", {1.0f, 1.0f, 1.0f}, 0.55f, 1.0f, "metal_silver", 1.0f, kMatTriplanar);
   set(M_DARK_METAL, "dark_metal", {0.25f, 0.25f, 0.26f}, 0.55f, 0.9f, "metal_black", 1.0f, kMatTriplanar);
   set(M_BRONZE, "bronze", {0.36f, 0.26f, 0.18f}, 0.4f, 1.0f, "", 1.0f);
@@ -66,6 +59,13 @@ std::vector<MaterialDesc> make_materials() {
   m[M_GLASS_CONTEXT].tint2 = Vec3{0.55f, 0.66f, 0.78f};
   m[M_GLASS_CONTEXT].room_w = 4.2f; m[M_GLASS_CONTEXT].room_h = 3.8f; m[M_GLASS_CONTEXT].room_d = 7.0f;
   m[M_GLASS_CONTEXT].lit_probability = 0.5f;
+  set(M_GLASS_GREEN, "glass_green", {0.55f, 0.72f, 0.66f}, 0.06f, 0, "", 1.0f, kMatGlass);
+  m[M_GLASS_GREEN].tint2 = Vec3{0.58f, 0.76f, 0.68f};
+  m[M_GLASS_GREEN].room_w = 3.0f; m[M_GLASS_GREEN].room_h = 3.8f; m[M_GLASS_GREEN].room_d = 6.5f;
+  set(M_GLASS_BRONZE, "glass_bronze", {0.45f, 0.36f, 0.28f}, 0.06f, 0, "", 1.0f, kMatGlass);
+  m[M_GLASS_BRONZE].tint2 = Vec3{0.5f, 0.4f, 0.3f};
+  m[M_GLASS_BRONZE].room_w = 4.8f; m[M_GLASS_BRONZE].room_h = 3.8f; m[M_GLASS_BRONZE].room_d = 6.0f;
+  m[M_GLASS_BRONZE].lit_probability = 0.45f;
   set(M_GLASS_CLEAR, "glass_clear", {0.9f, 0.95f, 0.95f}, 0.03f, 0, "", 1.0f, kMatGlass);
   m[M_GLASS_CLEAR].tint2 = Vec3{0.9f, 0.95f, 0.93f};
   m[M_GLASS_CLEAR].room_w = 12.0f; m[M_GLASS_CLEAR].room_h = 6.0f; m[M_GLASS_CLEAR].room_d = 14.0f; m[M_GLASS_CLEAR].lit_probability = 0.9f;
@@ -84,511 +84,23 @@ std::vector<MaterialDesc> make_materials() {
   return m;
 }
 
-// ---------------------------------------------------------------------------
-// Facade helpers
-// ---------------------------------------------------------------------------
-struct Surface {
-  Sampled s;      // sampled plan (ccw)
-  float perimeter{0};
-  Vec2 centre;
-  // Position and outward normal at arclength u (wraps).
-  void at(float u, Vec2* p, Vec2* n) const {
-    u = std::fmod(std::fmod(u, perimeter) + perimeter, perimeter);
-    const std::size_t count = s.points.size();
-    std::size_t i = 0;
-    // binary search on arclen
-    std::size_t lo = 0, hi = count - 1;
-    while (lo < hi) {
-      const std::size_t mid = (lo + hi + 1) / 2;
-      if (s.arclen[mid] <= u) lo = mid; else hi = mid - 1;
-    }
-    i = lo;
-    const std::size_t j = (i + 1) % count;
-    const float a0 = s.arclen[i];
-    const float a1 = j == 0 ? perimeter : s.arclen[j];
-    const float t = a1 > a0 ? (u - a0) / (a1 - a0) : 0.0f;
-    *p = s.points[i] + (s.points[j] - s.points[i]) * t;
-    *n = s.normals[i];
-  }
-};
 
-Surface make_surface(const std::vector<Vec2>& plan, float step) {
-  Surface sf;
-  sf.s = plan_sample(plan, step);
-  sf.perimeter = plan_perimeter(plan);
-  Vec2 c{0, 0};
-  for (const Vec2& p : plan) c = c + p;
-  sf.centre = c * (1.0f / static_cast<float>(plan.size()));
-  return sf;
-}
-
-struct Panel {
-  Vec2 p0, p1;  // bottom corners (xz), left → right seen from outside
-  Vec2 n;       // outward normal (xz)
-  float y0, y1;
-  float u0, u1;  // arclength
-  int floor;
-  int index;
-};
-
-// Splits the perimeter into modules of ~module_w metres for each floor.
-std::vector<Panel> panelize(const Surface& sf, float base_y, float floor_h, int floors, float module_w,
-                            float scale_at_floor(int, void*) = nullptr, void* ctx = nullptr) {
-  (void)scale_at_floor;
-  (void)ctx;
-  std::vector<Panel> out;
-  const int modules = std::max(3, static_cast<int>(std::round(sf.perimeter / module_w)));
-  const float mw = sf.perimeter / static_cast<float>(modules);
-  for (int f = 0; f < floors; ++f) {
-    for (int i = 0; i < modules; ++i) {
-      Panel p;
-      p.u0 = static_cast<float>(i) * mw;
-      p.u1 = p.u0 + mw;
-      Vec2 n0, n1;
-      sf.at(p.u0, &p.p0, &n0);
-      sf.at(p.u1, &p.p1, &n1);
-      p.n = normalize(perp(p.p1 - p.p0) * -1.0f);  // right-hand normal for ccw travel
-      p.y0 = base_y + floor_h * static_cast<float>(f);
-      p.y1 = p.y0 + floor_h;
-      p.floor = f;
-      p.index = i;
-      out.push_back(p);
-    }
-  }
-  return out;
-}
-
-Vec3 P3(Vec2 xz, float y) { return Vec3{xz.x, y, xz.y}; }
-
-struct FacadeStyle {
-  Mat glass{M_GLASS_BLUE};
-  Mat mullion{M_SILVER};
-  Mat spandrel{M_SPANDREL};
-  float mullion_w{0.08f}, mullion_d{0.16f};
-  float transom_h{0.10f};
-  float spandrel_h{0.0f};     // opaque band at the floor line (0 = none)
-  float glass_recess{0.06f};
-  float fin_depth{0.0f};      // horizontal fin projection at each floor line
-  float fin_thickness{0.12f};
-  int vertical_subdiv{1};     // extra mullions inside the panel
-  float random{0.0f};
-};
-
-// Emits one curtain-wall panel: recessed glass, mullions, transom, optional spandrel and fin.
-void curtain_panel(Mesh& mesh, const Panel& p, const FacadeStyle& st, Vec2 origin_hint) {
-  (void)origin_hint;
-  const Vec3 n3{p.n.x, 0, p.n.y};
-  const Vec3 a = P3(p.p0, p.y0), b = P3(p.p1, p.y0), c = P3(p.p1, p.y1), d = P3(p.p0, p.y1);
-  const Vec3 rec = n3 * (-st.glass_recess);
-  // glass (facade coords: u along, v up)
-  {
-    Emit e(&mesh, st.glass);
-    e.element_random = st.random;
-    const float sp = st.spandrel_h;
-    const Vec3 ga = a + rec + Vec3{0, sp, 0}, gb = b + rec + Vec3{0, sp, 0}, gc = c + rec, gd = d + rec;
-    QuadUV uv{{p.u0, p.y0 + sp}, {p.u1, p.y0 + sp}, {p.u1, p.y1}, {p.u0, p.y1}};
-    e.quad(ga, gb, gc, gd, uv);
-    if (sp > 0.0f) {
-      Emit s(&mesh, st.spandrel);
-      s.quad(a + rec * 0.5f, b + rec * 0.5f, b + rec * 0.5f + Vec3{0, sp, 0}, a + rec * 0.5f + Vec3{0, sp, 0},
-             QuadUV{{p.u0, 0}, {p.u1, 0}, {p.u1, sp}, {p.u0, sp}});
-    }
-  }
-  // vertical mullion at the left edge (the right edge belongs to the next panel)
-  if (st.mullion_w > 0.0f) {
-    Emit e(&mesh, st.mullion);
-    e.occlusion = 0.9f;
-    const Vec3 mid = (a + d) * 0.5f + n3 * (st.mullion_d * 0.5f - st.glass_recess);
-    const Vec3 along = normalize(b - a);
-    e.box(mid, Vec3{st.mullion_w * 0.5f, (p.y1 - p.y0) * 0.5f, st.mullion_d * 0.5f}, along, Vec3{0, 1, 0}, n3);
-    for (int k = 1; k < st.vertical_subdiv; ++k) {
-      const float t = static_cast<float>(k) / static_cast<float>(st.vertical_subdiv);
-      const Vec3 base = lerp(a, b, t);
-      e.box(base + Vec3{0, (p.y1 - p.y0) * 0.5f, 0} + n3 * (st.mullion_d * 0.3f - st.glass_recess),
-            Vec3{st.mullion_w * 0.35f, (p.y1 - p.y0) * 0.5f, st.mullion_d * 0.3f}, along, Vec3{0, 1, 0}, n3);
-    }
-    // transom at the top edge
-    const Vec3 tm = (c + d) * 0.5f + n3 * (st.mullion_d * 0.5f - st.glass_recess);
-    e.box(tm, Vec3{length(b - a) * 0.5f, st.transom_h * 0.5f, st.mullion_d * 0.5f}, along, Vec3{0, 1, 0}, n3);
-    if (st.spandrel_h > 0.0f) {
-      const Vec3 sm = (a + b) * 0.5f + Vec3{0, st.spandrel_h, 0} + n3 * (st.mullion_d * 0.4f - st.glass_recess);
-      e.box(sm, Vec3{length(b - a) * 0.5f, st.transom_h * 0.4f, st.mullion_d * 0.4f}, along, Vec3{0, 1, 0}, n3);
-    }
-  }
-  if (st.fin_depth > 0.0f) {
-    Emit e(&mesh, M_WHITE_METAL);
-    e.occlusion = 0.95f;
-    const Vec3 along = normalize(b - a);
-    const Vec3 fm = (a + b) * 0.5f + n3 * (st.fin_depth * 0.5f - st.glass_recess) + Vec3{0, st.fin_thickness * 0.5f, 0};
-    e.box(fm, Vec3{length(b - a) * 0.5f + 0.01f, st.fin_thickness * 0.5f, st.fin_depth * 0.5f}, along, Vec3{0, 1, 0}, n3);
+float glass_floor_height(Mat glass) {
+  switch (glass) {
+    case M_GLASS_BLUE: return 4.0f;
+    case M_GLASS_SILVER: return 3.9f;
+    case M_GLASS_XFRAME: return 4.4f;
+    default: return 3.8f;
   }
 }
-
-// Floor slab ring + roof cap for a plan at height y.
-void slab(Mesh& mesh, const std::vector<Vec2>& plan, float y, float thickness, Mat mat) {
-  Emit e(&mesh, mat);
-  e.polygon(plan, y, true, Vec2{0.25f, 0.25f});
-  e.polygon(plan, y - thickness, false, Vec2{0.25f, 0.25f});
-  e.wall(plan, y - thickness, y, true, true);
+Mat glass_for_floor_height(float floor_h) {
+  if (floor_h > 4.2f) return M_GLASS_XFRAME;
+  if (floor_h > 3.95f) return M_GLASS_BLUE;
+  if (floor_h > 3.85f) return M_GLASS_SILVER;
+  return M_GLASS_CONTEXT;
 }
 
-void parapet(Mesh& mesh, const std::vector<Vec2>& plan, float y, float height, float thickness, Mat mat) {
-  Emit e(&mesh, mat);
-  const std::vector<Vec2> inner = plan_offset(plan, -thickness);
-  e.wall(plan, y, y + height, true, true);
-  e.wall(inner, y, y + height, true, false);
-  // top ring: quads between plan and inner
-  for (std::size_t i = 0; i < plan.size(); ++i) {
-    const std::size_t j = (i + 1) % plan.size();
-    e.quad_metric(P3(plan[i], y + height), P3(plan[j], y + height), P3(inner[j], y + height), P3(inner[i], y + height));
-  }
-}
-
-// Rooftop equipment: a few boxes and cylinders scattered inside the plan.
-void roof_equipment(Mesh& mesh, Rng& rng, const std::vector<Vec2>& plan, float y, int count) {
-  Emit e(&mesh, M_DARK_METAL);
-  Emit c(&mesh, M_CONCRETE);
-  float minx = 1e9f, maxx = -1e9f, minz = 1e9f, maxz = -1e9f;
-  for (const Vec2& p : plan) {
-    minx = std::min(minx, p.x); maxx = std::max(maxx, p.x); minz = std::min(minz, p.y); maxz = std::max(maxz, p.y);
-  }
-  for (int i = 0; i < count * 6 && count > 0; ++i) {
-    const Vec2 p{rng.range(minx, maxx), rng.range(minz, maxz)};
-    if (!point_in_polygon(plan_offset(plan, -3.0f), p)) continue;
-    const float w = rng.range(1.2f, 3.5f), h = rng.range(1.0f, 2.6f);
-    if (rng.chance(0.6f)) e.box(P3(p, y + h * 0.5f), Vec3{w * 0.5f, h * 0.5f, rng.range(1.0f, 2.5f)});
-    else c.tube(P3(p, y), P3(p, y + h), w * 0.35f, 16, true);
-    if (--count <= 0) break;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Buildings
-// ---------------------------------------------------------------------------
-
-// 1. Diagrid tower: rounded-square plan, white steel diagrid over blue glass.
-void gen_diagrid_tower(Scene& sc, Rng rng, Vec2 centre, float half, int floors, float floor_h) {
-  Mesh& mesh = sc.opaque;
-  const std::vector<Vec2> plan = plan_superellipse(half, half, 3.2f, 96, centre, 0.0f);
-  const float base_y = 0.0f;
-  const float lobby_h = 2.0f * floor_h;  // two-storey lobby
-  const float top = base_y + lobby_h + floor_h * static_cast<float>(floors);
-  Surface sf = make_surface(plan, 0.5f);
-  // Podium/lobby: recessed clear glass with a canopy slab.
-  {
-    const std::vector<Vec2> inner = plan_offset(plan, -2.5f);
-    Surface sfi = make_surface(inner, 0.5f);
-    FacadeStyle st;
-    st.glass = M_GLASS_CLEAR; st.mullion = M_DARK_METAL; st.mullion_w = 0.14f; st.mullion_d = 0.3f; st.transom_h = 0.14f;
-    st.glass_recess = 0.1f; st.random = rng.next();
-    for (const Panel& p : panelize(sfi, base_y, lobby_h, 1, 3.0f)) curtain_panel(mesh, p, st, centre);
-    // lobby floor + ceiling light strip
-    Emit f(&mesh, M_MARBLE);
-    f.polygon(inner, base_y + 0.02f, true);
-    Emit l(&mesh, M_LOBBY_LIGHT);
-    l.polygon(plan_offset(inner, -1.0f), base_y + lobby_h - 0.3f, false);
-    slab(mesh, plan_offset(plan, 0.8f), base_y + lobby_h, 1.2f, M_WHITE_METAL);  // canopy
-    // columns
-    Emit c(&mesh, M_CONCRETE_WHITE);
-    for (int i = 0; i < 16; ++i) {
-      Vec2 p, n;
-      sf.at(sf.perimeter * static_cast<float>(i) / 16.0f, &p, &n);
-      c.tube(P3(p - n * 0.9f, base_y), P3(p - n * 0.9f, base_y + lobby_h), 0.5f, 14, false);
-    }
-  }
-  // Tower curtain wall.
-  FacadeStyle st;
-  st.glass = M_GLASS_BLUE; st.mullion = M_DARK_METAL; st.mullion_w = 0.07f; st.mullion_d = 0.12f; st.transom_h = 0.35f;
-  st.spandrel_h = 0.0f; st.glass_recess = 0.05f; st.vertical_subdiv = 2; st.random = rng.next();
-  const std::vector<Panel> panels = panelize(sf, base_y + lobby_h, floor_h, floors, 3.0f);
-  for (const Panel& p : panels) curtain_panel(mesh, p, st, centre);
-  // floor slabs visible as dark bands behind the glass: thin dark ring every floor
-  {
-    Emit s(&mesh, M_SPANDREL);
-    const std::vector<Vec2> ring = plan_offset(plan, -0.08f);
-    for (int f = 0; f <= floors; ++f) {
-      const float y = base_y + lobby_h + floor_h * static_cast<float>(f);
-      s.wall(ring, y - 0.55f, y + 0.15f, true, true);
-    }
-  }
-  // Diagrid: nodes every 2 floors, modules ~ perimeter / 20.
-  {
-    Emit d(&mesh, M_WHITE_METAL);
-    d.occlusion = 1.0f;
-    const int modules = 20;
-    const float mw = sf.perimeter / static_cast<float>(modules);
-    const float node_h = 2.0f * floor_h;
-    const int rows = floors / 2 + 2;  // continues above the roof as a crown
-    const float r_member = 0.42f;
-    const float offset = 0.75f;
-    auto node = [&](int i, int j) {
-      Vec2 p, n;
-      sf.at(mw * static_cast<float>(i), &p, &n);
-      const float y = base_y + lobby_h + node_h * static_cast<float>(j);
-      return P3(p + n * offset, y);
-    };
-    for (int j = 0; j < rows; ++j) {
-      for (int i = 0; i < modules; ++i) {
-        const Vec3 a = node(i, j), b = node(i + 1, j + 1), c2 = node(i + 1, j), d2 = node(i, j + 1);
-        // taper the member radius toward the crown
-        const float shrink = j >= rows - 2 ? 0.75f : 1.0f;
-        d.tube(a, b, r_member * shrink, 12, false);
-        d.tube(c2, d2, r_member * shrink, 12, false);
-      }
-      for (int i = 0; i < modules; ++i) d.sphere(node(i, j), r_member * 1.25f, 8, 12);
-    }
-    for (int i = 0; i < modules; ++i) d.sphere(node(i, rows), r_member * 0.95f, 8, 12);
-    // ring beam at the crown top
-    Vec2 pp, nn;
-    for (int i = 0; i < modules; ++i) {
-      sf.at(mw * static_cast<float>(i), &pp, &nn);
-      Vec2 pq, nq;
-      sf.at(mw * static_cast<float>(i + 1), &pq, &nq);
-      const float y = base_y + lobby_h + node_h * static_cast<float>(rows);
-      d.tube(P3(pp + nn * offset, y), P3(pq + nq * offset, y), r_member * 0.8f, 10, false);
-    }
-    // base: members land on white concrete plinths
-    Emit pl(&mesh, M_CONCRETE_WHITE);
-    for (int i = 0; i < modules; ++i) {
-      const Vec3 nd = node(i, 0);
-      pl.frustum(Vec3{nd.x, base_y, nd.z}, Vec3{nd.x, base_y + lobby_h, nd.z}, 1.1f, 0.6f, 12, true);
-    }
-  }
-  // roof
-  slab(mesh, plan_offset(plan, -0.2f), top, 0.6f, M_ROOF);
-  parapet(mesh, plan_offset(plan, -0.2f), top, 1.1f, 0.35f, M_WHITE_METAL);
-  roof_equipment(mesh, rng, plan, top, 5);
-  // crown glass lantern: a smaller superellipse rising into the lattice
-  {
-    const std::vector<Vec2> lantern = plan_superellipse(half * 0.55f, half * 0.55f, 3.2f, 48, centre, 0.0f);
-    Surface sl = make_surface(lantern, 0.5f);
-    FacadeStyle ls;
-    ls.glass = M_GLASS_SILVER; ls.mullion = M_DARK_METAL; ls.mullion_w = 0.06f; ls.mullion_d = 0.1f; ls.transom_h = 0.1f;
-    ls.random = rng.next();
-    for (const Panel& p : panelize(sl, top, floor_h, 2, 2.5f)) curtain_panel(mesh, p, ls, centre);
-    slab(mesh, lantern, top + floor_h * 2.0f, 0.5f, M_WHITE_METAL);
-    Emit m(&mesh, M_DARK_METAL);
-    m.tube(P3(centre, top + floor_h * 2.0f), P3(centre, top + floor_h * 2.0f + 14.0f), 0.25f, 8, true);
-    Emit sgn(&mesh, M_SIGN);
-    sgn.sphere(P3(centre, top + floor_h * 2.0f + 14.3f), 0.5f, 6, 10);
-  }
-}
-
-// 2. Twin lens towers: two lens plans, tapering to a point, horizontal fins.
-void gen_lens_towers(Scene& sc, Rng rng, Vec2 centre, float rot, int floors, float floor_h) {
-  Mesh& mesh = sc.opaque;
-  const float r = 46.0f, d = 34.0f;  // lens width 2*sqrt(r^2-d^2) ≈ 62, thickness 2*(r-d) = 24
-  const float gap = 6.0f;
-  const float lens_half_thick = r - d;
-  const float base_y = 0.0f;
-  const float podium_h = 5.5f;
-  for (int side = 0; side < 2; ++side) {
-    const float sgn = side == 0 ? 1.0f : -1.0f;
-    const Vec2 off = Vec2{-std::sin(rot), std::cos(rot)} * (sgn * (lens_half_thick + gap * 0.5f));
-    const Vec2 c = centre + off;
-    const std::vector<Vec2> base_plan = plan_lens(r, d, 40, c, rot);
-    // taper profile: scale(f) shrinks toward the top and pinches into a tip
-    auto scale_at = [&](float f01) {
-      const float taper = 1.0f - 0.22f * f01 * f01;
-      const float tip = f01 > 0.88f ? 1.0f - 0.55f * std::pow((f01 - 0.88f) / 0.12f, 1.6f) : 1.0f;
-      return taper * tip;
-    };
-    // podium (shared look: dark stone base with clear glass)
-    {
-      const std::vector<Vec2> pod = plan_offset(base_plan, 1.5f);
-      Surface sp = make_surface(pod, 0.5f);
-      FacadeStyle st;
-      st.glass = M_GLASS_CLEAR; st.mullion = M_DARK_METAL; st.mullion_w = 0.12f; st.mullion_d = 0.25f; st.transom_h = 0.12f; st.random = rng.next();
-      for (const Panel& p : panelize(sp, base_y, podium_h, 1, 2.8f)) curtain_panel(mesh, p, st, c);
-      slab(mesh, plan_offset(pod, 0.6f), base_y + podium_h, 0.8f, M_CONCRETE_WHITE);
-      Emit f(&mesh, M_TERRAZZO);
-      f.polygon(pod, base_y + 0.02f, true);
-    }
-    // tower: floor by floor with its own scaled plan
-    FacadeStyle st;
-    st.glass = M_GLASS_SILVER; st.mullion = M_SILVER; st.mullion_w = 0.05f; st.mullion_d = 0.08f; st.transom_h = 0.06f;
-    st.glass_recess = 0.04f; st.fin_depth = 0.5f; st.fin_thickness = 0.22f; st.vertical_subdiv = 1; st.random = rng.next();
-    const float tower_base = base_y + podium_h;
-    float u_offset = 0.0f;
-    (void)u_offset;
-    for (int f = 0; f < floors; ++f) {
-      const float f0 = static_cast<float>(f) / static_cast<float>(floors);
-      const float f1 = static_cast<float>(f + 1) / static_cast<float>(floors);
-      const std::vector<Vec2> p0 = plan_scale(base_plan, scale_at(f0), c);
-      const std::vector<Vec2> p1 = plan_scale(base_plan, scale_at(f1), c);
-      const float y0 = tower_base + floor_h * static_cast<float>(f), y1 = y0 + floor_h;
-      const std::size_t n = p0.size();
-      const int per_edge = 2;
-      float u = 0.0f;
-      Emit g(&mesh, st.glass);
-      g.element_random = st.random;
-      Emit m(&mesh, st.mullion);
-      Emit fin(&mesh, M_WHITE_METAL);
-      for (std::size_t i = 0; i < n; ++i) {
-        const std::size_t j = (i + 1) % n;
-        for (int k = 0; k < per_edge; ++k) {
-          const float ta = static_cast<float>(k) / per_edge, tb = static_cast<float>(k + 1) / per_edge;
-          const Vec2 a0 = p0[i] + (p0[j] - p0[i]) * ta, b0 = p0[i] + (p0[j] - p0[i]) * tb;
-          const Vec2 a1 = p1[i] + (p1[j] - p1[i]) * ta, b1 = p1[i] + (p1[j] - p1[i]) * tb;
-          const float w = length(b0 - a0);
-          const Vec3 A = P3(a0, y0), B = P3(b0, y0), C = P3(b1, y1), D = P3(a1, y1);
-          const Vec3 nrm = normalize(cross(B - A, D - A));
-          const Vec3 rec = nrm * (-st.glass_recess);
-          g.quad(A + rec, B + rec, C + rec, D + rec, QuadUV{{u, y0}, {u + w, y0}, {u + w, y1}, {u, y1}});
-          // horizontal fin at the floor line
-          const Vec3 fm = (A + B) * 0.5f + nrm * (st.fin_depth * 0.5f - st.glass_recess) + Vec3{0, st.fin_thickness * 0.5f, 0};
-          fin.box(fm, Vec3{w * 0.5f + 0.02f, st.fin_thickness * 0.5f, st.fin_depth * 0.5f}, normalize(B - A), Vec3{0, 1, 0}, nrm);
-          u += w;
-        }
-      }
-      if (f == floors - 1) {
-        slab(mesh, p1, y1, 0.5f, M_WHITE_METAL);
-        Emit cap(&mesh, M_WHITE_METAL);
-        cap.polygon(plan_offset(p1, 0.3f), y1 + 0.5f, true);
-      }
-    }
-  }
-  // sky bridge between the two towers at mid height
-  {
-    const float y = base_y + podium_h + floor_h * static_cast<float>(floors) * 0.55f;
-    const Vec2 dir{-std::sin(rot), std::cos(rot)};
-    Emit g(&mesh, M_GLASS_CLEAR);
-    Emit m(&mesh, M_WHITE_METAL);
-    const Vec2 a = centre - dir * (gap * 0.5f + 2.0f), b = centre + dir * (gap * 0.5f + 2.0f);
-    const Vec2 side = perp(dir) * 4.0f;
-    m.box(P3(centre, y - 0.4f), Vec3{4.0f, 0.4f, gap * 0.5f + 2.5f}, perp(dir).x != 0 ? Vec3{perp(dir).x, 0, perp(dir).y} : Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{dir.x, 0, dir.y});
-    m.box(P3(centre, y + 4.2f), Vec3{4.0f, 0.3f, gap * 0.5f + 2.5f}, Vec3{perp(dir).x, 0, perp(dir).y}, Vec3{0, 1, 0}, Vec3{dir.x, 0, dir.y});
-    g.quad_metric(P3(a + side, y), P3(b + side, y), P3(b + side, y + 3.9f), P3(a + side, y + 3.9f));
-    g.quad_metric(P3(b - side, y), P3(a - side, y), P3(a - side, y + 3.9f), P3(b - side, y + 3.9f));
-  }
-}
-
-// 3. Fin tower: dark glass cylinder with a weave of vertical bronze fins.
-void gen_fin_tower(Scene& sc, Rng rng, Vec2 centre, float radius, int floors, float floor_h) {
-  Mesh& mesh = sc.opaque;
-  const std::vector<Vec2> plan = plan_circle(radius, 72, centre);
-  Surface sf = make_surface(plan, 0.5f);
-  const float base_y = 0.0f, lobby_h = 6.0f;
-  {
-    const std::vector<Vec2> inner = plan_circle(radius - 2.0f, 48, centre);
-    Surface si = make_surface(inner, 0.5f);
-    FacadeStyle st;
-    st.glass = M_GLASS_CLEAR; st.mullion = M_DARK_METAL; st.mullion_w = 0.12f; st.mullion_d = 0.24f; st.transom_h = 0.12f; st.random = rng.next();
-    for (const Panel& p : panelize(si, base_y, lobby_h, 1, 3.2f)) curtain_panel(mesh, p, st, centre);
-    Emit f(&mesh, M_TERRAZZO);
-    f.polygon(inner, base_y + 0.02f, true);
-    Emit c(&mesh, M_CONCRETE_DARK);
-    for (int i = 0; i < 12; ++i) {
-      Vec2 p, n;
-      sf.at(sf.perimeter * static_cast<float>(i) / 12.0f, &p, &n);
-      c.box(P3(p - n * 0.6f, base_y + lobby_h * 0.5f), Vec3{0.45f, lobby_h * 0.5f, 0.45f});
-    }
-    slab(mesh, plan_offset(plan, 0.5f), base_y + lobby_h, 0.9f, M_CONCRETE_DARK);
-  }
-  FacadeStyle st;
-  st.glass = M_GLASS_DARK; st.mullion = M_DARK_METAL; st.mullion_w = 0.0f; st.mullion_d = 0.1f; st.transom_h = 0.45f;
-  st.glass_recess = 0.04f; st.random = rng.next();
-  const float tower_base = base_y + lobby_h;
-  for (const Panel& p : panelize(sf, tower_base, floor_h, floors, 1.6f)) curtain_panel(mesh, p, st, centre);
-  // fins: one per module, offset half a module every other floor, depth modulated by a wave
-  {
-    Emit fin(&mesh, M_BRONZE);
-    fin.occlusion = 0.95f;
-    const int modules = std::max(3, static_cast<int>(std::round(sf.perimeter / 1.6f)));
-    const float mw = sf.perimeter / static_cast<float>(modules);
-    for (int f = 0; f < floors; ++f) {
-      const float y0 = tower_base + floor_h * static_cast<float>(f);
-      const float shift = (f % 2) ? 0.5f : 0.0f;
-      for (int i = 0; i < modules; ++i) {
-        const float u = mw * (static_cast<float>(i) + shift + 0.5f);
-        Vec2 p, n;
-        sf.at(u, &p, &n);
-        const float phase = u / sf.perimeter * 2.0f * kPi;
-        const float depth = 0.55f + 0.45f * std::sin(phase * 3.0f + static_cast<float>(f) * 0.35f) * std::cos(static_cast<float>(f) * 0.11f);
-        const Vec3 n3{n.x, 0, n.y};
-        const Vec3 along = normalize(Vec3{-n.y, 0, n.x});
-        fin.box(P3(p, y0 + floor_h * 0.5f) + n3 * (depth * 0.5f), Vec3{0.07f, floor_h * 0.5f - 0.02f, depth * 0.5f}, along, Vec3{0, 1, 0}, n3);
-      }
-    }
-  }
-  const float top = tower_base + floor_h * static_cast<float>(floors);
-  slab(mesh, plan_offset(plan, 1.6f), top, 1.0f, M_CONCRETE_DARK);  // cantilevered cap
-  parapet(mesh, plan_offset(plan, 1.6f), top, 0.9f, 0.3f, M_DARK_METAL);
-  roof_equipment(mesh, rng, plan, top, 3);
-  // louvre crown band
-  {
-    Emit l(&mesh, M_DARK_METAL);
-    const std::vector<Vec2> ring = plan_circle(radius + 1.4f, 72, centre);
-    for (int k = 0; k < 4; ++k) {
-      const float y = top + 1.2f + 0.7f * static_cast<float>(k);
-      Emit e(&mesh, M_DARK_METAL);
-      e.wall(ring, y, y + 0.35f, true, true);
-    }
-  }
-}
-
-// 4. X-frame block: rectangular mid-rise with a white structural diamond
-//    exoskeleton (two-floor modules) over recessed dark glass.
-void gen_xframe_block(Scene& sc, Rng rng, Vec2 centre, float hx, float hz, int floors, float floor_h) {
-  Mesh& mesh = sc.opaque;
-  const std::vector<Vec2> plan = plan_rect(hx, hz, centre);
-  Surface sf = make_surface(plan, 0.5f);
-  const float base_y = 0.0f;
-  FacadeStyle st;
-  st.glass = M_GLASS_XFRAME; st.mullion = M_DARK_METAL; st.mullion_w = 0.06f; st.mullion_d = 0.1f; st.transom_h = 0.3f;
-  st.glass_recess = 0.05f; st.vertical_subdiv = 2; st.random = rng.next();
-  for (const Panel& p : panelize(sf, base_y, floor_h, floors, 3.0f)) curtain_panel(mesh, p, st, centre);
-  {
-    Emit s(&mesh, M_SPANDREL);
-    const std::vector<Vec2> ring = plan_offset(plan, -0.08f);
-    for (int f = 1; f <= floors; ++f) {
-      const float y = base_y + floor_h * static_cast<float>(f);
-      s.wall(ring, y - 0.5f, y + 0.12f, true, true);
-    }
-  }
-  // exoskeleton: per face, modules of ~9 m, cells 2 floors tall; diagonals
-  {
-    Emit x(&mesh, M_WHITE_METAL);
-    const float offset = 0.9f;
-    const float cell_h = 2.0f * floor_h;
-    const int rows = floors / 2;
-    for (std::size_t e = 0; e < plan.size(); ++e) {
-      const Vec2 a = plan[e], b = plan[(e + 1) % plan.size()];
-      const float len = length(b - a);
-      const int modules = std::max(1, static_cast<int>(std::round(len / 9.0f)));
-      const Vec2 dir = normalize(b - a);
-      const Vec2 n = Vec2{dir.y, -dir.x};
-      const Vec3 n3{n.x, 0, n.y};
-      for (int j = 0; j < rows; ++j) {
-        const float y0 = base_y + cell_h * static_cast<float>(j), y1 = y0 + cell_h;
-        for (int i = 0; i < modules; ++i) {
-          const Vec2 p0 = a + dir * (len * static_cast<float>(i) / modules) + n * offset;
-          const Vec2 p1 = a + dir * (len * static_cast<float>(i + 1) / modules) + n * offset;
-          x.beam(P3(p0, y0), P3(p1, y1), 0.55f, 1.0f, n3);
-          x.beam(P3(p1, y0), P3(p0, y1), 0.55f, 1.0f, n3);
-        }
-        // horizontal chord at the cell line
-        x.beam(P3(a + n * offset, y0), P3(b + n * offset, y0), 0.45f, 0.9f, n3);
-      }
-      x.beam(P3(a + n * offset, base_y + cell_h * rows), P3(b + n * offset, base_y + cell_h * rows), 0.45f, 0.9f, n3);
-      // vertical corner posts
-      x.beam(P3(a + n * offset, base_y), P3(a + n * offset, base_y + cell_h * rows), 0.6f, 1.0f, n3);
-    }
-  }
-  const float top = base_y + floor_h * static_cast<float>(floors);
-  slab(mesh, plan, top, 0.6f, M_ROOF);
-  parapet(mesh, plan, top, 1.0f, 0.3f, M_WHITE_METAL);
-  roof_equipment(mesh, rng, plan, top, 4);
-  // entrance canopy on the north face
-  {
-    Emit c(&mesh, M_WHITE_METAL);
-    const Vec2 mid{centre.x, centre.y - hz};
-    c.box(P3(mid + Vec2{0, -3.0f}, 4.6f), Vec3{7.0f, 0.2f, 3.2f});
-    Emit pcol(&mesh, M_DARK_METAL);
-    pcol.tube(P3(mid + Vec2{-6.0f, -5.6f}, 0), P3(mid + Vec2{-6.0f, -5.6f}, 4.4f), 0.15f, 8, false);
-    pcol.tube(P3(mid + Vec2{6.0f, -5.6f}, 0), P3(mid + Vec2{6.0f, -5.6f}, 4.4f), 0.15f, 8, false);
-  }
-}
+namespace {
 
 // 5. Folded pavilion: a faceted white shell with triangulated glazing.
 void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
@@ -614,15 +126,15 @@ void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
     for (int k = 0; k < 4; ++k) {
       const Vec3 a = tris[k][0], b = tris[k][1], c = tris[k][2];
       const bool is_glass = rng.chance(0.45f) || k == 3;
-      const Vec3 nrm = normalize(cross(b - a, c - a));
+      const Vec3 nrm = normalize(cross(a - b, c - b));
       if (is_glass) {
         const Vec3 rec = nrm * (-0.35f);
         // facade frame for interior mapping: u along ab, v perpendicular in-plane
         glass.facade = true;
         glass.facade_origin = a + rec;
-        glass.facade_u = normalize(b - a);
+        glass.facade_u = normalize(a - b);
         glass.facade_v = normalize(cross(nrm, glass.facade_u));
-        glass.triangle(a + rec, b + rec, c + rec);
+        glass.triangle(b + rec, a + rec, c + rec);
         // inner truss: three struts from the centroid to the edge midpoints
         const Vec3 cen = (a + b + c) * (1.0f / 3.0f) + rec * 0.5f;
         truss.tube(cen, (a + b) * 0.5f + rec * 0.5f, 0.12f, 8, false);
@@ -632,11 +144,11 @@ void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
         truss.tube((b + c) * 0.5f + rec * 0.5f, (c + a) * 0.5f + rec * 0.5f, 0.09f, 8, false);
         truss.tube((c + a) * 0.5f + rec * 0.5f, (a + b) * 0.5f + rec * 0.5f, 0.09f, 8, false);
       } else {
-        shell.triangle(a, b, c);
+        shell.triangle(b, a, c);
         // inset panel seams: a slightly recessed inner triangle reads as panels
         const Vec3 cen = (a + b + c) * (1.0f / 3.0f);
         const Vec3 ia = lerp(a, cen, 0.08f) + nrm * 0.02f, ib = lerp(b, cen, 0.08f) + nrm * 0.02f, ic = lerp(c, cen, 0.08f) + nrm * 0.02f;
-        shell.triangle(ia, ib, ic);
+        shell.triangle(ib, ia, ic);
       }
       // ribs along edges
       rib.tube(a + nrm * 0.02f, b + nrm * 0.02f, 0.2f, 8, false);
@@ -658,6 +170,8 @@ void gen_pavilion(Scene& sc, Rng rng, Vec2 centre, float radius, float height) {
 // ---------------------------------------------------------------------------
 // Landscape and street furniture
 // ---------------------------------------------------------------------------
+
+}  // namespace
 
 void gen_tree(Scene& sc, Rng rng, Vec3 base, float height) {
   Mesh& mesh = sc.opaque;
@@ -958,7 +472,7 @@ void gen_planter(Scene& sc, Rng rng, Vec2 centre, float hx, float hz, float y) {
   for (std::size_t i = 0; i < plan.size(); ++i) {
     const std::size_t j = (i + 1) % plan.size();
     const std::vector<Vec2> inner = plan_offset(plan, -0.2f);
-    c.quad_metric(P3(plan[i], y + 0.6f), P3(plan[j], y + 0.6f), P3(inner[j], y + 0.6f), P3(inner[i], y + 0.6f));
+    c.quad_metric(P3(plan[j], y + 0.6f), P3(plan[i], y + 0.6f), P3(inner[i], y + 0.6f), P3(inner[j], y + 0.6f));
   }
   Emit soil(&mesh, M_GRASS);
   soil.polygon(plan_offset(plan, -0.2f), y + 0.5f, true);
@@ -979,53 +493,39 @@ void gen_planter(Scene& sc, Rng rng, Vec2 centre, float hx, float hz, float y) {
   if (hx > 3.0f) gen_tree(sc, rng.child(9), P3(centre, y + 0.5f), rng.range(6.0f, 8.0f));
 }
 
-// Context: simple curtain-wall towers around the block so the sky has a skyline.
+
+namespace {
+
+// Context: parametric variants of the hero families around the block, at
+// reduced detail, so the city outside the centre shares the vocabulary.
 void gen_context(Scene& sc, Rng rng, const BlockDims& b) {
-  Mesh& mesh = sc.opaque;
   const float start_x = b.hx + b.road_w + b.walk_w + 30.0f;
   const float start_z = b.hz + b.road_w + b.walk_w + 30.0f;
-  struct Slot { Vec2 c; float hx, hz; };
+  struct Slot { Vec2 c; float half; int detail; };
   std::vector<Slot> slots;
   for (int ring = 0; ring < 2; ++ring) {
-    const float rx = start_x + 110.0f * static_cast<float>(ring), rz = start_z + 110.0f * static_cast<float>(ring);
+    const float rx = start_x + 120.0f * static_cast<float>(ring), rz = start_z + 120.0f * static_cast<float>(ring);
+    const int detail = ring == 0 ? 1 : 0;
     for (int i = -2; i <= 2; ++i) {
-      slots.push_back({Vec2{static_cast<float>(i) * 90.0f, -(rz + 30.0f)}, 24.0f, 26.0f});
-      slots.push_back({Vec2{static_cast<float>(i) * 90.0f, (rz + 30.0f)}, 24.0f, 26.0f});
+      slots.push_back({Vec2{static_cast<float>(i) * 95.0f, -(rz + 32.0f)}, 15.0f, detail});
+      slots.push_back({Vec2{static_cast<float>(i) * 95.0f, (rz + 32.0f)}, 15.0f, detail});
     }
     for (int i = -1; i <= 1; ++i) {
-      slots.push_back({Vec2{-(rx + 30.0f), static_cast<float>(i) * 90.0f}, 26.0f, 24.0f});
-      slots.push_back({Vec2{(rx + 30.0f), static_cast<float>(i) * 90.0f}, 26.0f, 24.0f});
+      slots.push_back({Vec2{-(rx + 32.0f), static_cast<float>(i) * 95.0f}, 15.0f, detail});
+      slots.push_back({Vec2{(rx + 32.0f), static_cast<float>(i) * 95.0f}, 15.0f, detail});
     }
   }
   int idx = 0;
   for (const Slot& s : slots) {
     Rng r = rng.child(idx++);
-    if (r.chance(0.18f)) continue;
-    const float h = r.range(18.0f, 70.0f) * (length(s.c) > 330.0f ? r.range(1.2f, 2.4f) : 1.0f);
-    const float hx = s.hx * r.range(0.6f, 1.0f), hz = s.hz * r.range(0.6f, 1.0f);
-    const Mat glass = M_GLASS_CONTEXT;
-    const std::vector<Vec2> plan = r.chance(0.3f) ? plan_rounded_rect(hx, hz, 6.0f, 4, s.c) : plan_rect(hx, hz, s.c);
-    Emit g(&mesh, glass);
-    g.element_random = r.next();
-    const float floor_h = 3.8f;
-    const int floors = static_cast<int>(h / floor_h);
-    float u = 0.0f;
-    for (std::size_t i = 0; i < plan.size(); ++i) {
-      const std::size_t j = (i + 1) % plan.size();
-      const float w = length(plan[j] - plan[i]);
-      const float top = floor_h * static_cast<float>(floors);
-      g.quad(P3(plan[i], 0.0f), P3(plan[j], 0.0f), P3(plan[j], top), P3(plan[i], top), QuadUV{{u, 0}, {u + w, 0}, {u + w, top}, {u, top}});
-      u += w;
+    if (r.chance(0.12f)) continue;
+    if (r.chance(0.18f)) {
+      build_tower_group(sc, r.child(1), s.c, r.range(0, kPi), s.detail);
+      continue;
     }
-    Emit sp(&mesh, M_SPANDREL);
-    const std::vector<Vec2> ring = plan_offset(plan, 0.03f);
-    for (int f = 1; f <= floors; ++f) {
-      const float y = floor_h * static_cast<float>(f);
-      sp.wall(ring, y - 0.7f, y + 0.1f, true, true);
-    }
-    slab(mesh, plan, floor_h * static_cast<float>(floors), 0.5f, M_ROOF);
-    parapet(mesh, plan, floor_h * static_cast<float>(floors), 0.8f, 0.3f, M_DARK_METAL);
-    roof_equipment(mesh, r, plan, floor_h * static_cast<float>(floors), 3);
+    const int max_floors = length(s.c) > 330.0f ? r.irange(20, 48) : r.irange(10, 30);
+    TowerSpec spec = random_tower(r, s.half * r.range(0.75f, 1.1f), max_floors);
+    build_tower(sc, spec, s.c, 0.0f, r.child(2), s.detail);
   }
 }
 
@@ -1064,11 +564,52 @@ Scene generate_scene(const SceneParams& params) {
   Rng root = root_rng(params.seed);
   BlockDims dims;
   gen_ground_and_streets(sc, root.child(1), dims);
-  // Lots (x east, z south):
-  gen_diagrid_tower(sc, root.child(10), Vec2{-68.0f, -52.0f}, 17.5f, 42, 4.0f);
-  gen_lens_towers(sc, root.child(11), Vec2{62.0f, -48.0f}, radians(-12.0f), 34, 3.9f);
-  gen_fin_tower(sc, root.child(12), Vec2{-74.0f, 52.0f}, 17.0f, 26, 3.8f);
-  gen_xframe_block(sc, root.child(13), Vec2{72.0f, 58.0f}, 30.0f, 14.0f, 12, 4.4f);
+  // Hero lots (x east, z south) — the named families with their parameters.
+  build_tower(sc, spec_diagrid(17.5f, 42), Vec2{-68.0f, -52.0f}, 0.0f, root.child(10), 2);
+  {
+    // twin lens towers on a shared podium
+    const float rot = radians(-12.0f);
+    const Vec2 centre{62.0f, -48.0f};
+    const Vec2 dir{-std::sin(rot), std::cos(rot)};
+    TowerSpec lens = spec_lens(31.0f, 12.0f, 34, rot);
+    lens.base = BaseKind::Lobby; lens.base_floors = 1;
+    lens.random = 0.31f;
+    // shared podium
+    const std::vector<Vec2> pod = plan_transform(plan_rounded_rect(40.0f, 34.0f, 8.0f, 6), centre, rot);
+    Emit g(&sc.opaque, M_GLASS_CLEAR);
+    g.element_random = 0.7f;
+    float u = 0.0f;
+    const std::vector<Vec2> inner = plan_offset(pod, -0.3f);
+    for (std::size_t i = 0; i < inner.size(); ++i) {
+      const std::size_t j = (i + 1) % inner.size();
+      const float w = length(inner[j] - inner[i]);
+      g.quad(P3(inner[j], 0.0f), P3(inner[i], 0.0f), P3(inner[i], 5.5f), P3(inner[j], 5.5f), QuadUV{{u + w, 0}, {u, 0}, {u, 5.5f}, {u + w, 5.5f}});
+      u += w;
+    }
+    slab(sc.opaque, pod, 5.5f, 0.8f, M_CONCRETE_WHITE);
+    Emit deck(&sc.opaque, M_TERRAZZO);
+    deck.polygon(plan_offset(pod, -0.35f), 5.52f, true);
+    parapet(sc.opaque, pod, 5.5f, 1.1f, 0.3f, M_WHITE_METAL);
+    for (int side = 0; side < 2; ++side) {
+      const float sgn = side == 0 ? 1.0f : -1.0f;
+      TowerSpec t = lens;
+      t.random = 0.31f + 0.2f * side;
+      t.floors = side == 0 ? 34 : 30;
+      build_tower(sc, t, centre + dir * (sgn * 15.0f), 5.5f, root.child(11 + side), 2);
+    }
+    // sky bridge
+    const float y = 5.5f + 3.9f * 18.0f;
+    Emit m(&sc.opaque, M_WHITE_METAL);
+    const Vec2 side = perp(dir) * 4.0f;
+    m.box(P3(centre, y - 0.4f), Vec3{4.0f, 0.4f, 9.0f}, Vec3{perp(dir).x, 0, perp(dir).y}, Vec3{0, 1, 0}, Vec3{dir.x, 0, dir.y});
+    m.box(P3(centre, y + 4.2f), Vec3{4.0f, 0.3f, 9.0f}, Vec3{perp(dir).x, 0, perp(dir).y}, Vec3{0, 1, 0}, Vec3{dir.x, 0, dir.y});
+    Emit bg(&sc.opaque, M_GLASS_CLEAR);
+    const Vec2 a = centre - dir * 9.0f, b2 = centre + dir * 9.0f;
+    bg.quad_metric(P3(a + side, y), P3(b2 + side, y), P3(b2 + side, y + 3.9f), P3(a + side, y + 3.9f));
+    bg.quad_metric(P3(b2 - side, y), P3(a - side, y), P3(a - side, y + 3.9f), P3(b2 - side, y + 3.9f));
+  }
+  build_tower(sc, spec_finweave(17.0f, 26), Vec2{-74.0f, 52.0f}, 0.0f, root.child(12), 2);
+  build_tower(sc, spec_xframe(30.0f, 14.0f, 12), Vec2{72.0f, 58.0f}, 0.0f, root.child(13), 2);
   gen_pavilion(sc, root.child(14), Vec2{0.0f, 66.0f}, 16.0f, 21.0f);
   gen_park(sc, root.child(15), Vec2{0.0f, -6.0f});
   // planters between lots
@@ -1107,7 +648,6 @@ Scene generate_scene(const SceneParams& params) {
       const std::vector<Vec2> ctrl = {corners[k], corners[k] * 0.55f + Vec2{g.range(-15.0f, 15.0f), g.range(-15.0f, 15.0f)}, Vec2{0.0f, -6.0f} + normalize(corners[k]) * 24.0f};
       path.polygon(ribbon(spline(ctrl, 10), 2.2f), 0.155f, true);
     }
-    // bollards along the north edge
     Emit bol(&sc.opaque, M_SILVER);
     for (float x = -110.0f; x <= 110.0f; x += 4.0f) bol.tube(Vec3{x, 0.14f, -97.0f}, Vec3{x, 1.0f, -97.0f}, 0.09f, 8, true);
   }

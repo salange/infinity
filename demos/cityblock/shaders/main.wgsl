@@ -151,7 +151,7 @@ fn interior_color(aux: vec2<f32>, view_ts: vec3<f32>, room: vec4<f32>, seed: f32
     col = wall_tint * 0.72;
   }
   col *= 1.0 / (1.0 + t * 0.12);
-  let ambient = mix(0.05, 0.75, lit) * light_col;
+  let ambient = mix(0.1, 0.7, lit) * light_col;
   col = col * ambient;
   // blinds: replace with a pale slatted surface just behind the glass
   let slats = 0.6 + 0.4 * step(0.5, fract(p.y * 8.0));
@@ -279,10 +279,10 @@ struct FsOut { @location(0) color: vec4<f32> };
     let light_far = mix(vec3<f32>(1.0, 0.86, 0.68), vec3<f32>(0.78, 0.88, 1.0), step(0.5, hc.y));
     let frac_y = fract(in.aux.y / m.room.y);
     let grad = 0.55 + 0.75 * frac_y * frac_y;  // ceilings brighter than floors
-    let mean_room = vec3<f32>(0.42, 0.40, 0.37) * light_far * mix(0.05, 0.75, lit_far) * grad;
+    let mean_room = vec3<f32>(0.42, 0.40, 0.37) * light_far * mix(0.12, 0.7, lit_far) * grad;
     inside = mix(mean_room, inside, detail);
     // By day a room is dark next to the sky; at night it is the light source.
-    inside = inside * frame.params.x * mix(0.045, 0.85, night);
+    inside = inside * frame.params.x * mix(0.045, 0.6, night);
     // Mullion grid at the room boundaries (thin dark frame lines).
     let gx = abs(fract(in.aux.x / m.room.x + 0.5) - 0.5) * m.room.x;
     let gy = abs(fract(in.aux.y / m.room.y + 0.5) - 0.5) * m.room.y;

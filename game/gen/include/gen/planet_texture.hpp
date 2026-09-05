@@ -14,7 +14,7 @@ namespace inf::gen {
 //
 // Height is stored normalized to [-1, 1] over height_amp_m as IEEE half
 // floats (the renderer's R16Float layer); albedo is RGBA8 from the
-// material/v1 classification, with EarthLike seas baked in (flat height
+// material/v2 classification, with EarthLike seas baked in (flat height
 // at sea level, depth-tinted water) so oceans read from any distance.
 //
 // Cost model (sources/planet-far-view-texturing.md): the province blend
@@ -31,6 +31,10 @@ struct PlanetTexture {
   PlanetFaceTexture faces[6];
 };
 
-PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_size);
+// albedo_table: optional kMaterialCount x 3 untinted mean albedos of the
+// loaded tile library, so the far view matches the near view's tiles;
+// nullptr uses the material registry's means.
+PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_size,
+                                  const float* albedo_table = nullptr);
 
 }  // namespace inf::gen

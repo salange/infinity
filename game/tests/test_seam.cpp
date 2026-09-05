@@ -42,12 +42,12 @@ std::vector<Segment> seam_segments(const gen::ChunkMesh& mesh) {
     // Face 0 (+X): u = y / x. Plane u == 0 <=> y == 0 (x > 0).
     return std::abs(p.y) < eps * p.x;
   };
-  for (std::size_t v = 0; v + 18 <= mesh.vertices.size(); v += 18) {
+  for (std::size_t v = 0; v + 30 <= mesh.vertices.size(); v += 30) {
     Pt tri[3];
     for (int k = 0; k < 3; ++k) {
-      tri[k] = Pt{mesh.origin[0] + mesh.vertices[v + k * 6],
-                  mesh.origin[1] + mesh.vertices[v + k * 6 + 1],
-                  mesh.origin[2] + mesh.vertices[v + k * 6 + 2]};
+      tri[k] = Pt{mesh.origin[0] + mesh.vertices[v + k * 10],
+                  mesh.origin[1] + mesh.vertices[v + k * 10 + 1],
+                  mesh.origin[2] + mesh.vertices[v + k * 10 + 2]};
     }
     for (int k = 0; k < 3; ++k) {
       const Pt& a = tri[k];

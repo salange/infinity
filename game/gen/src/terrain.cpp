@@ -14,14 +14,20 @@ using det::Real;
 
 TerrainField::TerrainField(const core::Key& body_key, const PlanetParams& planet)
     : planet_(planet), provinces_(body_key, planet), macro_(body_key),
-      material_(body_key, planet), features_(body_key, planet),
+      climate_(body_key, planet, macro_), life_(derive_life(body_key, planet, climate_)),
+      material_(body_key, planet, life_), features_(body_key, planet),
       caves_(body_key, planet), drainage_(body_key, planet) {
   // terrain/v2 (T0015 WP1): the layer name is bumped because the output
   // now composes macro/v1 — per the seeding spec's versioning rule, a
   // behaviour change is a NEW name, never a silent redefinition.
-  const core::Key terrain_key = core::derive_named(body_key, name::TerrainV2);
+  // terrain/v3 (T0019 follow-up, 2026-09-05): adds the meso-scale relief
+  // band (100 m - 1 km wavelengths) that v2 lacked — a HighlandPlateau
+  // province with 400 m of relief varied by 21 m over a kilometre. A new
+  // name per the versioning rule; v2 keys are not reused.
+  const core::Key terrain_key = core::derive_named(body_key, name::TerrainV3);
   elevation_lattice_ = core::lattice_key(terrain_key, channel::Lattice);
   detail_lattice_ = det::mix64(elevation_lattice_ ^ 0xD3A11E77E44A1EB5ULL);
+  meso_lattice_ = det::mix64(elevation_lattice_ ^ 0x6E50BA4D19C3F7A2ULL);
   // Per-body anisotropy direction for the detail term (prevailing-wind /
   // lineation stand-in until a climate field provides one).
   {
@@ -52,7 +58,8 @@ TerrainField::CanonicalParams TerrainField::param_lattice_value(std::uint8_t fac
   return CanonicalParams{blended.relief_amplitude_m, blended.base_elevation_m,
                          blended.ruggedness,        blended.carving,
                          blended.terrace_amount,    blended.terrace_step_m,
-                         blended.dune_amount,       Real(0.0)};
+                         blended.dune_amount,       Real(0.0),
+                         blended.dominant_archetype};
 }
 
 TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_uv,
@@ -95,6 +102,12 @@ TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_
     const Real b = det::lerp(p01.*member, p11.*member, fu);
     return det::lerp(a, b, fv);
   };
+  // Discrete channel: the corner with the largest bilinear weight.
+  const bool right = fu.to_double() >= 0.5;
+  const bool top = fv.to_double() >= 0.5;
+  const Archetype dominant =
+      right ? (top ? p11.dominant_archetype : p10.dominant_archetype)
+            : (top ? p01.dominant_archetype : p00.dominant_archetype);
   return CanonicalParams{bilerp(&CanonicalParams::relief_amplitude_m),
                          bilerp(&CanonicalParams::base_elevation_m),
                          bilerp(&CanonicalParams::ruggedness),
@@ -103,7 +116,8 @@ TerrainField::CanonicalParams TerrainField::canonical_params(const FaceUV& face_
                          bilerp(&CanonicalParams::terrace_step_m),
                          bilerp(&CanonicalParams::dune_amount),
                          macro_.canonical_value(face_uv, cache != nullptr ? &cache->macro
-                                                                          : nullptr)};
+                                                                          : nullptr),
+                         dominant};
 }
 
 namespace {
@@ -185,13 +199,33 @@ Real TerrainField::evaluate_elevation(const Dir3& unit_dir, const BlendedParams&
   const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
   const Real smooth = t * t * (Real(3.0) - (t + t));
   const Real attenuation = Real(0.15) + Real(0.85) * smooth;
-  Real height = macro_m +
-                attenuation * (params.base_elevation_m + noise.value * params.relief_amplitude_m);
 
-  // Tangent slope of the noise term, metres per metre.
+  // Meso-scale band (v3): hillocks and undulation at ~700 m .. 90 m
+  // wavelengths, 16-40 % of the province relief by ruggedness, ridged a
+  // little so it reads as landform rather than bumps. Its own lattice so
+  // it is uncorrelated with the province-scale fBm.
+  world::FbmParams meso_fbm;
+  meso_fbm.octaves = 4;
+  meso_fbm.gain = Real(0.55);
+  meso_fbm.octave0_damp = Real(1.0);
+  meso_fbm.sharpness = Real(0.3) * params.ruggedness;
+  meso_fbm.normalize_octaves = 0;
+  const Real meso_frequency = planet_.radius_m / Real(700.0);
+  const world::NoiseD meso = world::fbm3_d(meso_lattice_, unit_dir.x * meso_frequency,
+                                           unit_dir.y * meso_frequency,
+                                           unit_dir.z * meso_frequency, meso_fbm);
+  const Real meso_amp = params.relief_amplitude_m * (Real(0.16) + Real(0.24) * params.ruggedness);
+
+  Real height = macro_m +
+                attenuation * (params.base_elevation_m + noise.value * params.relief_amplitude_m +
+                               meso.value * meso_amp);
+
+  // Tangent slope of the noise terms, metres per metre.
   const Real k = attenuation * params.relief_amplitude_m * controls.frequency /
                  planet_.radius_m;
-  const Dir3 gradient{noise.dx * k, noise.dy * k, noise.dz * k};
+  const Real k_meso = attenuation * meso_amp * meso_frequency / planet_.radius_m;
+  const Dir3 gradient{noise.dx * k + meso.dx * k_meso, noise.dy * k + meso.dy * k_meso,
+                      noise.dz * k + meso.dz * k_meso};
   const Real radial = dot(gradient, unit_dir);
   const Dir3 slope{gradient.x - unit_dir.x * radial, gradient.y - unit_dir.y * radial,
                    gradient.z - unit_dir.z * radial};
@@ -321,8 +355,21 @@ Real TerrainField::elevation_base_from_params(const Dir3& unit_dir,
   const Real t = det::clamp((above_sea + Real(2000.0)) / Real(2200.0), Real(0.0), Real(1.0));
   const Real smooth = t * t * (Real(3.0) - (t + t));
   const Real attenuation = Real(0.15) + Real(0.85) * smooth;
-  return macro_m +
-         attenuation * (params.base_elevation_m + noise * params.relief_amplitude_m);
+  // Same meso band as evaluate_elevation (v3) — the derivative contract
+  // covers both noise terms.
+  world::FbmParams meso_fbm;
+  meso_fbm.octaves = 4;
+  meso_fbm.gain = Real(0.55);
+  meso_fbm.octave0_damp = Real(1.0);
+  meso_fbm.sharpness = Real(0.3) * params.ruggedness;
+  meso_fbm.normalize_octaves = 0;
+  const Real meso_frequency = planet_.radius_m / Real(700.0);
+  const Real meso = world::fbm3(meso_lattice_, unit_dir.x * meso_frequency,
+                                unit_dir.y * meso_frequency, unit_dir.z * meso_frequency,
+                                meso_fbm);
+  const Real meso_amp = params.relief_amplitude_m * (Real(0.16) + Real(0.24) * params.ruggedness);
+  return macro_m + attenuation * (params.base_elevation_m + noise * params.relief_amplitude_m +
+                                  meso * meso_amp);
 }
 
 Real TerrainField::elevation_from_params(const Dir3& unit_dir, const BlendedParams& params,
@@ -577,6 +624,36 @@ Real TerrainField::ground_radius_below_m(const Dir3& unit_dir, Real from_r) cons
     }
     return density;
   };
+  // Feet already inside solid (a fast landing that overshot, a dug face,
+  // a stale position after an edit): the floor is the first AIR above,
+  // never the solid under us — bisecting between two solid samples
+  // returned the caller's own radius and left the player buried, sinking
+  // a step per frame. Search upward for air first, up to 60 m, then fall
+  // back to the topmost surface.
+  if (cave_density_at(from_r) > Real(0.0)) {
+    Real air = from_r;
+    bool found_air = false;
+    for (int step = 1; step <= 24; ++step) {
+      air = from_r + Real(2.5) * Real(static_cast<double>(step));
+      if (cave_density_at(air) <= Real(0.0)) {
+        found_air = true;
+        break;
+      }
+    }
+    if (!found_air) {
+      return top;
+    }
+    Real solid = air - Real(2.5);
+    for (int i = 0; i < 20; ++i) {
+      const Real mid = (solid + air) * Real(0.5);
+      if (cave_density_at(mid) > Real(0.0)) {
+        solid = mid;
+      } else {
+        air = mid;
+      }
+    }
+    return (solid + air) * Real(0.5);
+  }
   Real hi = from_r;
   Real lo = hi;
   bool found = false;
@@ -674,6 +751,55 @@ std::uint64_t hash_chunk_density(const TerrainField& field, const ChunkGrid& gri
     hash.feed(std::bit_cast<std::uint64_t>(density.to_double()));
   }
   return hash.value();
+}
+
+// --- material/v2 (T0019) ---------------------------------------------------
+
+MaterialInputs TerrainField::material_inputs(double px, double py, double pz, double nx,
+                                             double ny, double nz, ParamCache* cache) const {
+  MaterialInputs in;
+  in.px = px;
+  in.py = py;
+  in.pz = pz;
+  const double r = std::sqrt(px * px + py * py + pz * pz);
+  if (r < 1.0) {
+    return in;
+  }
+  const double inv_r = 1.0 / r;
+  const Dir3 dir{Real(px * inv_r), Real(py * inv_r), Real(pz * inv_r)};
+  const CanonicalParams canonical = canonical_params(dir_to_face_uv(dir), cache);
+  const BlendedParams params = TerrainField::to_blended(canonical);
+  const double elevation =
+      elevation_from_params(dir, params, canonical.macro_rel, cache).to_double();
+  const double radius = planet_.radius_m.to_double();
+  const double sea = planet_.sea_level_m.to_double();
+  in.altitude_m = elevation;
+  in.height_above_sea_m = elevation - sea;
+  in.depth_below_surface_m = (radius + elevation) - r;
+  in.slope = 1.0 - (nx * px + ny * py + nz * pz) * inv_r;
+  if (in.slope < 0.0) in.slope = 0.0;
+  in.archetype = canonical.dominant_archetype;
+  in.terrace_amount = canonical.terrace_amount.to_double();
+  in.dune_amount = canonical.dune_amount.to_double();
+  in.ruggedness = canonical.ruggedness.to_double();
+  in.climate = climate_.sample(dir, elevation, elevation - sea);
+  const double above_sea = elevation - sea > 0.0 ? elevation - sea : 0.0;
+  in.biome = classify_biome(in.climate.t01, 0.5 * in.climate.h01 + 0.5 * in.climate.humidity,
+                            in.climate.biotemp_c,
+                            planet_.land_fraction.to_double() < 0.999 ? above_sea
+                                                                     : elevation);
+  return in;
+}
+
+void TerrainField::material_weights(double px, double py, double pz, double nx, double ny,
+                                    double nz, ParamCache* cache,
+                                    double out[kMaterialCount]) const {
+  material_.weights(material_inputs(px, py, pz, nx, ny, nz, cache), out);
+}
+
+VertexMaterial TerrainField::classify_vertex(double px, double py, double pz, double nx,
+                                             double ny, double nz, ParamCache* cache) const {
+  return material_.classify(material_inputs(px, py, pz, nx, ny, nz, cache));
 }
 
 }  // namespace inf::gen

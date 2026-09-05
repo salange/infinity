@@ -32,11 +32,11 @@ class Rhi {
   // Uploads an interleaved [px py pz nx ny nz] f32 triangle soup; returns
   // a handle. Meshes are static in v0 (re-upload = new mesh).
   std::uint32_t create_mesh(const float* vertices, std::size_t float_count);
-  // Terrain path (T0015 WP3): interleaved
-  // [px py pz nx ny nz mat_pack blend] — mat_pack = mat0 * 256 + mat1
-  // (material ids), blend = fraction of mat1. create_mesh() uploads
-  // legacy 6-float soups and expands them with mat_pack = 0 (flat base
-  // albedo path).
+  // Terrain path (T0019): interleaved [px py pz nx ny nz w0 w1 w2 w3] —
+  // four weights over the draw item's material palette (DrawItem::
+  // material_palette). create_mesh() uploads legacy 6-float soups and
+  // expands them with zero weights (flat base albedo path). Star fields
+  // reuse the layout with their own meaning for the attributes.
   std::uint32_t create_mesh_mat(const float* vertices, std::size_t float_count);
   void destroy_mesh(std::uint32_t mesh);
 
@@ -54,11 +54,34 @@ class Rhi {
                           const std::uint16_t* height_half, const std::uint8_t* rgba);
   void destroy_planet_texture(std::uint32_t handle);
 
+  // --- surface material library (T0019, design/surface-texturing.md) --
+  // Two RGBA8 texture arrays with full mip chains, one layer per material
+  // id: albedo.rgb + height.a, and tangent normal.xy + roughness.z + ao.w
+  // (emissive mask in .w for glowing materials). Lit terrain (mode 0 with
+  // a material pair) samples them hex-tiled and biplanar in planet-local
+  // metres; until a library is created (or a layer is uploaded) the
+  // material's mean colour from the table below is used instead.
+  void create_material_library(std::uint32_t size, std::uint32_t layers);
+  // Full-layer upload (size^2 RGBA8 each); mips are generated here.
+  void upload_material_layer(std::uint32_t layer, const std::uint8_t* albedo_rgba,
+                             const std::uint8_t* normal_rgba);
+  struct MaterialParams {
+    float tint[3]{1.0f, 1.0f, 1.0f};   // albedo multiplier (planet palette)
+    float tile_m{4.0f};                // metres per repeat, fine scale
+    float roughness{0.85f};            // fallback / bias when no map
+    float emissive{0.0f};              // night glow strength (HDR units)
+    float normal_strength{1.0f};
+    float mean[3]{0.5f, 0.5f, 0.5f};   // untinted mean albedo of the tile
+  };
+  void set_material_params(std::uint32_t layer, const MaterialParams& params);
+
   struct DrawItem {
     std::uint32_t mesh{0};
     // Column-major model-view-projection (camera-relative; f32-safe).
     float mvp[16]{};
-    // mode 0: rgb + a == 0 => lit terrain material (rgb ignored);
+    // mode 0: rgb + a == 0 => lit terrain material (rgb ignored); for
+    //   lit terrain extra.xyz = the mesh origin modulo 256 m (planet-local,
+    //   computed in double) so texture coordinates stay precise anywhere.
     // a > 0 => unlit solid color with that alpha (opaque pipeline ignores
     // alpha; the translucent pipeline blends it).
     // mode 1 (star photosphere): rgb = blackbody tint.
@@ -81,6 +104,9 @@ class Rhi {
     std::uint32_t mode{0};
     // Mode 6 only: handle from create_planet_texture (0 = none).
     std::uint32_t planet_texture{0};
+    // Mode 0 lit terrain: the four material ids the vertex weights refer
+    // to (0 = unused; all zero = flat base albedo path).
+    std::uint8_t material_palette[4]{0, 0, 0, 0};
     // Drawn in a second, alpha-blended, no-depth-write pass (mode 0 only).
     bool translucent = false;
     // T0018: overlay items (HUD, map cards, reticles) are drawn AFTER the

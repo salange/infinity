@@ -32,6 +32,16 @@ int print_usage() {
       "                       write equirect province/relief PNGs\n"
       "  terrain-map --seed <hex128> [--type <T>] [--out <prefix>]\n"
       "                       write an equirect land/ocean elevation PNG\n"
+      "  surface-map --seed <hex128> [--type <T>] [--out <prefix>]\n"
+      "                       write equirect climate/biome/material/life PNGs\n"
+      "  find-land [--seed <hex128>] [--slot N] [--moon M]\n"
+      "                       system bodies with life + land spots as script lines\n"
+      "  probe-column --at x y z [--seed] [--slot N] [--moon M]\n"
+      "                       analytic ground vs density crossings vs streamed meshes\n"
+      "  life-stats [--seeds N]\n"
+      "                       habitability / life stage histogram across seeds\n"
+      "  tile-dump [--out <dir>] [--size N]\n"
+      "                       write every procedural surface tile as PNGs\n"
       "  macro-stats [--seeds N]\n"
       "                       land-fraction + pattern report across seeds\n"
       "  (types: EarthLike|Barren|Desert|Ice)\n");
@@ -157,8 +167,80 @@ int main(int argc, char** argv) {
     return inf::cli::cmd_macro_stats(seeds);
   }
 
+  if (std::strcmp(argv[1], "find-land") == 0) {
+    const char* seed_text = "83";
+    int slot = -1;
+    int moon = -1;
+    for (int i = 2; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+        seed_text = argv[++i];
+      } else if (std::strcmp(argv[i], "--slot") == 0 && i + 1 < argc) {
+        slot = std::atoi(argv[++i]);
+      } else if (std::strcmp(argv[i], "--moon") == 0 && i + 1 < argc) {
+        moon = std::atoi(argv[++i]);
+      }
+    }
+    const std::optional<inf::core::Seed128> seed = inf::core::parse_seed(seed_text);
+    if (!seed.has_value()) {
+      std::fprintf(stderr, "invalid seed: %s\n", seed_text);
+      return 1;
+    }
+    return inf::cli::cmd_find_land(*seed, slot, moon);
+  }
+
+  if (std::strcmp(argv[1], "probe-column") == 0) {
+    const char* seed_text = "83";
+    int slot = -1;
+    int moon = -1;
+    double at[3] = {0.0, 0.0, 0.0};
+    bool have_at = false;
+    for (int i = 2; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+        seed_text = argv[++i];
+      } else if (std::strcmp(argv[i], "--slot") == 0 && i + 1 < argc) {
+        slot = std::atoi(argv[++i]);
+      } else if (std::strcmp(argv[i], "--moon") == 0 && i + 1 < argc) {
+        moon = std::atoi(argv[++i]);
+      } else if (std::strcmp(argv[i], "--at") == 0 && i + 3 < argc) {
+        at[0] = std::atof(argv[++i]);
+        at[1] = std::atof(argv[++i]);
+        at[2] = std::atof(argv[++i]);
+        have_at = true;
+      }
+    }
+    const std::optional<inf::core::Seed128> seed = inf::core::parse_seed(seed_text);
+    if (!seed.has_value() || !have_at) {
+      std::fprintf(stderr, "probe-column needs --at x y z (and a valid --seed)\n");
+      return 1;
+    }
+    return inf::cli::cmd_probe_column(*seed, slot, moon, at[0], at[1], at[2]);
+  }
+
+  if (std::strcmp(argv[1], "life-stats") == 0) {
+    int seeds = 200;
+    for (int i = 2; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--seeds") == 0 && i + 1 < argc) {
+        seeds = std::atoi(argv[++i]);
+      }
+    }
+    return inf::cli::cmd_life_stats(seeds);
+  }
+
+  if (std::strcmp(argv[1], "tile-dump") == 0) {
+    const char* out_dir = ".";
+    int size = 256;
+    for (int i = 2; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+        out_dir = argv[++i];
+      } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+        size = std::atoi(argv[++i]);
+      }
+    }
+    return inf::cli::cmd_tile_dump(out_dir, size);
+  }
+
   if (std::strcmp(argv[1], "dump-planet") == 0 || std::strcmp(argv[1], "province-map") == 0 ||
-      std::strcmp(argv[1], "terrain-map") == 0) {
+      std::strcmp(argv[1], "terrain-map") == 0 || std::strcmp(argv[1], "surface-map") == 0) {
     const char* seed_text = nullptr;
     const char* type_text = nullptr;
     const char* out_prefix = "planet";
@@ -185,6 +267,9 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "terrain-map") == 0) {
       return inf::cli::cmd_terrain_map(*seed, type_text, out_prefix);
+    }
+    if (std::strcmp(argv[1], "surface-map") == 0) {
+      return inf::cli::cmd_surface_map(*seed, type_text, out_prefix);
     }
     return inf::cli::cmd_province_map(*seed, type_text, out_prefix);
   }

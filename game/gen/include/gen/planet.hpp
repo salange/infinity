@@ -81,6 +81,17 @@ struct PlanetParams {
   std::uint32_t cells_per_face{0};  // province grid resolution N (per face edge)
   std::uint32_t palette_id{0};
 
+  // climate/v1 inputs (T0019). System truths when the body comes from a
+  // system (planets/v1 decides, the surface obeys); standalone bodies draw
+  // plausible values from their own params key under a NEW draw index, so
+  // no pre-existing draw moves.
+  det::Real star_temperature_k{5778.0};
+  det::Real star_age_gyr{4.6};
+  det::Real flux_rel{1.0};        // stellar flux relative to Earth's
+  det::Real obliquity_rad{0.41};
+  det::Real pressure_rel{1.0};    // surface pressure relative to Earth's
+  bool tidally_locked{false};
+
   // Serializable inter-stage payload (NMS lesson, T0004): stable,
   // human-readable, byte-reproducible.
   std::string to_json() const;

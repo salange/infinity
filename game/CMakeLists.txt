@@ -18,6 +18,7 @@ target_include_directories(stb_headers INTERFACE "${stb_SOURCE_DIR}")
 add_library(stb::headers ALIAS stb_headers)
 
 add_subdirectory(gen)
+add_subdirectory(tex)
 add_subdirectory(sim)
 add_subdirectory(cli)
 if(INFINITY_BUILD_APP)

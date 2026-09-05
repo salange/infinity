@@ -10,6 +10,7 @@
 #include "gen/universe.hpp"
 #include "gen/planet.hpp"
 #include "gen/provinces.hpp"
+#include "gen/material.hpp"
 #include "gen/terrain.hpp"
 
 namespace inf::gen {
@@ -176,6 +177,57 @@ std::string hash_density_report() {
   return report;
 }
 
+// T0019: the surface layers (climate/v1, life/v1, biome/v1, material/v2)
+// at the same fixed directions. A separate script so the pre-existing
+// planet section keeps its hashes byte for byte.
+std::uint64_t hash_surface_script(const core::Seed128& seed, std::uint32_t forced_type) {
+  core::GoldenHash hash;
+  const BodyHandle body = test_body(seed);
+  const PlanetParams planet =
+      derive_planet_params(body, static_cast<PlanetType>(forced_type & 3U));
+  feed_real(hash, planet.star_temperature_k);
+  feed_real(hash, planet.star_age_gyr);
+  feed_real(hash, planet.flux_rel);
+  feed_real(hash, planet.obliquity_rad);
+  feed_real(hash, planet.pressure_rel);
+  hash.feed(planet.tidally_locked ? 1U : 0U);
+  const TerrainField field(body.entity, planet);
+  const LifeParams& life = field.life();
+  hash.feed(life.habitable ? 1U : 0U);
+  hash.feed(life.occupied ? 1U : 0U);
+  hash.feed(static_cast<std::uint64_t>(life.chemistry));
+  hash.feed(static_cast<std::uint64_t>(life.stage));
+  hash.feed(life.variant);
+  static constexpr std::array<std::array<int, 3>, 18> kDirs = {{
+      {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+      {1, 1, 0}, {1, -1, 0}, {0, 1, 1}, {0, 1, -1}, {1, 0, 1}, {-1, 0, 1},
+      {1, 1, 1}, {-1, 1, 1}, {1, -1, 1}, {1, 1, -1},
+      {3, 2, 1}, {-2, 5, -3},
+  }};
+  const double radius = planet.radius_m.to_double();
+  TerrainField::ParamCache cache;
+  for (const auto& d : kDirs) {
+    const double len = std::sqrt(static_cast<double>(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+    const double dx = d[0] / len;
+    const double dy = d[1] / len;
+    const double dz = d[2] / len;
+    const double elevation =
+        field.elevation_m(Dir3{det::Real(dx), det::Real(dy), det::Real(dz)}).to_double();
+    const double r = radius + elevation;
+    const MaterialInputs in = field.material_inputs(dx * r, dy * r, dz * r, dx, dy, dz, &cache);
+    hash.feed(std::bit_cast<std::uint64_t>(in.climate.temperature_k));
+    hash.feed(std::bit_cast<std::uint64_t>(in.climate.humidity));
+    hash.feed(std::bit_cast<std::uint64_t>(in.climate.t01));
+    hash.feed(std::bit_cast<std::uint64_t>(in.climate.h01));
+    hash.feed(static_cast<std::uint64_t>(in.biome.primary));
+    const VertexMaterial vm = field.material().classify(in);
+    hash.feed(static_cast<std::uint64_t>(vm.mat0));
+    hash.feed(static_cast<std::uint64_t>(vm.mat1));
+    hash.feed(std::bit_cast<std::uint32_t>(vm.blend));
+  }
+  return hash.value();
+}
+
 std::string hash_planet_report() {
   static constexpr std::array<core::Seed128, 3> kSeeds = {
       core::Seed128{0x0000000000000000ULL, 0x0000000000000001ULL},
@@ -188,6 +240,20 @@ std::string hash_planet_report() {
     for (std::uint32_t type = 0; type < 4; ++type) {
       const std::uint64_t hash = hash_planet_script(seed, type);
       report += "seed=" + core::to_hex(seed) + " type=";
+      report += kDigits[type];
+      report += " fnv=";
+      for (int i = 15; i >= 0; --i) {
+        report += kDigits[(hash >> (i * 4)) & 0xFU];
+      }
+      report += "\n";
+    }
+  }
+  // Surface layers (T0019): appended so the planet lines above are
+  // byte-identical to the pre-T0019 goldens.
+  for (const core::Seed128& seed : kSeeds) {
+    for (std::uint32_t type = 0; type < 4; ++type) {
+      const std::uint64_t hash = hash_surface_script(seed, type);
+      report += "surface seed=" + core::to_hex(seed) + " type=";
       report += kDigits[type];
       report += " fnv=";
       for (int i = 15; i >= 0; --i) {

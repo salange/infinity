@@ -177,7 +177,7 @@ std::vector<float> build_star_field_mesh(const gen::GalaxyOctree& octree,
   }
 
   std::vector<float> mesh;
-  mesh.reserve(build.stars.size() * 6 * 8);
+  mesh.reserve(build.stars.size() * 6 * 10);
   static constexpr float kCorners[6][2] = {{-1, -1}, {1, -1}, {1, 1},
                                            {-1, -1}, {1, 1},  {-1, 1}};
   for (const CatalogStar& star : build.stars) {
@@ -198,7 +198,7 @@ std::vector<float> build_star_field_mesh(const gen::GalaxyOctree& octree,
                   {static_cast<float>(star.dir.x), static_cast<float>(star.dir.y),
                    static_cast<float>(star.dir.z), corner[0] * rel_size,
                    corner[1] * rel_size, static_cast<float>(flux), packed,
-                   star.phase});
+                   star.phase, 0.0f, 0.0f});
     }
   }
   return mesh;

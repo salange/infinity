@@ -3,6 +3,7 @@
 
 #include "commands_civ.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,9 @@
 #include "gen/civ_census.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/colony.hpp"
+#include "gen/settlements.hpp"
+#include "gen/terrain.hpp"
+#include "stb_image_write.h"
 #include "gen/civilization.hpp"
 #include "gen/golden.hpp"
 #include "gen/human.hpp"
@@ -240,6 +244,152 @@ int cmd_civ_census(const core::Seed128& seed, int max_systems, const char* time_
   std::printf("census at %+.3f yr from launch\n%s", 
               gen::ns_to_real_years(t.ns_since_epoch - gen::kLaunchReference.ns_since_epoch),
               census.report().c_str());
+  return 0;
+}
+
+// WP4: equirect map of a body's settlement plan — settled provinces by
+// tier, faction hue on home worlds, roads, regional capitals.
+int cmd_civ_map(const core::Seed128& seed, const long long* cell_xyzl, int slot_arg, int moon_arg,
+                const char* time_text, const char* out_path) {
+  const core::Key galaxy_key = gen::home_galaxy_key(seed);
+  const gen::GalaxyParams galaxy = gen::home_galaxy_params(seed);
+  const gen::CivilizationParams civ = gen::derive_civilization(galaxy_key, galaxy, true);
+  gen::RaceRegistry registry(galaxy_key, galaxy, civ);
+  registry.set_human(gen::human_race(galaxy_key, galaxy));
+  const gen::ColonyResolver resolver(registry);
+  gen::SystemCell cell{};
+  if (cell_xyzl != nullptr) {
+    cell = gen::SystemCell{cell_xyzl[0], cell_xyzl[1], cell_xyzl[2], static_cast<std::int32_t>(cell_xyzl[3])};
+  }
+  const core::WorldTime t = parse_time(time_text);
+  const gen::SystemCivContext context = gen::gather_system_context(seed, registry, cell, true);
+  const gen::Owner owner = resolver.owner(context, t);
+  if (!owner.owned) {
+    std::printf("system unowned at this time\n");
+    return 1;
+  }
+  const auto states = resolver.system_states(context, owner, t);
+  // The body: --slot/--moon, else the highest-level settled body.
+  int pick = -1;
+  for (std::size_t i = 0; i < context.bodies.size(); ++i) {
+    const gen::BodyCivInputs& b = context.bodies[i];
+    if (slot_arg >= 0 && (b.slot != slot_arg || b.moon != moon_arg)) continue;
+    if (slot_arg < 0 && !states[i].settled) continue;
+    if (pick < 0 || states[i].level > states[static_cast<std::size_t>(pick)].level) pick = static_cast<int>(i);
+  }
+  if (pick < 0) {
+    std::printf("no settled body (or the requested body is not settled)\n");
+    return 1;
+  }
+  const gen::BodyCivInputs& body = context.bodies[static_cast<std::size_t>(pick)];
+  const gen::CivState& state = states[static_cast<std::size_t>(pick)];
+  const auto& races = resolver.candidates(context.position_m);
+  const gen::Race& race = races[owner.candidate];
+  // Rebuild the planet params the way the context did.
+  gen::HomeSlotOverride slot_override;
+  const auto over = registry.home_override(cell);
+  if (over.has_value()) {
+    slot_override.habitat = over->habitat;
+    slot_override.preferred_flux = over->preferred_flux;
+    slot_override.force_biosphere = over->force_biosphere;
+  }
+  const gen::StarSystemParams system = gen::generate_system(context.system_key, over.has_value() ? &slot_override : nullptr);
+  const gen::BodyKeys keys = body.moon >= 0 ? gen::moon_keys_in_system(context.system_key, body.slot, body.moon)
+                                            : gen::body_keys_in_system(context.system_key, body.slot);
+  const gen::PlanetParams params =
+      body.moon >= 0 ? gen::planet_params_for_moon(system, body.slot, body.moon, gen::BodyHandle{keys.entity, keys.params})
+                     : gen::planet_params_for_slot(system, body.slot, gen::BodyHandle{keys.entity, keys.params});
+  const gen::TerrainField field(keys.entity, params);
+  const gen::SettlementPlanner planner(keys.entity, field, race.params, state.domed);
+  const gen::SettlementPlan plan = planner.plan(state, race.factions);
+  std::printf("body slot %d%s: %s L%d progress %.2f, %s\n", body.slot,
+              body.moon >= 0 ? " (moon)" : "", gen::to_string(params.type), state.level, state.progress,
+              plan.to_json().c_str());
+  int tier_hist[9] = {};
+  for (const gen::ProvinceSite& site : plan.provinces) {
+    if (site.settled) ++tier_hist[static_cast<int>(site.tier)];
+  }
+  std::printf("tiers:");
+  for (int k = 1; k <= 8; ++k) {
+    if (tier_hist[k] > 0) std::printf(" %s=%d", gen::to_string(static_cast<gen::SettlementTier>(k)), tier_hist[k]);
+  }
+  std::printf("; regions %zu, roads %zu\n", plan.region_capitals.size(), plan.roads.size());
+  // The PNG: sea dark blue, land by altitude grey, settled provinces by
+  // tier (brightening), home-world faction hue, roads ochre, capitals red.
+  constexpr int kWidth = 1024;
+  constexpr int kHeight = 512;
+  constexpr double kPi = 3.14159265358979323846;
+  std::vector<unsigned char> map(static_cast<std::size_t>(kWidth) * kHeight * 3);
+  const double sea = params.sea_level_m.to_double();
+  const double macro_amp = params.macro_amplitude_m.to_double();
+  for (int y = 0; y < kHeight; ++y) {
+    const double lat = kPi * (0.5 - (y + 0.5) / kHeight);
+    for (int x = 0; x < kWidth; ++x) {
+      const double lon = 2.0 * kPi * ((x + 0.5) / kWidth) - kPi;
+      const double cl = std::cos(lat);
+      const gen::Dir3 dir{det::Real(cl * std::cos(lon)), det::Real(cl * std::sin(lon)), det::Real(std::sin(lat))};
+      const gen::FaceUV uv = gen::dir_to_face_uv(dir);
+      const double elevation = field.macro().canonical_value(uv).to_double() * macro_amp;
+      const gen::ProvinceSite& site = plan.at(field.provinces().cell_of(dir));
+      unsigned char r = 0;
+      unsigned char g = 0;
+      unsigned char b = 0;
+      if (params.land_fraction.to_double() < 0.999 && elevation < sea) {
+        r = 18; g = 34; b = 70;
+      } else {
+        const double shade = std::clamp(0.35 + (elevation - sea) / 6000.0, 0.25, 0.75);
+        r = g = b = static_cast<unsigned char>(shade * 255.0);
+      }
+      if (site.settled) {
+        const double lift = 0.35 + 0.65 * static_cast<int>(site.tier) / 7.0;
+        float hue[3] = {0.95f, 0.75f, 0.35f};
+        if (plan.is_home && site.faction >= 0 && site.faction < static_cast<int>(race.factions.size())) {
+          const gen::FactionParams& f = race.factions[static_cast<std::size_t>(site.faction)];
+          hue[0] = f.accent[0]; hue[1] = f.accent[1]; hue[2] = f.accent[2];
+        }
+        r = static_cast<unsigned char>(std::min(255.0, r * (1.0 - lift) + 255.0 * hue[0] * lift));
+        g = static_cast<unsigned char>(std::min(255.0, g * (1.0 - lift) + 255.0 * hue[1] * lift));
+        b = static_cast<unsigned char>(std::min(255.0, b * (1.0 - lift) + 255.0 * hue[2] * lift));
+      }
+      const std::size_t pixel = (static_cast<std::size_t>(y) * kWidth + x) * 3;
+      map[pixel] = r; map[pixel + 1] = g; map[pixel + 2] = b;
+    }
+  }
+  const auto plot = [&](const gen::Dir3& d, unsigned char r, unsigned char g, unsigned char b, int size) {
+    const double lat = std::asin(std::clamp(d.z.to_double(), -1.0, 1.0));
+    const double lon = std::atan2(d.y.to_double(), d.x.to_double());
+    const int px = static_cast<int>((lon + kPi) / (2.0 * kPi) * kWidth);
+    const int py = static_cast<int>((0.5 - lat / kPi) * kHeight);
+    for (int dy = -size; dy <= size; ++dy) {
+      for (int dx = -size; dx <= size; ++dx) {
+        const int xx = ((px + dx) % kWidth + kWidth) % kWidth;
+        const int yy = std::clamp(py + dy, 0, kHeight - 1);
+        const std::size_t pixel = (static_cast<std::size_t>(yy) * kWidth + xx) * 3;
+        map[pixel] = r; map[pixel + 1] = g; map[pixel + 2] = b;
+      }
+    }
+  };
+  for (const gen::Road& road : plan.roads) {
+    for (int i = 0; i < 8; ++i) {
+      for (int s = 0; s < 12; ++s) {
+        const double f = s / 12.0;
+        gen::Dir3 p{road.points[i].x + (road.points[i + 1].x - road.points[i].x) * det::Real(f),
+                    road.points[i].y + (road.points[i + 1].y - road.points[i].y) * det::Real(f),
+                    road.points[i].z + (road.points[i + 1].z - road.points[i].z) * det::Real(f)};
+        p = gen::normalize(p);
+        plot(p, road.trunk ? 255 : 220, road.trunk ? 200 : 160, 60, road.trunk ? 1 : 0);
+      }
+    }
+  }
+  for (const gen::ProvinceSite& site : plan.provinces) {
+    if (site.region_capital) plot(site.centre, 255, 60, 60, 2);
+    if (site.capital) plot(site.centre, 255, 255, 255, 3);
+  }
+  if (stbi_write_png(out_path, kWidth, kHeight, 3, map.data(), kWidth * 3) == 0) {
+    std::fprintf(stderr, "failed to write %s\n", out_path);
+    return 1;
+  }
+  std::printf("wrote %s\n", out_path);
   return 0;
 }
 

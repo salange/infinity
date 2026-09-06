@@ -240,4 +240,115 @@ fn tonemap_inv(c: vec3<f32>) -> vec3<f32> { return c / max(1.0 - luma(c), 1e-3);
 }
 )";
 
+// T0022 B.2: the depth pyramid (Hi-Z) for GPU occlusion culling. Mip 0
+// copies the prepass depth, every further mip holds the farthest depth
+// of its 2x2 children — the MINIMUM under reversed Z — so a conservative
+// "is anything in this footprint farther than X" test is one lookup.
+constexpr const char* kCityHizShader = R"(
+@group(0) @binding(0) var src_depth: texture_depth_2d;
+@group(0) @binding(1) var src_level: texture_2d<f32>;
+struct FSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> FSOut {
+  var o: FSOut;
+  let x = f32(i32(vi & 1u) * 4 - 1);
+  let y = f32(i32(vi >> 1u) * 4 - 1);
+  o.pos = vec4<f32>(x, y, 0.0, 1.0);
+  o.uv = vec2<f32>(x * 0.5 + 0.5, 0.5 - y * 0.5);
+  return o;
+}
+@fragment fn fs_copy(in: FSOut) -> @location(0) vec4<f32> {
+  let dims = textureDimensions(src_depth);
+  let p = vec2<i32>(in.pos.xy);
+  let d = textureLoad(src_depth, clamp(p, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1)), 0);
+  return vec4<f32>(d, 0.0, 0.0, 1.0);
+}
+@fragment fn fs_down(in: FSOut) -> @location(0) vec4<f32> {
+  let dims = vec2<i32>(textureDimensions(src_level));
+  let p = vec2<i32>(in.pos.xy) * 2;
+  let a = textureLoad(src_level, clamp(p, vec2<i32>(0), dims - 1), 0).r;
+  let b = textureLoad(src_level, clamp(p + vec2<i32>(1, 0), vec2<i32>(0), dims - 1), 0).r;
+  let c = textureLoad(src_level, clamp(p + vec2<i32>(0, 1), vec2<i32>(0), dims - 1), 0).r;
+  let d = textureLoad(src_level, clamp(p + vec2<i32>(1, 1), vec2<i32>(0), dims - 1), 0).r;
+  var m = min(min(a, b), min(c, d));
+  // odd source sizes: include the extra column/row so nothing is missed
+  if ((dims.x & 1) == 1) {
+    m = min(m, textureLoad(src_level, clamp(p + vec2<i32>(2, 0), vec2<i32>(0), dims - 1), 0).r);
+    m = min(m, textureLoad(src_level, clamp(p + vec2<i32>(2, 1), vec2<i32>(0), dims - 1), 0).r);
+  }
+  if ((dims.y & 1) == 1) {
+    m = min(m, textureLoad(src_level, clamp(p + vec2<i32>(0, 2), vec2<i32>(0), dims - 1), 0).r);
+    m = min(m, textureLoad(src_level, clamp(p + vec2<i32>(1, 2), vec2<i32>(0), dims - 1), 0).r);
+  }
+  return vec4<f32>(m, 0.0, 0.0, 1.0);
+}
+)";
+
+// GPU occlusion culling: every main-pass range (camera-relative bounding
+// sphere + its DrawIndexedIndirect arguments) is tested against the
+// depth pyramid of this frame's prepass and its instance count set to 0
+// or 1. Ranges without the occlude flag (unbounded gaps, foliage) pass.
+constexpr const char* kCityCullShader = R"(
+struct Range { centre: vec3<f32>, radius: f32, flags: u32, pad0: u32, pad1: u32, pad2: u32 };
+struct CullParams {
+  view: mat4x4<f32>,
+  proj: mat4x4<f32>,
+  params: vec4<f32>,   // count, mip count, screen w, screen h
+  params2: vec4<f32>,  // near bypass distance, 0, 0, 0
+};
+@group(0) @binding(0) var<uniform> cp: CullParams;
+@group(0) @binding(1) var<storage, read> ranges: array<Range>;
+@group(0) @binding(2) var<storage, read_write> args: array<u32>;   // 5 u32 per draw
+@group(0) @binding(3) var hiz: texture_2d<f32>;
+
+fn depth_ndc_of_view_z(zv: f32) -> f32 {
+  // clip z / clip w for a view-space point at depth zv (negative forward)
+  let cz = cp.proj[2][2] * zv + cp.proj[3][2];
+  let cw = cp.proj[2][3] * zv + cp.proj[3][3];
+  return cz / cw;
+}
+
+@compute @workgroup_size(64)
+fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  let n = u32(cp.params.x);
+  if (i >= n) { return; }
+  let r = ranges[i];
+  var visible = true;
+  if ((r.flags & 8u) != 0u && r.radius > 0.0) {
+    let vc = (cp.view * vec4<f32>(r.centre, 1.0)).xyz;
+    let dist = length(vc);
+    if (dist > r.radius + cp.params2.x) {
+      // conservative screen rect of the sphere from its view-space bounds
+      let zn = min(vc.z + r.radius, -0.05);            // nearest view depth (least negative)
+      let sx = cp.proj[0][0]; let sy = cp.proj[1][1];
+      let x0 = (vc.x - r.radius) * sx / -zn; let x1 = (vc.x + r.radius) * sx / -zn;
+      let y0 = (vc.y - r.radius) * sy / -zn; let y1 = (vc.y + r.radius) * sy / -zn;
+      let ndc_min = clamp(vec2<f32>(min(x0, x1), min(y0, y1)), vec2<f32>(-1.0), vec2<f32>(1.0));
+      let ndc_max = clamp(vec2<f32>(max(x0, x1), max(y0, y1)), vec2<f32>(-1.0), vec2<f32>(1.0));
+      let size = cp.params.zw;
+      let uv_min = vec2<f32>(ndc_min.x * 0.5 + 0.5, 0.5 - ndc_max.y * 0.5) * size;
+      let uv_max = vec2<f32>(ndc_max.x * 0.5 + 0.5, 0.5 - ndc_min.y * 0.5) * size;
+      let extent = max(uv_max.x - uv_min.x, uv_max.y - uv_min.y);
+      let level = clamp(i32(ceil(log2(max(extent, 1.0)))), 0, i32(cp.params.y) - 1);
+      let scale = f32(1u << u32(level));
+      let lo = vec2<i32>(floor(uv_min / scale));
+      let hi = vec2<i32>(floor((uv_max - vec2<f32>(0.5)) / scale));
+      let dims = vec2<i32>(textureDimensions(hiz, level));
+      var farthest = 1.0;  // reversed Z: farther is smaller
+      for (var y = lo.y; y <= min(hi.y, lo.y + 1); y = y + 1) {
+        for (var x = lo.x; x <= min(hi.x, lo.x + 1); x = x + 1) {
+          let c = clamp(vec2<i32>(x, y), vec2<i32>(0), dims - 1);
+          farthest = min(farthest, textureLoad(hiz, c, level).r);
+        }
+      }
+      // the sphere's nearest point in depth-buffer units; hidden if even
+      // that lies behind everything drawn in its footprint
+      let near_depth = depth_ndc_of_view_z(zn);
+      if (near_depth < farthest * (1.0 - 1e-4) - 1e-7) { visible = false; }
+    }
+  }
+  args[i * 5u + 1u] = select(0u, 1u, visible);
+}
+)";
+
 }  // namespace inf::render

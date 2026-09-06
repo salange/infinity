@@ -1628,6 +1628,26 @@ int main(int argc, char** argv) {
     const bool b_down = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
     if (b_down && !b_was_down) beacons = !beacons;
     b_was_down = b_down;
+    // T0022 B.2: the city performance options (F7 occlusion culling, F8
+    // AO resolution, F10 far cascades at half rate, F11 far-cascade LOD).
+    {
+      static bool opt_was_down[4] = {false, false, false, false};
+      const int keys[4] = {GLFW_KEY_F7, GLFW_KEY_F8, GLFW_KEY_F10, GLFW_KEY_F11};
+      bool* flags[4] = {&no_occlusion, &ssao_full, &shadow_half_rate, &shadow_far_lod};
+      bool changed = false;
+      for (int k = 0; k < 4; ++k) {
+        const bool down = glfwGetKey(window, keys[k]) == GLFW_PRESS;
+        if (down && !opt_was_down[k]) {
+          *flags[k] = !*flags[k];
+          changed = true;
+        }
+        opt_was_down[k] = down;
+      }
+      if (changed) {
+        std::printf("city options: occlusion %s, ssao %s, far cascades %s, far-cascade lod %s\n", no_occlusion ? "off" : "on",
+                    ssao_full ? "full" : "half", shadow_half_rate ? "half rate" : "every frame", shadow_far_lod ? "on" : "off");
+      }
+    }
 
     player.update(input);
 

@@ -2051,6 +2051,8 @@ struct Rhi::Impl {
   float cascade_radius[kCityCascades] = {1.0f, 1.0f, 1.0f};
   float frame_jitter_px[2] = {0.0f, 0.0f};
   float city_view_proj_clean[16] = {};
+  float city_view_for_cull[16] = {};
+  float city_proj_for_cull[16] = {};
   CitySettings city_settings;
   float city_prev_view_proj[16] = {};
   bool passes_ran = false;  // shadows/AO produced this frame
@@ -2069,6 +2071,37 @@ struct Rhi::Impl {
   std::vector<std::uint32_t> args_cpu[kArgSlots];
   CityPassStats pass_stats;
   bool multi_draw = true;  // wgpu-native ships MultiDrawIndexedIndirect on every backend (not gated)
+  // T0022 B.2: GPU occlusion culling — the depth pyramid over the
+  // prepass depth, the compute cull over the main slot's arguments, a
+  // parallel buffer of the ranges' spheres, and an occasional readback
+  // of the instance counts for the statistics.
+  WGPUBindGroupLayout hiz_layout = nullptr;
+  WGPUBindGroupLayout cull_layout = nullptr;
+  WGPURenderPipeline hiz_copy_pipeline = nullptr;
+  WGPURenderPipeline hiz_down_pipeline = nullptr;
+  WGPUComputePipeline cull_pipeline = nullptr;
+  WGPUTexture hiz = nullptr;
+  WGPUTextureView hiz_view = nullptr;
+  std::vector<WGPUTextureView> hiz_mip_views;
+  std::vector<WGPUBindGroup> hiz_groups;  // pass m: index 0 = the copy
+  WGPUBuffer cull_uniform = nullptr;
+  WGPUBuffer cull_ranges = nullptr;
+  std::uint32_t cull_ranges_capacity = 0;
+  WGPUBindGroup cull_group = nullptr;
+  std::vector<float> cull_ranges_cpu;  // 8 floats per main-slot argument
+  WGPUBuffer cull_readback = nullptr;
+  std::uint32_t cull_readback_capacity = 0;
+  bool cull_readback_inflight = false;
+  std::uint32_t cull_readback_count = 0;
+  std::uint32_t occluded_last = 0;
+  bool city_ao_half = true;  // the AO targets' resolution the current targets were made for
+  // T0022 B.2: the persisted shadow cascades for the half-rate option —
+  // the light matrices in the camera-relative frame they were fitted in,
+  // re-expressed by the camera's move on the frames they are not refit.
+  bool cascade_valid[kCityCascades] = {false, false, false};
+  float cascade_persist[kCityCascades][16] = {};
+  float cascade_persist_radius[kCityCascades] = {1.0f, 1.0f, 1.0f};
+  bool cascade_update[kCityCascades] = {true, true, true};
   void ensure_args(int slot, std::uint32_t n) {
     if (pass_args[slot] != nullptr && n <= pass_args_capacity[slot]) return;
     if (pass_args[slot] != nullptr) wgpuBufferRelease(pass_args[slot]);
@@ -2076,8 +2109,27 @@ struct Rhi::Impl {
     WGPUBufferDescriptor bd{};
     bd.label = sv("city-args");
     bd.usage = WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst;
+    if (slot == 4) bd.usage |= WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc;  // the occlusion cull rewrites it
     bd.size = static_cast<std::uint64_t>(pass_args_capacity[slot]) * 20ull;
     pass_args[slot] = wgpuDeviceCreateBuffer(device, &bd);
+    if (slot == 4 && cull_group != nullptr) {
+      wgpuBindGroupRelease(cull_group);
+      cull_group = nullptr;
+    }
+  }
+  void ensure_cull_ranges(std::uint32_t n) {
+    if (cull_ranges != nullptr && n <= cull_ranges_capacity) return;
+    if (cull_ranges != nullptr) wgpuBufferRelease(cull_ranges);
+    cull_ranges_capacity = std::max(n + 512u, cull_ranges_capacity * 2u);
+    WGPUBufferDescriptor bd{};
+    bd.label = sv("city-cull-ranges");
+    bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+    bd.size = static_cast<std::uint64_t>(cull_ranges_capacity) * 32ull;
+    cull_ranges = wgpuDeviceCreateBuffer(device, &bd);
+    if (cull_group != nullptr) {
+      wgpuBindGroupRelease(cull_group);
+      cull_group = nullptr;
+    }
   }
   // Records one item's span of a slot's arguments into `pass`.
   void multi_draw_item(WGPURenderPassEncoder pass, int slot, std::size_t item) {
@@ -2449,10 +2501,18 @@ struct Rhi::Impl {
 
   void release_city_targets() {
     for (WGPUBindGroup* g : {&ssao_group, &blur_group, &taa_group[0], &taa_group[1], &post_taa_only[0], &post_taa_only[1],
-                             &post_taa[0], &post_taa[1], &receive_group}) {
+                             &post_taa[0], &post_taa[1], &receive_group, &cull_group}) {
       if (*g != nullptr) wgpuBindGroupRelease(*g);
       *g = nullptr;
     }
+    for (WGPUBindGroup g : hiz_groups) wgpuBindGroupRelease(g);
+    hiz_groups.clear();
+    for (WGPUTextureView v : hiz_mip_views) wgpuTextureViewRelease(v);
+    hiz_mip_views.clear();
+    if (hiz_view != nullptr) wgpuTextureViewRelease(hiz_view);
+    hiz_view = nullptr;
+    if (hiz != nullptr) wgpuTextureRelease(hiz);
+    hiz = nullptr;
     for (WGPUTextureView* v : {&depth_pre_view, &normal_pre_view, &ao_a_view, &ao_b_view, &taa_hist_view[0], &taa_hist_view[1]}) {
       if (*v != nullptr) wgpuTextureViewRelease(*v);
       *v = nullptr;
@@ -2469,21 +2529,23 @@ struct Rhi::Impl {
   // buffers, the two TAA history buffers, and every bind group that
   // references them.
   void ensure_city_targets(std::uint32_t w, std::uint32_t h) {
-    if (depth_pre != nullptr && city_w == w && city_h == h) {
+    const bool ao_half = city_settings.ssao_half;
+    if (depth_pre != nullptr && city_w == w && city_h == h && city_ao_half == ao_half) {
       return;
     }
     release_city_targets();
     city_w = w;
     city_h = h;
+    city_ao_half = ao_half;
     const WGPUTextureUsage rt = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
     depth_pre = make_target(w, h, WGPUTextureFormat_Depth32Float, rt, 1, 1, "city-depth-pre");
     depth_pre_view = wgpuTextureCreateView(depth_pre, nullptr);
     normal_pre = make_target(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, "city-normal-pre");
     normal_pre_view = wgpuTextureCreateView(normal_pre, nullptr);
-    // Occlusion at half resolution (the demo's option; the blur and the
-    // bilinear read in the shading hide the step).
-    const std::uint32_t aw = std::max(1u, w / 2);
-    const std::uint32_t ah = std::max(1u, h / 2);
+    // Occlusion at half resolution (the demo's option, T0022 B.2; the
+    // blur and the bilinear read in the shading hide the step).
+    const std::uint32_t aw = ao_half ? std::max(1u, w / 2) : w;
+    const std::uint32_t ah = ao_half ? std::max(1u, h / 2) : h;
     ao_a = make_target(aw, ah, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-a");
     ao_a_view = wgpuTextureCreateView(ao_a, nullptr);
     ao_b = make_target(aw, ah, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-b");
@@ -2541,6 +2603,60 @@ struct Rhi::Impl {
         terrain_pass_group = wgpuDeviceCreateBindGroup(device, &bd);
       }
     }
+    // The depth pyramid (T0022 B.2): R32Float with a full mip chain, one
+    // view per mip, one bind group per pass (the copy pass must not
+    // alias its own target: its unused level input is mip 1).
+    {
+      std::uint32_t mips = 1;
+      while ((std::max(w, h) >> mips) >= 1) ++mips;
+      hiz = make_target(w, h, WGPUTextureFormat_R32Float, rt, 1, mips, "city-hiz");
+      hiz_view = wgpuTextureCreateView(hiz, nullptr);
+      for (std::uint32_t m = 0; m < mips; ++m) {
+        WGPUTextureViewDescriptor vd{};
+        vd.format = WGPUTextureFormat_R32Float;
+        vd.dimension = WGPUTextureViewDimension_2D;
+        vd.baseMipLevel = m;
+        vd.mipLevelCount = 1;
+        vd.baseArrayLayer = 0;
+        vd.arrayLayerCount = 1;
+        vd.aspect = WGPUTextureAspect_All;
+        hiz_mip_views.push_back(wgpuTextureCreateView(hiz, &vd));
+      }
+      build_hiz_groups();
+    }
+  }
+
+  // One bind group per pyramid pass (needs the layout, which the pipeline
+  // creates; called from both sides).
+  void build_hiz_groups() {
+    if (hiz_layout == nullptr || hiz_mip_views.empty() || !hiz_groups.empty()) return;
+    const std::uint32_t mips = static_cast<std::uint32_t>(hiz_mip_views.size());
+    for (std::uint32_t m = 0; m < mips; ++m) {
+      WGPUBindGroupEntry e[2] = {};
+      e[0].binding = 0; e[0].textureView = depth_pre_view;
+      e[1].binding = 1; e[1].textureView = hiz_mip_views[m == 0 ? (mips > 1 ? 1 : 0) : m - 1];
+      WGPUBindGroupDescriptor bd{};
+      bd.layout = hiz_layout;
+      bd.entryCount = 2;
+      bd.entries = e;
+      hiz_groups.push_back(wgpuDeviceCreateBindGroup(device, &bd));
+    }
+  }
+
+  // The cull bind group over the main slot's arguments and the ranges'
+  // spheres; rebuilt when either buffer or the pyramid was recreated.
+  void ensure_cull_group() {
+    if (cull_group != nullptr || cull_layout == nullptr || cull_ranges == nullptr || pass_args[4] == nullptr || hiz_view == nullptr) return;
+    WGPUBindGroupEntry e[4] = {};
+    e[0].binding = 0; e[0].buffer = cull_uniform; e[0].size = 160;
+    e[1].binding = 1; e[1].buffer = cull_ranges; e[1].size = static_cast<std::uint64_t>(cull_ranges_capacity) * 32ull;
+    e[2].binding = 2; e[2].buffer = pass_args[4]; e[2].size = static_cast<std::uint64_t>(pass_args_capacity[4]) * 20ull;
+    e[3].binding = 3; e[3].textureView = hiz_view;
+    WGPUBindGroupDescriptor bd{};
+    bd.layout = cull_layout;
+    bd.entryCount = 4;
+    bd.entries = e;
+    cull_group = wgpuDeviceCreateBindGroup(device, &bd);
   }
 
   // TAA bind groups depend on the main post set (its HDR target and
@@ -2661,6 +2777,56 @@ struct Rhi::Impl {
     pld.bindGroupLayoutCount = 2;
     pld.bindGroupLayouts = taa_groups;
     WGPUPipelineLayout taa_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+    // T0022 B.2: the depth pyramid and the occlusion cull.
+    {
+      WGPUBindGroupLayoutEntry e[2] = {};
+      e[0].binding = 0;
+      e[0].visibility = WGPUShaderStage_Fragment;
+      e[0].texture.sampleType = WGPUTextureSampleType_Depth;
+      e[0].texture.viewDimension = WGPUTextureViewDimension_2D;
+      e[1].binding = 1;
+      e[1].visibility = WGPUShaderStage_Fragment;
+      e[1].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+      e[1].texture.viewDimension = WGPUTextureViewDimension_2D;
+      WGPUBindGroupLayoutDescriptor ld{};
+      ld.entryCount = 2;
+      ld.entries = e;
+      hiz_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+      WGPUBindGroupLayoutEntry c[4] = {};
+      c[0].binding = 0;
+      c[0].visibility = WGPUShaderStage_Compute;
+      c[0].buffer.type = WGPUBufferBindingType_Uniform;
+      c[0].buffer.minBindingSize = 160;
+      c[1].binding = 1;
+      c[1].visibility = WGPUShaderStage_Compute;
+      c[1].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+      c[2].binding = 2;
+      c[2].visibility = WGPUShaderStage_Compute;
+      c[2].buffer.type = WGPUBufferBindingType_Storage;
+      c[3].binding = 3;
+      c[3].visibility = WGPUShaderStage_Compute;
+      c[3].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+      c[3].texture.viewDimension = WGPUTextureViewDimension_2D;
+      ld.entryCount = 4;
+      ld.entries = c;
+      cull_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+      WGPUBufferDescriptor ubd{};
+      ubd.label = sv("city-cull-uniform");
+      ubd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+      ubd.size = 160;
+      cull_uniform = wgpuDeviceCreateBuffer(device, &ubd);
+    }
+    WGPUBindGroupLayout hiz_groups_l[1] = {hiz_layout};
+    pld.bindGroupLayoutCount = 1;
+    pld.bindGroupLayouts = hiz_groups_l;
+    WGPUPipelineLayout hiz_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+    WGPUBindGroupLayout cull_groups_l[1] = {cull_layout};
+    pld.bindGroupLayouts = cull_groups_l;
+    WGPUPipelineLayout cull_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+    wgsl.code = sv(kCityHizShader);
+    WGPUShaderModule hiz_module = wgpuDeviceCreateShaderModule(device, &module_desc);
+    wgsl.code = sv(kCityCullShader);
+    WGPUShaderModule cull_module = wgpuDeviceCreateShaderModule(device, &module_desc);
 
     const WGPUDepthStencilState ds_scene = depth_state(WGPUCompareFunction_Greater, true);   // reversed-Z
     const WGPUDepthStencilState ds_shadow = depth_state(WGPUCompareFunction_Less, true);     // ortho, cleared to 1
@@ -2672,14 +2838,29 @@ struct Rhi::Impl {
     ssao_pipeline = make("city-ssao", ao_pl, post_module, "vs_fullscreen", "fs_ssao", nullptr, WGPUTextureFormat_R8Unorm, nullptr);
     blur_pipeline_ao = make("city-ao-blur", ao_pl, post_module, "vs_fullscreen", "fs_blur", nullptr, WGPUTextureFormat_R8Unorm, nullptr);
     taa_pipeline = make("city-taa", taa_pl, post_module, "vs_fullscreen", "fs_taa", nullptr, kHdrFormat, nullptr);
+    hiz_copy_pipeline = make("city-hiz-copy", hiz_pl, hiz_module, "vs_fullscreen", "fs_copy", nullptr, WGPUTextureFormat_R32Float, nullptr);
+    hiz_down_pipeline = make("city-hiz-down", hiz_pl, hiz_module, "vs_fullscreen", "fs_down", nullptr, WGPUTextureFormat_R32Float, nullptr);
+    {
+      WGPUComputePipelineDescriptor cd{};
+      cd.label = sv("city-cull");
+      cd.layout = cull_pl;
+      cd.compute.module = cull_module;
+      cd.compute.entryPoint = sv("cs_cull");
+      cull_pipeline = wgpuDeviceCreateComputePipeline(device, &cd);
+    }
     wgpuPipelineLayoutRelease(city_pl);
     wgpuPipelineLayoutRelease(terrain_pl);
     wgpuPipelineLayoutRelease(ao_pl);
     wgpuPipelineLayoutRelease(taa_pl);
+    wgpuPipelineLayoutRelease(hiz_pl);
+    wgpuPipelineLayoutRelease(cull_pl);
     wgpuShaderModuleRelease(module);
     wgpuShaderModuleRelease(terrain_module);
     wgpuShaderModuleRelease(post_module);
+    wgpuShaderModuleRelease(hiz_module);
+    wgpuShaderModuleRelease(cull_module);
     city_group_dirty = true;
+    build_hiz_groups();  // the targets may already exist (the 1x1 placeholders)
   }
 
   void set_city_materials_impl(const CityMaterial* materials, std::size_t count) {
@@ -2912,6 +3093,20 @@ struct Rhi::Impl {
       if (pass_args[slot] != nullptr) wgpuBufferRelease(pass_args[slot]);
       pass_args[slot] = nullptr;
       pass_args_capacity[slot] = 0;
+    }
+    for (WGPUBuffer* b : {&cull_uniform, &cull_ranges, &cull_readback}) {
+      if (*b != nullptr) wgpuBufferRelease(*b);
+      *b = nullptr;
+    }
+    if (cull_pipeline != nullptr) wgpuComputePipelineRelease(cull_pipeline);
+    cull_pipeline = nullptr;
+    for (WGPURenderPipeline* pp : {&hiz_copy_pipeline, &hiz_down_pipeline}) {
+      if (*pp != nullptr) wgpuRenderPipelineRelease(*pp);
+      *pp = nullptr;
+    }
+    for (WGPUBindGroupLayout* l : {&hiz_layout, &cull_layout}) {
+      if (*l != nullptr) wgpuBindGroupLayoutRelease(*l);
+      *l = nullptr;
     }
     for (WGPUBindGroup* g : {&city_group, &city_caster_group, &terrain_pass_group}) {
       if (*g != nullptr) wgpuBindGroupRelease(*g);
@@ -3549,9 +3744,31 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       float extent = 1.0f;
       float* out = shadow_m + c * 16;
       if (shadows) {
-        impl_->fit_cascade(frame, splits[c], splits[c + 1], out, &extent);
+        // Half rate (T0022 B.2): the two far cascades refit and redraw on
+        // alternating frames; a kept cascade is re-expressed in this
+        // frame's camera-relative space by the camera's move (its map
+        // still holds the same world).
+        const bool update = !cs.shadow_half_rate || c == 0 || !impl_->cascade_valid[c] ||
+                            ((impl_->frame_counter + c) % 2 == 0);
+        impl_->cascade_update[c] = update;
+        if (update) {
+          impl_->fit_cascade(frame, splits[c], splits[c + 1], out, &extent);
+          impl_->cascade_valid[c] = true;
+          impl_->cascade_persist_radius[c] = extent;
+        } else {
+          float shift[16] = {};
+          for (int k = 0; k < 16; ++k) shift[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+          shift[12] = frame.camera_delta[0];
+          shift[13] = frame.camera_delta[1];
+          shift[14] = frame.camera_delta[2];
+          mat_mul(impl_->cascade_persist[c], shift, out);
+          extent = impl_->cascade_persist_radius[c];
+        }
+        std::memcpy(impl_->cascade_persist[c], out, sizeof(float) * 16);
       } else {
         for (int k = 0; k < 16; ++k) out[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+        impl_->cascade_valid[c] = false;
+        impl_->cascade_update[c] = true;
       }
       wgpuQueueWriteBuffer(impl_->queue, impl_->city_cascade_buf, c * kUniformStride, out, 16 * sizeof(float));
       std::memcpy(impl_->cascade_vp[c], out, sizeof(float) * 16);
@@ -3584,6 +3801,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     jitter[3] = 0.0f;
     wgpuQueueWriteBuffer(impl_->queue, impl_->city_frame_buf, 0, block, sizeof(block));
     std::memcpy(impl_->city_view_proj_clean, view_proj, sizeof(float) * 16);
+    std::memcpy(impl_->city_view_for_cull, view, sizeof(float) * 16);
+    std::memcpy(impl_->city_proj_for_cull, proj, sizeof(float) * 16);
     impl_->passes_ran = passes_on;
     // TAA parameters: this frame's clean inverse and the previous frame's
     // view-projection in this frame's camera-relative space.
@@ -3608,6 +3827,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       impl_->item_args[slot].assign(count, Impl::ItemArgs{});
       impl_->args_cpu[slot].clear();
     }
+    impl_->cull_ranges_cpu.clear();
     impl_->pass_stats = CityPassStats{};
     const auto push = [&](int slot, std::size_t i, const CityRange& r) {
       std::vector<std::uint32_t>& a = impl_->args_cpu[slot];
@@ -3636,13 +3856,25 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         const CityRange& r = frame.city_ranges[it_.city_range_first + k];
         if ((r.flags & kCityMain) != 0u) {
           push(4, i, r);
+          std::vector<float>& cr = impl_->cull_ranges_cpu;
+          cr.push_back(r.centre[0]);
+          cr.push_back(r.centre[1]);
+          cr.push_back(r.centre[2]);
+          cr.push_back(r.radius);
+          std::uint32_t fl = r.flags;
+          float flf;
+          std::memcpy(&flf, &fl, sizeof(flf));
+          cr.push_back(flf);
+          cr.push_back(0.0f);
+          cr.push_back(0.0f);
+          cr.push_back(0.0f);
           ++impl_->pass_stats.ranges_main;
           const float d = std::sqrt(r.centre[0] * r.centre[0] + r.centre[1] * r.centre[1] + r.centre[2] * r.centre[2]);
           if (r.radius <= 0.0f || d - r.radius < 1600.0f) push(0, i, r);
         }
         for (int c = 0; c < static_cast<int>(Impl::kCityCascades); ++c) {
           const std::uint32_t mask = c < 2 ? kCityCastNear : kCityCastFar;
-          if ((r.flags & mask) == 0u || !in_cascade(c, r)) continue;
+          if ((r.flags & mask) == 0u || !impl_->cascade_update[c] || !in_cascade(c, r)) continue;
           push(1 + c, i, r);
           ++impl_->pass_stats.ranges_shadow;
         }
@@ -3654,7 +3886,15 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       impl_->ensure_args(slot, n);
       wgpuQueueWriteBuffer(impl_->queue, impl_->pass_args[slot], 0, impl_->args_cpu[slot].data(), n * 20ull);
     }
+    const std::uint32_t n_main = static_cast<std::uint32_t>(impl_->cull_ranges_cpu.size() / 8);
+    if (n_main > 0) {
+      impl_->ensure_cull_ranges(n_main);
+      wgpuQueueWriteBuffer(impl_->queue, impl_->cull_ranges, 0, impl_->cull_ranges_cpu.data(), n_main * 32ull);
+    }
   }
+  const bool occlusion = cs.occlusion && passes_on && has_city && impl_->cull_pipeline != nullptr &&
+                         impl_->cull_ranges_cpu.size() >= 8;
+  impl_->pass_stats.ranges_occluded = occlusion ? impl_->occluded_last : 0;
 
   enum class Pass { Opaque, Blend, Additive };
   const auto draw_city = [&](WGPURenderPassEncoder pass) {
@@ -3836,6 +4076,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     if (!passes_on) return;
     if (cs.shadows) {
       for (std::uint32_t c = 0; c < Impl::kCityCascades; ++c) {
+        if (!impl_->cascade_update[c]) continue;  // half rate: kept from the last frame
         WGPURenderPassDepthStencilAttachment da{};
         da.view = impl_->city_shadow_layer[c];
         da.depthLoadOp = WGPULoadOp_Clear;
@@ -3850,7 +4091,10 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         wgpuRenderPassEncoderRelease(pass);
       }
     }
-    if (cs.ssao) {
+    // The prepass runs for the occlusion (SSAO), for TAA (its depth
+    // reprojection) and for the occlusion cull (T0022 C.3: TAA used to
+    // require SSAO silently).
+    if (cs.ssao || taa_on || occlusion) {
       WGPURenderPassColorAttachment ca{};
       ca.view = impl_->normal_pre_view;
       ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
@@ -3870,8 +4114,67 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       draw_casters(pass, impl_->city_prepass_pipeline, impl_->terrain_prepass_pipeline, 0, true, -1);
       wgpuRenderPassEncoderEnd(pass);
       wgpuRenderPassEncoderRelease(pass);
-      fullscreen_pass(encoder, impl_->ssao_pipeline, impl_->ssao_group, nullptr, impl_->ao_a_view);
-      fullscreen_pass(encoder, impl_->blur_pipeline_ao, impl_->blur_group, nullptr, impl_->ao_b_view);
+      if (cs.ssao) {
+        fullscreen_pass(encoder, impl_->ssao_pipeline, impl_->ssao_group, nullptr, impl_->ao_a_view);
+        fullscreen_pass(encoder, impl_->blur_pipeline_ao, impl_->blur_group, nullptr, impl_->ao_b_view);
+      }
+    }
+    // The depth pyramid and the occlusion cull (T0022 B.2): the main
+    // slot's arguments get their instance count from the test.
+    if (occlusion && !impl_->hiz_groups.empty()) {
+      for (std::size_t m = 0; m < impl_->hiz_groups.size(); ++m) {
+        WGPURenderPassColorAttachment ca{};
+        ca.view = impl_->hiz_mip_views[m];
+        ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        ca.loadOp = WGPULoadOp_Clear;
+        ca.storeOp = WGPUStoreOp_Store;
+        ca.clearValue = WGPUColor{0.0, 0.0, 0.0, 1.0};
+        WGPURenderPassDescriptor desc{};
+        desc.colorAttachmentCount = 1;
+        desc.colorAttachments = &ca;
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+        wgpuRenderPassEncoderSetPipeline(pass, m == 0 ? impl_->hiz_copy_pipeline : impl_->hiz_down_pipeline);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->hiz_groups[m], 0, nullptr);
+        wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+      }
+      impl_->ensure_cull_group();
+      const std::uint32_t n = static_cast<std::uint32_t>(impl_->cull_ranges_cpu.size() / 8);
+      if (impl_->cull_group != nullptr && n > 0) {
+        float cu[40] = {};
+        std::memcpy(cu, impl_->city_view_for_cull, sizeof(float) * 16);
+        std::memcpy(cu + 16, impl_->city_proj_for_cull, sizeof(float) * 16);
+        cu[32] = static_cast<float>(n);
+        cu[33] = static_cast<float>(impl_->hiz_groups.size());
+        cu[34] = static_cast<float>(impl_->width);
+        cu[35] = static_cast<float>(impl_->height);
+        cu[36] = 25.0f;  // near bypass: nothing within 25 m is tested
+        wgpuQueueWriteBuffer(impl_->queue, impl_->cull_uniform, 0, cu, sizeof(cu));
+        WGPUComputePassDescriptor cpd{};
+        WGPUComputePassEncoder cpass = wgpuCommandEncoderBeginComputePass(encoder, &cpd);
+        wgpuComputePassEncoderSetPipeline(cpass, impl_->cull_pipeline);
+        wgpuComputePassEncoderSetBindGroup(cpass, 0, impl_->cull_group, 0, nullptr);
+        wgpuComputePassEncoderDispatchWorkgroups(cpass, (n + 63) / 64, 1, 1);
+        wgpuComputePassEncoderEnd(cpass);
+        wgpuComputePassEncoderRelease(cpass);
+        // Statistics: every 30th frame the arguments are copied to a
+        // mappable buffer and counted when the map completes.
+        if (impl_->frame_counter % 30 == 0 && !impl_->cull_readback_inflight) {
+          if (impl_->cull_readback == nullptr || impl_->cull_readback_capacity < n) {
+            if (impl_->cull_readback != nullptr) wgpuBufferRelease(impl_->cull_readback);
+            impl_->cull_readback_capacity = std::max(n, impl_->pass_args_capacity[4]);
+            WGPUBufferDescriptor bd{};
+            bd.label = sv("city-cull-readback");
+            bd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+            bd.size = static_cast<std::uint64_t>(impl_->cull_readback_capacity) * 20ull;
+            impl_->cull_readback = wgpuDeviceCreateBuffer(impl_->device, &bd);
+          }
+          wgpuCommandEncoderCopyBufferToBuffer(encoder, impl_->pass_args[4], 0, impl_->cull_readback, 0, n * 20ull);
+          impl_->cull_readback_inflight = true;
+          impl_->cull_readback_count = n;
+        }
+      }
     }
   };
 
@@ -3975,6 +4278,32 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     wgpuCommandEncoderRelease(encoder);
     wgpuQueueSubmit(impl_->queue, 1, &commands);
     wgpuCommandBufferRelease(commands);
+    if (main_set && impl_->cull_readback_inflight && impl_->cull_readback_count > 0 && impl_->cull_readback != nullptr &&
+        impl_->frame_counter % 30 == 0) {
+      // The occlusion statistics: count the instance counts the cull left
+      // at zero once the copy is mapped.
+      WGPUBufferMapCallbackInfo map_info{};
+      map_info.mode = WGPUCallbackMode_AllowProcessEvents;
+      map_info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void*) {
+        auto* self = static_cast<Impl*>(u1);
+        if (status == WGPUMapAsyncStatus_Success) {
+          const auto* a = static_cast<const std::uint32_t*>(
+              wgpuBufferGetConstMappedRange(self->cull_readback, 0, static_cast<std::uint64_t>(self->cull_readback_count) * 20ull));
+          std::uint32_t occluded = 0;
+          if (a != nullptr) {
+            for (std::uint32_t i = 0; i < self->cull_readback_count; ++i) {
+              if (a[i * 5 + 1] == 0) ++occluded;
+            }
+          }
+          self->occluded_last = occluded;
+          wgpuBufferUnmap(self->cull_readback);
+        }
+        self->cull_readback_inflight = false;
+      };
+      map_info.userdata1 = impl_.get();
+      wgpuBufferMapAsync(impl_->cull_readback, WGPUMapMode_Read, 0,
+                         static_cast<std::uint64_t>(impl_->cull_readback_count) * 20ull, map_info);
+    }
     if (do_lum && !impl_->lum_map_inflight) {
       impl_->lum_map_inflight = true;
       WGPUBufferMapCallbackInfo map_info{};

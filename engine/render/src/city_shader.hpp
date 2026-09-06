@@ -515,6 +515,11 @@ fn interior_color(aux: vec2<f32>, view_ts: vec3<f32>, room: vec4<f32>, seed: f32
   else if (dbg == 5) { color = vec3<f32>(roughness) * 0.3; }
   else if (dbg == 6) { color = sun * ndl * shadow * 0.3; }
   else if (dbg == 7) { color = sh_irradiance(N); }
+  else if (dbg == 12) {
+    // Material id for the sweep tool (raw composite): low nibble in red,
+    // high nibble in green, no blue.
+    color = vec3<f32>(f32(in.material & 15u) / 15.0, f32((in.material >> 4u) & 15u) / 15.0, 0.0);
+  }
   return vec4<f32>(color, alpha);
 }
 )";

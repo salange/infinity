@@ -717,6 +717,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let rc_dbg = i32(cfr.jitter.z + 0.5);
   if (rc_dbg == 3) { return vec4<f32>(vec3<f32>(ao_ss), 1.0); }
   if (rc_dbg == 4) { return vec4<f32>(vec3<f32>(shadow), 1.0); }
+  if (rc_dbg == 12) { return vec4<f32>(0.0, 0.0, 0.5, 1.0); }  // material ids: terrain
   let p0 = i32(u.palette.x + 0.5);
   if (p0 > 0) {
     // Normalised palette weights (four materials per chunk, T0019).
@@ -999,6 +1000,9 @@ fn fs_blur(in: FSIn) -> @location(0) vec4<f32> {
 @fragment
 fn fs_composite(in: FSIn) -> @location(0) vec4<f32> {
   let hdr = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb;
+  // Raw (pp.b.z): the HDR value as is — the material-id debug view of
+  // the sweep tool must not pass through exposure and the tonemap.
+  if (pp.b.z > 0.5) { return vec4<f32>(clamp(hdr, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0); }
   let bloom = textureSampleLevel(src_b, samp, in.uv, 0.0).rgb;
   var c = hdr * pp.a.x + bloom * pp.a.z;
   // Purkinje shift: under scotopic adaptation the rods see luminance
@@ -3624,7 +3628,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     // whole sphere to grey.
     target = target < 0.15f ? 0.15f : (target > 35.0f ? 35.0f : target);
     const float tau = target < impl_->exposure ? 0.35f : 5.0f;
-    impl_->exposure += (target - impl_->exposure) * (1.0f - std::exp(-dt / tau));
+    if (!frame.lock_exposure) impl_->exposure += (target - impl_->exposure) * (1.0f - std::exp(-dt / tau));
     // Scotopic fraction: rods take over as the adapted scene dims (scene
     // units: day averages ~0.3, night ~5e-3, starlit space < 1e-4).
     const float log_avg = std::log10(avg + 1.0e-9f);
@@ -3644,7 +3648,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     const float btx = 2.0f / static_cast<float>(set.w);
     const float bty = 2.0f / static_cast<float>(set.h);
     const float a[4] = {impl_->exposure, impl_->scotopic, 0.55f, 1.05f};
-    float block[8] = {a[0], a[1], a[2], a[3], tx, ty, 0.0f, 0.0f};
+    const float raw = impl_->city_settings.debug_view == 12 ? 1.0f : 0.0f;
+    float block[8] = {a[0], a[1], a[2], a[3], tx, ty, raw, 0.0f};
     wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, base * 256, block,
                          sizeof(block));
     float blur_h[8] = {a[0], a[1], a[2], a[3], btx, bty, 1.0f, 0.0f};

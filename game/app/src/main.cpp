@@ -525,6 +525,8 @@ int main(int argc, char** argv) {
   int sweep_frames = 0;        // --sweep N: temporal-artifact analysis (the demo's tool)
   double sweep_step = 0.03;    // --sweep-step m
   std::string sweep_out = "sweep";  // --sweep-out name
+  int sweep_dir = 0;           // --sweep-dir right|forward|down (0/1/2): the flight direction
+  int sweep_blur = 0;          // --sweep-blur R: box-blur both frames so only low-frequency shimmer counts
   const char* assets_text = nullptr;  // --assets <dir>: tile library root
   std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
   int spawn_slot = -1;                // --slot N: spawn on this system slot
@@ -577,6 +579,11 @@ int main(int argc, char** argv) {
       sweep_step = std::atof(argv[++i]);
     } else if (std::strcmp(argv[i], "--sweep-out") == 0 && i + 1 < argc) {
       sweep_out = argv[++i];
+    } else if (std::strcmp(argv[i], "--sweep-dir") == 0 && i + 1 < argc) {
+      const char* d = argv[++i];
+      sweep_dir = std::strcmp(d, "forward") == 0 ? 1 : (std::strcmp(d, "down") == 0 ? 2 : 0);
+    } else if (std::strcmp(argv[i], "--sweep-blur") == 0 && i + 1 < argc) {
+      sweep_blur = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
       bench_frames = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
@@ -1342,10 +1349,22 @@ int main(int argc, char** argv) {
   // and depth buffer are read back, every pixel is reprojected into the
   // previous frame and the band-limited change (gradient x motion) is
   // subtracted. What remains is temporal aliasing.
+  // T0022 C.4: every pixel of the current frame is reprojected into the
+  // previous frame through the depth buffer and the two view-projections
+  // (exact for a static world), the previous frame is sampled there and
+  // differenced; half a pixel of local gradient is tolerated. Luminance
+  // and chroma are kept apart (chroma is what exposed the z-fighting),
+  // the flight direction is a choice, and an optional blur of both
+  // frames leaves only the low-frequency shimmer the eye sees. A first
+  // frame in the material-id debug view attributes the residual per
+  // material.
   struct Sweep {
+    int phase{0};   // 0 ask for the id frame, 1 take it, 2 settle, 3 measuring
+    int settle{0};
     int step{0};
-    std::vector<std::uint8_t> prev;
-    std::vector<float> resid, raw;
+    int saved_debug{0};
+    std::vector<std::uint8_t> ids, prev;
+    std::vector<float> resid, raw, chroma;
     Mat4 prev_vp = Mat4::identity();
     RVec3 prev_cam{0.0, 0.0, 0.0};
     std::uint32_t w{0}, h{0};
@@ -3518,6 +3537,7 @@ int main(int argc, char** argv) {
     }
     frame_params.city_ranges = city_ranges.data();
     frame_params.city_range_count = city_ranges.size();
+    frame_params.lock_exposure = sweep_frames > 0 && frame >= sweep_warmup - 8;
     rhi->render_frame(frame_params, items.data(), items.size());
     if (stress_frames > 0 && frame >= static_cast<long>(stress_frames)) {
       std::printf("stress: %d target recreations survived\n", stress_frames);
@@ -3581,108 +3601,220 @@ int main(int argc, char** argv) {
       std::vector<std::uint8_t> cur;
       std::vector<float> depth;
       std::uint32_t w = 0, h = 0;
-      if (rhi->take_readback(&cur, &depth, &w, &h)) {
-        if (sweep.prev.empty() || sweep.w != w || sweep.h != h) {
-          sweep.prev.swap(cur);
+      const auto lum = [](const std::vector<std::uint8_t>& img, std::size_t px) {
+        return (0.299f * img[px * 4] + 0.587f * img[px * 4 + 1] + 0.114f * img[px * 4 + 2]) / 255.0f;
+      };
+      // Box blur of radius sweep_blur, separable, on the three colour channels.
+      const auto blur = [&](std::vector<std::uint8_t>& img) {
+        const int R = sweep_blur;
+        if (R <= 0) return;
+        std::vector<std::uint8_t> tmp(img.size());
+        for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+          int sum = 0, n = 0;
+          for (int k = -R; k <= R; ++k) { const int xx = static_cast<int>(x) + k; if (xx < 0 || xx >= static_cast<int>(w)) continue; sum += img[(static_cast<std::size_t>(y) * w + xx) * 4 + c]; ++n; }
+          tmp[(static_cast<std::size_t>(y) * w + x) * 4 + c] = static_cast<std::uint8_t>(sum / std::max(n, 1));
+        }
+        for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+          int sum = 0, n = 0;
+          for (int k = -R; k <= R; ++k) { const int yy = static_cast<int>(y) + k; if (yy < 0 || yy >= static_cast<int>(h)) continue; sum += tmp[(static_cast<std::size_t>(yy) * w + x) * 4 + c]; ++n; }
+          img[(static_cast<std::size_t>(y) * w + x) * 4 + c] = static_cast<std::uint8_t>(sum / std::max(n, 1));
+        }
+      };
+      // Bilinear sample of one channel (0..2 rgb, 3 luminance) at a fractional pixel position.
+      const auto sample = [&](const std::vector<std::uint8_t>& img, float fx, float fy, int ch) {
+        fx = std::min(std::max(fx, 0.0f), static_cast<float>(w) - 1.001f);
+        fy = std::min(std::max(fy, 0.0f), static_cast<float>(h) - 1.001f);
+        const std::uint32_t x0 = static_cast<std::uint32_t>(fx), y0 = static_cast<std::uint32_t>(fy);
+        const float tx = fx - static_cast<float>(x0), ty = fy - static_cast<float>(y0);
+        const auto at = [&](std::uint32_t x, std::uint32_t y) {
+          const std::size_t px = static_cast<std::size_t>(y) * w + x;
+          return ch == 3 ? lum(img, px) : img[px * 4 + static_cast<std::size_t>(ch)] / 255.0f;
+        };
+        return (at(x0, y0) * (1.0f - tx) + at(x0 + 1, y0) * tx) * (1.0f - ty) + (at(x0, y0 + 1) * (1.0f - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+      };
+      const auto move = [&]() {
+        SVec3 dir = inf::sim::normalize(inf::sim::cross(player.forward(), player.up()));
+        if (sweep_dir == 1) dir = player.forward();
+        else if (sweep_dir == 2) dir = player.up() * -1.0;
+        player.set_position(player.position() + dir * sweep_step);
+      };
+      if (sweep.phase == 0) {
+        // The material-id frame: the city shader writes ids, the composite
+        // passes them raw.
+        sweep.saved_debug = city_debug;
+        city_debug = 12;
+        rhi->request_readback();
+        sweep.phase = 1;
+      } else if (sweep.phase == 1) {
+        if (rhi->take_readback(&cur, &depth, &w, &h)) {
+          sweep.ids.swap(cur);
           sweep.w = w;
           sweep.h = h;
+          city_debug = sweep.saved_debug;
+          sweep.phase = 2;
+          sweep.settle = 0;
+        }
+      } else if (sweep.phase == 2) {
+        // Let the TAA history forget the id frame, then take the first frame.
+        if (++sweep.settle == 16) rhi->request_readback();
+        if (sweep.settle >= 16 && rhi->take_readback(&cur, &depth, &w, &h)) {
+          if (w != sweep.w || h != sweep.h) { sweep.w = w; sweep.h = h; sweep.ids.clear(); }
+          blur(cur);
+          sweep.prev.swap(cur);
+          sweep.prev_vp = view_projection;
+          sweep.prev_cam = camera_pos;
           sweep.resid.assign(static_cast<std::size_t>(w) * h, 0.0f);
           sweep.raw.assign(sweep.resid.size(), 0.0f);
-        } else {
-          const auto lum = [](const std::vector<std::uint8_t>& img, std::size_t px) {
-            return (0.299f * img[px * 4] + 0.587f * img[px * 4 + 1] + 0.114f * img[px * 4 + 2]) / 255.0f;
-          };
-          // Column-major 4x4 inverse (cofactors), doubles.
-          const auto inverse4 = [](const Mat4& a, double* out) {
-            double inv[16];
-            const float* m = a.m;
-            inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
-            inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
-            inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
-            inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
-            inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
-            inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
-            inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
-            inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
-            inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
-            inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
-            inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
-            inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
-            inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
-            inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
-            inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
-            inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
-            const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-            const double id = det != 0.0 ? 1.0 / det : 0.0;
-            for (int i = 0; i < 16; ++i) out[i] = inv[i] * id;
-          };
-          const auto xform = [](const double* m, const double* v, double* o) {
-            for (int r = 0; r < 4; ++r) o[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
-          };
-          double inv_cur[16];
-          inverse4(view_projection, inv_cur);
-          // Previous VP in this frame's camera-relative space.
-          const Mat4 prev_rel_f = inf::render::mul(sweep.prev_vp, inf::render::translate(camera_pos - sweep.prev_cam));
-          double prev_rel[16];
-          for (int i = 0; i < 16; ++i) prev_rel[i] = prev_rel_f.m[i];
-          for (std::uint32_t y = 1; y + 1 < h; ++y) {
-            for (std::uint32_t x = 1; x + 1 < w; ++x) {
-              const std::size_t px = static_cast<std::size_t>(y) * w + x;
-              const float d = std::fabs(lum(cur, px) - lum(sweep.prev, px));
-              sweep.raw[px] += d;
-              const double ndc[4] = {(static_cast<double>(x) + 0.5) / w * 2.0 - 1.0,
-                                     1.0 - (static_cast<double>(y) + 0.5) / h * 2.0, depth[px], 1.0};
+          sweep.chroma.assign(sweep.resid.size(), 0.0f);
+          sweep.phase = 3;
+          move();
+          rhi->request_readback();
+          ++sweep.step;
+        }
+      } else if (rhi->take_readback(&cur, &depth, &w, &h) && w == sweep.w && h == sweep.h) {
+        blur(cur);
+        // Column-major 4x4 inverse (cofactors), doubles.
+        const auto inverse4 = [](const Mat4& a, double* out) {
+          double inv[16];
+          const float* m = a.m;
+          inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+          inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+          inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+          inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+          inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+          inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+          inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+          inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+          inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+          inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+          inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+          inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+          inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+          inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+          inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+          inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+          const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+          const double id = det != 0.0 ? 1.0 / det : 0.0;
+          for (int i = 0; i < 16; ++i) out[i] = inv[i] * id;
+        };
+        const auto xform = [](const double* m, const double* v, double* o) {
+          for (int r = 0; r < 4; ++r) o[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
+        };
+        double inv_cur[16];
+        inverse4(view_projection, inv_cur);
+        // Previous VP in this frame's camera-relative space.
+        const Mat4 prev_rel_f = inf::render::mul(sweep.prev_vp, inf::render::translate(camera_pos - sweep.prev_cam));
+        double prev_rel[16];
+        for (int i = 0; i < 16; ++i) prev_rel[i] = prev_rel_f.m[i];
+        for (std::uint32_t y = 1; y + 1 < h; ++y) {
+          for (std::uint32_t x = 1; x + 1 < w; ++x) {
+            const std::size_t px = static_cast<std::size_t>(y) * w + x;
+            const float lc = lum(cur, px);
+            sweep.raw[px] += std::fabs(lc - lum(sweep.prev, px));
+            float fx = static_cast<float>(x) + 0.5f, fy = static_cast<float>(y) + 0.5f;
+            if (depth[px] > 1e-7f) {  // not sky (reversed Z)
+              const double ndc[4] = {fx / w * 2.0 - 1.0, 1.0 - fy / h * 2.0, depth[px], 1.0};
               double wp[4];
               xform(inv_cur, ndc, wp);
               const double world[4] = {wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3], 1.0};
               double pc[4];
               xform(prev_rel, world, pc);
-              float mx = 0.0f, my = 0.0f;
-              if (pc[3] > 1e-4 && depth[px] > 1e-7) {
-                mx = static_cast<float>((pc[0] / pc[3] * 0.5 + 0.5) * w - (static_cast<double>(x) + 0.5));
-                my = static_cast<float>((0.5 - pc[1] / pc[3] * 0.5) * h - (static_cast<double>(y) + 0.5));
-              }
-              const float gx = 0.5f * std::fabs(lum(cur, px + 1) - lum(cur, px - 1));
-              const float gy = 0.5f * std::fabs(lum(cur, px + w) - lum(cur, px - w));
-              const float expected = std::fabs(mx) * gx + std::fabs(my) * gy;
-              sweep.resid[px] += std::max(0.0f, d - 1.5f * expected - 0.004f);
+              if (pc[3] <= 1e-4) continue;
+              fx = static_cast<float>((pc[0] / pc[3] * 0.5 + 0.5) * w);
+              fy = static_cast<float>((0.5 - pc[1] / pc[3] * 0.5) * h);
+              if (fx < 1.0f || fy < 1.0f || fx > w - 2.0f || fy > h - 2.0f) continue;  // came from off-screen
             }
+            const float lp = sample(sweep.prev, fx - 0.5f, fy - 0.5f, 3);
+            const float gx = 0.5f * std::fabs(lum(cur, px + 1) - lum(cur, px - 1));
+            const float gy = 0.5f * std::fabs(lum(cur, px + w) - lum(cur, px - w));
+            const float tol = 0.5f * (gx + gy) + 0.004f;
+            sweep.resid[px] += std::max(0.0f, std::fabs(lc - lp) - tol);
+            // Chroma: red and blue relative to green, the same tolerance rule.
+            const float rc = cur[px * 4] / 255.0f - cur[px * 4 + 1] / 255.0f;
+            const float bc = cur[px * 4 + 2] / 255.0f - cur[px * 4 + 1] / 255.0f;
+            const float rp = sample(sweep.prev, fx - 0.5f, fy - 0.5f, 0) - sample(sweep.prev, fx - 0.5f, fy - 0.5f, 1);
+            const float bp = sample(sweep.prev, fx - 0.5f, fy - 0.5f, 2) - sample(sweep.prev, fx - 0.5f, fy - 0.5f, 1);
+            sweep.chroma[px] += std::max(0.0f, 0.5f * (std::fabs(rc - rp) + std::fabs(bc - bp)) - tol);
           }
-          sweep.prev.swap(cur);
-          ++sweep.measured;
         }
+        sweep.prev.swap(cur);
         sweep.prev_vp = view_projection;
         sweep.prev_cam = camera_pos;
-      }
-      if (sweep.step < sweep_frames) {
-        // slide sideways for the next frame and ask for its readback
-        const SVec3 right = inf::sim::normalize(inf::sim::cross(player.forward(), player.up()));
-        player.set_position(player.position() + right * sweep_step);
-        rhi->request_readback();
-        ++sweep.step;
-      } else if (sweep.measured > 0) {
-        const float norm = 1.0f / static_cast<float>(sweep.measured);
-        double total = 0.0, total_raw = 0.0;
-        std::vector<std::uint8_t> heat(sweep.resid.size() * 4, 255);
-        for (std::size_t px = 0; px < sweep.resid.size(); ++px) {
-          const float f = sweep.resid[px] * norm;
-          total += f;
-          total_raw += sweep.raw[px] * norm;
-          const float v = std::min(1.0f, f * 10.0f);
-          heat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
-          heat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
-          heat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+        ++sweep.measured;
+        if (sweep.step < sweep_frames) {
+          move();
+          rhi->request_readback();
+          ++sweep.step;
+        } else {
+          const float norm = 1.0f / static_cast<float>(std::max(sweep.measured, 1));
+          double mat_sum[256] = {}, mat_cnt[256] = {}, mat_chroma[256] = {};
+          double total = 0.0, total_raw = 0.0, total_chroma = 0.0;
+          std::vector<std::uint8_t> heat(sweep.resid.size() * 4, 255);
+          const auto srgb_lin = [](std::uint8_t b) {
+            const float v = b / 255.0f;
+            return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+          };
+          for (std::size_t px = 0; px < sweep.resid.size(); ++px) {
+            const float f = sweep.resid[px] * norm;
+            total += f;
+            total_raw += sweep.raw[px] * norm;
+            total_chroma += sweep.chroma[px] * norm;
+            int id = 255;
+            if (sweep.ids.size() == sweep.resid.size() * 4) {
+              const float r = srgb_lin(sweep.ids[px * 4]), g = srgb_lin(sweep.ids[px * 4 + 1]), b = srgb_lin(sweep.ids[px * 4 + 2]);
+              if (b < 0.2f) id = static_cast<int>(std::lround(r * 15.0f)) + 16 * static_cast<int>(std::lround(g * 15.0f));
+              else if (b > 0.35f && b < 0.65f && r < 0.1f && g < 0.1f) id = 254;
+            }
+            mat_sum[id] += f;
+            mat_chroma[id] += sweep.chroma[px] * norm;
+            mat_cnt[id] += 1.0;
+            const float v = std::min(1.0f, f * 10.0f);
+            heat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
+            heat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
+            heat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+          }
+          const char* dir_name = sweep_dir == 1 ? "forward" : (sweep_dir == 2 ? "down" : "right");
+          std::printf("sweep: %d steps of %.3f m %s%s; mean temporal residual %.5f, chroma %.5f (raw frame difference %.5f) at %ux%u\n",
+                      sweep.measured, sweep_step, dir_name, sweep_blur > 0 ? " (blurred)" : "", total / static_cast<double>(sweep.resid.size()),
+                      total_chroma / static_cast<double>(sweep.resid.size()), total_raw / static_cast<double>(sweep.resid.size()), sweep.w, sweep.h);
+          struct Row { int id; double mean; double chroma; double share; };
+          std::vector<Row> rows;
+          for (int id = 0; id < 256; ++id) {
+            if (mat_cnt[id] < 200) continue;
+            rows.push_back(Row{id, mat_sum[id] / mat_cnt[id], mat_chroma[id] / mat_cnt[id], mat_sum[id] / std::max(total, 1e-9)});
+          }
+          std::sort(rows.begin(), rows.end(), [](const Row& p1, const Row& p2) { return p1.share > p2.share; });
+          const std::vector<inf::city::MaterialDesc> names = inf::city::make_materials();
+          std::printf("  %-4s %-18s %-10s %-10s %-10s %s\n", "id", "material", "pixels", "residual", "chroma", "share");
+          for (std::size_t i = 0; i < rows.size() && i < 12; ++i) {
+            const Row& r = rows[i];
+            const char* name = r.id == 255 ? "(sky)" : (r.id == 254 ? "(terrain)" : (r.id < static_cast<int>(names.size()) ? names[static_cast<std::size_t>(r.id)].name.c_str() : "?"));
+            std::printf("  %-4d %-18s %-10.0f %-10.5f %-10.5f %.1f%%\n", r.id, name, mat_cnt[r.id], r.mean, r.chroma, r.share * 100.0);
+          }
+          stbi_write_png((sweep_out + "-heat.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                         heat.data(), static_cast<int>(sweep.w * 4));
+          stbi_write_png((sweep_out + "-frame.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                         sweep.prev.data(), static_cast<int>(sweep.w * 4));
+          if (sweep.ids.size() == sweep.resid.size() * 4) {
+            stbi_write_png((sweep_out + "-ids.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                           sweep.ids.data(), static_cast<int>(sweep.w * 4));
+          }
+          {
+            // The chroma heat map (x50): colour-only flicker such as z-fighting between two textures.
+            std::vector<std::uint8_t> cheat(sweep.chroma.size() * 4, 255);
+            for (std::size_t px = 0; px < sweep.chroma.size(); ++px) {
+              const float v = std::min(1.0f, sweep.chroma[px] * norm * 50.0f);
+              cheat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
+              cheat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
+              cheat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+            }
+            stbi_write_png((sweep_out + "-chroma.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                           cheat.data(), static_cast<int>(sweep.w * 4));
+          }
+          std::printf("sweep: wrote %s-heat.png and %s-frame.png\n", sweep_out.c_str(), sweep_out.c_str());
+          std::fflush(stdout);
+          break;
         }
-        std::printf("sweep: %d steps of %.3f m; mean temporal residual %.5f (raw frame difference %.5f) at %ux%u\n",
-                    sweep.measured, sweep_step, total / static_cast<double>(sweep.resid.size()),
-                    total_raw / static_cast<double>(sweep.resid.size()), sweep.w, sweep.h);
-        stbi_write_png((sweep_out + "-heat.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
-                       heat.data(), static_cast<int>(sweep.w * 4));
-        stbi_write_png((sweep_out + "-frame.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
-                       sweep.prev.data(), static_cast<int>(sweep.w * 4));
-        std::printf("sweep: wrote %s-heat.png and %s-frame.png\n", sweep_out.c_str(), sweep_out.c_str());
-        std::fflush(stdout);
-        break;
       }
     }
     if (max_frames > 0 && frame >= max_frames) {

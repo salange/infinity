@@ -275,6 +275,9 @@ class Rhi {
     // T0022: the camera's move since the previous frame (planet-local
     // metres) — the persisted shadow cascades are re-expressed by it.
     float camera_delta[3]{0.0f, 0.0f, 0.0f};
+    // T0022 C.4: hold the eye's exposure (the sweep tool differences
+    // consecutive frames; adaptation would read as change everywhere).
+    bool lock_exposure{false};
     // T0022: the ranges the mode-8 items refer to (valid for this call).
     const CityRange* city_ranges{nullptr};
     std::size_t city_range_count{0};

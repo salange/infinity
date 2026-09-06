@@ -12,6 +12,7 @@ add_library(game_city STATIC
   src/standards.cpp
   src/props.cpp
   src/showcase.cpp
+  src/streets.cpp
   src/architecture.cpp
   src/site_build.cpp
   src/human/tech/architecture.cpp)

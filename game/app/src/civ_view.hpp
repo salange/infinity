@@ -55,6 +55,7 @@ struct CivAnchor {
   };
   std::vector<SiteMeshEntry> meshes;
   bool city_materials{false};  // the city material table is on the renderer
+  bool city_enabled{true};     // false: the mass path at every level (measurements)
 
   struct TileEntry {
     gen::EcumenopolisField::TileId id;

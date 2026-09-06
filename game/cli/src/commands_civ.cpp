@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/time/world_clock.hpp"
+#include "city/site_build.hpp"
 #include "gen/civ_census.hpp"
 #include "core/det/trig.hpp"
 #include "gen/names.hpp"
@@ -730,6 +731,22 @@ int cmd_civ_site(const core::Seed128& seed, const long long* cell_xyzl, int slot
   }
   // Capture script lines: the camera above and to the south of the site,
   // looking down at ~35 degrees, at three ranges.
+  {
+    // The city system's scene of the site (T0021): the whole site when it
+    // fits, else the near focus at the centre.
+    city::SiteBuildParams bp;
+    bp.detail = 2;
+    if (site->radius_m > 1200.0) bp.focus_radius_m = 1200.0;
+    city::Scene scene;
+    city::SiteBuildStats stats;
+    const core::LocalClock clock;
+    const std::int64_t t0 = clock.now().ns_since_epoch;
+    city::build_site_scene(sites, *site, field, bp, &scene, &stats);
+    const double ms = static_cast<double>(clock.now().ns_since_epoch - t0) * 1e-6;
+    std::printf("city scene (detail 2%s): %u lots, %u towers, %u standards, %u plazas, %u overpasses, %u key buildings, %u triangles, %zu lights, %.0f ms\n",
+                bp.focus_radius_m > 0.0 ? ", 1200 m focus" : "", stats.lots, stats.towers, stats.standards, stats.plazas,
+                stats.overpasses, stats.key_buildings, stats.triangles, scene.lights.size(), ms);
+  }
   std::printf("# capture script lines (app --script):\n");
   const gen::Dir3& north = site->frame.north;
   for (const double range : {20000.0, 2000.0, 200.0}) {

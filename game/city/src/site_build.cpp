@@ -10,6 +10,7 @@
 #include "city/materials.hpp"
 #include "city/props.hpp"
 #include "city/rng.hpp"
+#include "city/streets.hpp"
 #include "city/towers.hpp"
 #include "core/det/trig.hpp"
 #include "core/key.hpp"
@@ -50,6 +51,48 @@ Vec2 to_scene(double x_east, double y_north) {
   return Vec2{static_cast<float>(x_east), static_cast<float>(-y_north)};
 }
 
+constexpr float kCurb = 0.15f;
+
+// Prop budgets and plaza odds by the development level's size class
+// (L1-2 small, L3 medium, L4-5 large, L6+ metropolis).
+struct SizeClass {
+  int trees;
+  int lamps;
+  int overpasses;
+  float plaza_p;
+};
+SizeClass size_class(int level) {
+  if (level <= 2) return {40, 60, 1, 0.45f};
+  if (level == 3) return {90, 90, 2, 0.5f};
+  if (level <= 5) return {140, 120, 4, 0.55f};
+  return {200, 160, 6, 0.6f};
+}
+
+// Distance from a point to a segment.
+double segment_distance(double px, double py, double ax, double ay, double bx, double by) {
+  const double vx = bx - ax;
+  const double vy = by - ay;
+  const double len2 = vx * vx + vy * vy;
+  double t = len2 > 0.0 ? ((px - ax) * vx + (py - ay) * vy) / len2 : 0.0;
+  t = std::max(0.0, std::min(1.0, t));
+  const double dx = ax + vx * t - px;
+  const double dy = ay + vy * t - py;
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+// Whether an arterial corridor crosses a block (lattice rect centre, half
+// diagonal).
+bool arterial_crosses(const gen::Site& site, double cx, double cy, double half_diag) {
+  for (const gen::Arterial& a : site.arterials) {
+    for (std::size_t s = 0; s + 3 < a.xy.size(); s += 2) {
+      if (segment_distance(cx, cy, a.xy[s], a.xy[s + 1], a.xy[s + 2], a.xy[s + 3]) < 0.5 * a.width_m + half_diag) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 double civic_centre_radius_m(const gen::Site& site) {
@@ -81,6 +124,32 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
   const float inv_radius = site.radius_m > 0.0 ? static_cast<float>(1.0 / site.radius_m) : 1.0f;
   std::vector<gen::Lot> lots;
   LotInput in;
+  // The street kit (WP4): per block an asphalt square with the sidewalk
+  // plate and curb on it, lane paint and crosswalks on the near levels,
+  // lamps at the corners, a plaza in the courtyard of the bigger blocks;
+  // arterials with medians; overpasses between plazas.
+  const SizeClass sizes = size_class(site.style.level);
+  int tree_budget = sizes.trees;
+  int lamp_budget = params.lamp_budget > 0 ? std::min(params.lamp_budget * 3, sizes.lamps) : sizes.lamps;
+  const bool streets = site.street_m > 0.0 && site.family != gen::LayoutFamily::Hive &&
+                       site.family != gen::LayoutFamily::Crystal && site.family != gen::LayoutFamily::Domed;
+  std::vector<Vec2> plaza_centres;
+  const double B = site.block_m;
+  const double hs = 0.5 * site.street_m;
+  const auto lattice_to_scene = [&](double lx, double ly) {
+    double wx = lx;
+    double wy = ly;
+    if (lattice.rotated) {
+      wx = lx * lattice.ca - ly * lattice.sa;
+      wy = lx * lattice.sa + ly * lattice.ca;
+    }
+    return to_scene(wx, wy);
+  };
+  const auto lattice_rect = [&](double x0, double y0, double x1, double y1) {
+    std::vector<Vec2> poly{lattice_to_scene(x0, y0), lattice_to_scene(x1, y0), lattice_to_scene(x1, y1), lattice_to_scene(x0, y1)};
+    if (plan_area(poly) < 0.0f) std::reverse(poly.begin(), poly.end());
+    return poly;
+  };
   for (int by = -reach; by <= reach; ++by) {
     for (int bx = -reach; bx <= reach; ++bx) {
       if (params.focus_radius_m > 0.0) {
@@ -92,6 +161,84 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
       sites.lots_in_block(site, bx, by, &lots);
       if (lots.empty()) continue;
       const std::uint32_t block_first = static_cast<std::uint32_t>(sc.opaque.indices.size());
+      // The block's level by distance from the focus, like its lots.
+      int block_detail = params.detail;
+      double bwx = (bx + 0.5) * B;
+      double bwy = (by + 0.5) * B;
+      if (lattice.rotated) {
+        const double lx = bwx;
+        const double ly = bwy;
+        bwx = lx * lattice.ca - ly * lattice.sa;
+        bwy = lx * lattice.sa + ly * lattice.ca;
+      }
+      if (params.focus_radius_m > 0.0) {
+        const double fd = std::sqrt((bwx - params.focus_x) * (bwx - params.focus_x) + (bwy - params.focus_y) * (bwy - params.focus_y));
+        if (fd > params.context_range_m) block_detail -= 2;
+        else if (fd > params.full_range_m) block_detail -= 1;
+        block_detail = std::max(0, block_detail);
+      }
+      if (streets) {
+        const double x0 = bx * B;
+        const double y0 = by * B;
+        const float g = static_cast<float>(ground_z(bwx, bwy));
+        const bool civic_block = civic_r > 0.0 && bwx * bwx + bwy * bwy < (civic_r + 0.7 * B) * (civic_r + 0.7 * B);
+        Rng gr(core::derive_child(buildings_key, gen::kind::Lot,
+                                  0x100000000LL + (static_cast<std::int64_t>(bx) + 4096) * 8192 + (static_cast<std::int64_t>(by) + 4096)));
+        // Asphalt under the whole block including its half streets; the
+        // sidewalk plate with a curb on top unless an arterial runs
+        // through (then the block stands on the road).
+        {
+          Emit a(&sc.opaque, M_ASPHALT);
+          a.polygon(lattice_rect(x0 - hs, y0 - hs, x0 + B + hs, y0 + B + hs), g + 0.03f, true);
+        }
+        const bool on_arterial = arterial_crosses(site, bwx, bwy, 0.5 * B * 1.4142);
+        if (!on_arterial && !civic_block) {
+          const std::vector<Vec2> plate = lattice_rect(x0 + hs, y0 + hs, x0 + B - hs, y0 + B - hs);
+          Emit s(&sc.opaque, M_SIDEWALK);
+          s.polygon(plate, g + kCurb, true);
+          Emit c(&sc.opaque, M_CURB);
+          c.wall(plate, g, g + kCurb, true, true);
+        }
+        if (block_detail >= 1) {
+          // Lane paint on the streets east and north of the block; the
+          // neighbour paints the other two.
+          const float road_y = g + 0.05f;
+          road_paint(sc, lattice_to_scene(x0 + B, y0 - hs), lattice_to_scene(x0 + B, y0 + B + hs), static_cast<float>(site.street_m), false, road_y);
+          road_paint(sc, lattice_to_scene(x0 - hs, y0 + B), lattice_to_scene(x0 + B + hs, y0 + B), static_cast<float>(site.street_m), false, road_y);
+          if (block_detail >= 2 && !on_arterial) {
+            const Vec2 ex = normalize(lattice_to_scene(x0 + B, y0) - lattice_to_scene(x0, y0));
+            const Vec2 ny = normalize(lattice_to_scene(x0, y0 + B) - lattice_to_scene(x0, y0));
+            crosswalk(sc, lattice_to_scene(x0 + B, y0 + B - hs - 2.0), ex, static_cast<float>(site.street_m), road_y + 0.005f);
+            crosswalk(sc, lattice_to_scene(x0 + B - hs - 2.0, y0 + B), ny, static_cast<float>(site.street_m), road_y + 0.005f);
+          }
+          if (lamp_budget > 0 && !on_arterial) {
+            const Vec2 corner = lattice_to_scene(x0 + B - hs - 1.2, y0 + B - hs - 1.2);
+            const Vec2 out = normalize(lattice_to_scene(x0 + B, y0 + B) - corner);
+            gen_lamp(sc, P3(corner, g + kCurb), std::atan2(out.y, out.x));
+            --lamp_budget;
+          }
+        }
+        // Courtyard plaza: the blocks whose lots line the edges leave the
+        // interior free (sites/v1 keeps it as a courtyard).
+        const double bdist = std::sqrt(bwx * bwx + bwy * bwy);
+        const int block_ring = std::clamp(gen::Site::ring_of(bdist), 1, 7);
+        const double lot_base = site.lot_m * (0.6 + 0.1 * block_ring);
+        const double pitch = lot_base * 1.35;
+        const int per_edge = std::max(1, static_cast<int>(B / pitch));
+        const double margin = hs + 0.5 * pitch;
+        const double inset = margin + 0.63 * lot_base;
+        if (per_edge >= 3 && B - 2.0 * inset >= 16.0 && !on_arterial && !civic_block && gr.chance(sizes.plaza_p)) {
+          const std::vector<Vec2> court = lattice_rect(x0 + inset, y0 + inset, x0 + B - inset, y0 + B - inset);
+          const float t = clampf(static_cast<float>(bdist) * inv_radius, 0.0f, 1.0f);
+          PlazaKind kind = PlazaKind::Garden;
+          const float roll = gr.next();
+          if (t < 0.25f) kind = roll < 0.35f ? PlazaKind::Formal : (roll < 0.6f ? PlazaKind::Monument : PlazaKind::Fountain);
+          else if (t > 0.5f && t < 0.9f && roll < 0.12f) kind = PlazaKind::Landing;
+          else kind = roll < 0.55f ? PlazaKind::Garden : (roll < 0.8f ? PlazaKind::Terraced : PlazaKind::Fountain);
+          build_plaza(sc, kind, court, g + kCurb, gr.child(5), block_detail, &tree_budget);
+          plaza_centres.push_back(plan_centroid(court));
+        }
+      }
       Vec3 lo{1e30f, 1e30f, 1e30f};
       Vec3 hi{-1e30f, -1e30f, -1e30f};
       for (const gen::Lot& lot : lots) {
@@ -180,6 +327,89 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
         sc.register_range(block_first, block_end, centre, length(hi - lo) * 0.5f + 1.0f);
       }
     }
+  }
+  // Arterials: asphalt, lane paint, medians with hedges and trees.
+  {
+    Rng ar(core::derive_child(buildings_key, gen::kind::Lot, 0x200000000LL));
+    int seg_index = 0;
+    for (const gen::Arterial& a : site.arterials) {
+      for (std::size_t s = 0; s + 3 < a.xy.size(); s += 2, ++seg_index) {
+        double ax = a.xy[s];
+        double ay = a.xy[s + 1];
+        double bxp = a.xy[s + 2];
+        double byp = a.xy[s + 3];
+        if (params.focus_radius_m > 0.0) {
+          // Clip the segment to the focus disc (plus a block of margin).
+          const double rr = params.focus_radius_m + 0.7 * B;
+          const double dx = bxp - ax;
+          const double dy = byp - ay;
+          const double fx0 = ax - params.focus_x;
+          const double fy0 = ay - params.focus_y;
+          const double qa = dx * dx + dy * dy;
+          const double qb = 2.0 * (fx0 * dx + fy0 * dy);
+          const double qc = fx0 * fx0 + fy0 * fy0 - rr * rr;
+          const double disc = qb * qb - 4.0 * qa * qc;
+          if (qa <= 0.0 || disc < 0.0) continue;
+          const double sq = std::sqrt(disc);
+          const double t0 = std::max(0.0, (-qb - sq) / (2.0 * qa));
+          const double t1 = std::min(1.0, (-qb + sq) / (2.0 * qa));
+          if (t1 <= t0) continue;
+          bxp = ax + dx * t1;
+          byp = ay + dy * t1;
+          ax += dx * t0;
+          ay += dy * t0;
+        }
+        const double mx = 0.5 * (ax + bxp);
+        const double my = 0.5 * (ay + byp);
+        if (mx * mx + my * my > site.radius_m * site.radius_m * 1.1) continue;
+        const float g = static_cast<float>(ground_z(mx, my));
+        const Vec2 pa = to_scene(ax, ay);
+        const Vec2 pb = to_scene(bxp, byp);
+        road_surface(sc, {pa, pb}, a.width_m, g + 0.04f);
+        if (params.detail >= 1) road_paint(sc, pa, pb, a.width_m, true, g + 0.06f);
+        if (a.width_m >= 14.0f && params.detail >= 1) {
+          // Medians in pieces with gaps for crossings.
+          const Vec2 d = normalize(pb - pa);
+          const float len = length(pb - pa);
+          for (float t0 = 10.0f; t0 + 20.0f < len; t0 += 70.0f) {
+            const float t1 = std::min(len - 10.0f, t0 + 56.0f);
+            build_median(sc, pa + d * t0, pa + d * t1, 3.2f, kCurb, g + 0.04f);
+            if (tree_budget > 0 && ar.chance(0.5f)) {
+              gen_tree(sc, ar.child(static_cast<std::uint32_t>(seg_index * 64 + static_cast<int>(t0))), P3(pa + d * (0.5f * (t0 + t1)), g + 0.04f + kCurb), ar.range(6.0f, 8.0f));
+              --tree_budget;
+            }
+          }
+        }
+      }
+    }
+    // Overpasses between plazas 60-220 m apart.
+    int overpasses = 0;
+    Rng orr(core::derive_child(buildings_key, gen::kind::Lot, 0x300000000LL));
+    for (std::size_t i = 0; i < plaza_centres.size() && overpasses < sizes.overpasses; ++i) {
+      int best = -1;
+      float best_d = 1e9f;
+      for (std::size_t j = 0; j < plaza_centres.size(); ++j) {
+        if (j == i) continue;
+        const float d = length(plaza_centres[j] - plaza_centres[i]);
+        if (d > 60.0f && d < 220.0f && d < best_d) {
+          best_d = d;
+          best = static_cast<int>(j);
+        }
+      }
+      if (best < 0) continue;
+      const Vec2 pa = plaza_centres[i];
+      const Vec2 pb = plaza_centres[static_cast<std::size_t>(best)];
+      const Vec2 d = normalize(pb - pa);
+      const Vec2 n{d.y, -d.x};
+      const float sway = orr.range(8.0f, 16.0f) * (orr.chance(0.5f) ? 1.0f : -1.0f);
+      const std::vector<Vec2> ctrl = {pa + d * 6.0f, pa + d * (best_d * 0.33f) + n * sway, pa + d * (best_d * 0.66f) - n * sway, pb - d * 6.0f};
+      const float g = static_cast<float>(ground_z(0.5 * (pa.x + pb.x), -0.5 * (pa.y + pb.y)));
+      build_overpass(sc, ctrl, g + kCurb + 6.5f, g + kCurb, orr, 1);
+      ++overpasses;
+      plaza_centres[static_cast<std::size_t>(best)] = Vec2{1e6f, 1e6f};  // each plaza at most one
+    }
+    st.plazas = static_cast<std::uint32_t>(plaza_centres.size());
+    st.overpasses = static_cast<std::uint32_t>(overpasses);
   }
   // The civic centre of a planetary capital: the government building
   // facing the unification ring across a marble plaza, lamps around.

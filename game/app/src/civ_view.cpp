@@ -342,7 +342,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
     const bool refocus = detail <= 1 && site.radius_m > focus_radius &&
                          (std::fabs(fx - entry.focus_x) > 0.5 * focus_radius ||
                           std::fabs(fy - entry.focus_y) > 0.5 * focus_radius);
-    if (detail == 0) {
+    if (detail == 0 && civ->city_enabled) {
       // Near: the site's lots through the city system (T0021 WP3) inside
       // the focus, full detail nearest the player and the context levels
       // beyond; on a big site the merged masses of the far level stay as

@@ -37,6 +37,8 @@ struct SiteBuildStats {
   std::uint32_t max_tower_triangles{0};
   std::uint32_t triangles{0};
   std::uint32_t dropped{0};  // lots whose geometry came out non-finite (never drawn)
+  std::uint32_t plazas{0};
+  std::uint32_t overpasses{0};
 };
 
 // Scene frame: x east, y up from the site datum, z south (metres from

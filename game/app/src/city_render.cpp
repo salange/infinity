@@ -124,7 +124,24 @@ CityUpload upload_city_scene(render::Rhi& rhi, const city::Scene& scene, const g
       // proper rotation (east x north = up), so triangle orientation is
       // preserved.
       const std::uint32_t id = rhi.create_city_mesh(verts.data(), verts.size(), indices.data(), indices.size());
-      if (id != 0) up.pieces.push_back(CityUpload::Piece{id, foliage, static_cast<std::uint32_t>(end - tri)});
+      if (id != 0) {
+        CityUpload::Piece piece{id, foliage, static_cast<std::uint32_t>(end - tri), {0.0f, 0.0f, 0.0f}, 0.0f};
+        float lo[3] = {1e30f, 1e30f, 1e30f};
+        float hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (const render::Rhi::CityVertex& v : verts) {
+          for (int c = 0; c < 3; ++c) {
+            lo[c] = std::min(lo[c], v.position[c]);
+            hi[c] = std::max(hi[c], v.position[c]);
+          }
+        }
+        float r2 = 0.0f;
+        for (int c = 0; c < 3; ++c) {
+          piece.centre[c] = 0.5f * (lo[c] + hi[c]);
+          r2 += 0.25f * (hi[c] - lo[c]) * (hi[c] - lo[c]);
+        }
+        piece.radius = std::sqrt(r2);
+        up.pieces.push_back(piece);
+      }
       tri = end;
     }
   };
@@ -166,6 +183,10 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
   for (const CityUpload::Piece& piece : upload.pieces) {
     render::Rhi::DrawItem item;
     item.mesh = piece.mesh;
+    item.bounds[0] = static_cast<float>(translation.x) + piece.centre[0];
+    item.bounds[1] = static_cast<float>(translation.y) + piece.centre[1];
+    item.bounds[2] = static_cast<float>(translation.z) + piece.centre[2];
+    item.bounds[3] = piece.radius;
     item.mode = 8;
     item.shadow_caster = true;
     std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));

@@ -2036,6 +2036,8 @@ struct Rhi::Impl {
   int taa_parity = 0;
   bool taa_valid = false;
   float frame_jitter[2] = {0.0f, 0.0f};   // NDC units
+  float cascade_vp[kCityCascades][16] = {};  // this frame's light matrices (culling)
+  float cascade_radius[kCityCascades] = {1.0f, 1.0f, 1.0f};
   float frame_jitter_px[2] = {0.0f, 0.0f};
   float city_view_proj_clean[16] = {};
   CitySettings city_settings;
@@ -2429,9 +2431,13 @@ struct Rhi::Impl {
     depth_pre_view = wgpuTextureCreateView(depth_pre, nullptr);
     normal_pre = make_target(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, "city-normal-pre");
     normal_pre_view = wgpuTextureCreateView(normal_pre, nullptr);
-    ao_a = make_target(w, h, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-a");
+    // Occlusion at half resolution (the demo's option; the blur and the
+    // bilinear read in the shading hide the step).
+    const std::uint32_t aw = std::max(1u, w / 2);
+    const std::uint32_t ah = std::max(1u, h / 2);
+    ao_a = make_target(aw, ah, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-a");
     ao_a_view = wgpuTextureCreateView(ao_a, nullptr);
-    ao_b = make_target(w, h, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-b");
+    ao_b = make_target(aw, ah, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-b");
     ao_b_view = wgpuTextureCreateView(ao_b, nullptr);
     for (int i = 0; i < 2; ++i) {
       taa_hist[i] = make_target(w, h, kHdrFormat, rt, 1, 1, "city-taa");
@@ -3448,6 +3454,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         for (int k = 0; k < 16; ++k) out[k] = (k % 5 == 0) ? 1.0f : 0.0f;
       }
       wgpuQueueWriteBuffer(impl_->queue, impl_->city_cascade_buf, c * kUniformStride, out, 16 * sizeof(float));
+      std::memcpy(impl_->cascade_vp[c], out, sizeof(float) * 16);
+      impl_->cascade_radius[c] = extent;
       cascade_extent[c] = extent;
     }
     cascade[0] = splits[1];
@@ -3572,14 +3580,29 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // uniform block set; do_lum additionally reduces luminance (main only).
   // Shadow casters (city meshes and terrain chunks) into a depth target
   // with the given pipelines; `cascade` selects the light matrix.
+  // Culling of casters by their bounding sphere: against the cascade's
+  // light box, or the prepass reach (the occlusion fades out by 1.2 km).
+  const auto caster_visible = [&](const DrawItem& it_, int cascade) {
+    if (it_.bounds[3] <= 0.0f) return true;
+    if (cascade < 0) {
+      const float d = std::sqrt(it_.bounds[0] * it_.bounds[0] + it_.bounds[1] * it_.bounds[1] + it_.bounds[2] * it_.bounds[2]);
+      return d - it_.bounds[3] < 1600.0f;
+    }
+    const float* m = impl_->cascade_vp[cascade];
+    const float x = m[0] * it_.bounds[0] + m[4] * it_.bounds[1] + m[8] * it_.bounds[2] + m[12];
+    const float y = m[1] * it_.bounds[0] + m[5] * it_.bounds[1] + m[9] * it_.bounds[2] + m[13];
+    const float r = it_.bounds[3] / std::max(impl_->cascade_radius[cascade], 1e-3f);
+    return std::fabs(x) <= 1.0f + r && std::fabs(y) <= 1.0f + r;
+  };
   const auto draw_casters = [&](WGPURenderPassEncoder pass, WGPURenderPipeline city_p, WGPURenderPipeline terrain_p,
-                                std::uint32_t cascade_offset, bool prepass) {
+                                std::uint32_t cascade_offset, bool prepass, int cascade) {
     bool city_bound = false;
     bool terrain_bound = false;
     for (std::size_t i = 0; i < count; ++i) {
       const DrawItem& it_ = items[i];
       if (it_.overlay || (it_.mode != 8 && it_.mode != 0)) continue;
       if (!(it_.shadow_caster || (prepass && it_.prepass))) continue;
+      if (!caster_visible(it_, cascade)) continue;
       const auto it = impl_->meshes.find(it_.mesh);
       if (it == impl_->meshes.end() || it->second.vertex_count == 0) continue;
       const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
@@ -3647,7 +3670,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         desc.depthStencilAttachment = &da;
         WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
         draw_casters(pass, impl_->city_shadow_pipeline, impl_->terrain_shadow_pipeline,
-                     static_cast<std::uint32_t>(c * kUniformStride), false);
+                     static_cast<std::uint32_t>(c * kUniformStride), false, static_cast<int>(c));
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
       }
@@ -3669,7 +3692,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       desc.colorAttachments = &ca;
       desc.depthStencilAttachment = &da;
       WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
-      draw_casters(pass, impl_->city_prepass_pipeline, impl_->terrain_prepass_pipeline, 0, true);
+      draw_casters(pass, impl_->city_prepass_pipeline, impl_->terrain_prepass_pipeline, 0, true, -1);
       wgpuRenderPassEncoderEnd(pass);
       wgpuRenderPassEncoderRelease(pass);
       fullscreen_pass(encoder, impl_->ssao_pipeline, impl_->ssao_group, nullptr, impl_->ao_a_view);

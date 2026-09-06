@@ -93,6 +93,8 @@ struct LoadedChunk {
   std::uint32_t mesh_id = 0;
   RVec3 origin;
   std::uint8_t palette[4]{0, 0, 0, 0};  // material ids for the vertex weights
+  float centre[3]{0.0f, 0.0f, 0.0f};    // bounding sphere, chunk-local
+  float radius{0.0f};
 };
 
 RVec3 to_render(const SVec3& v) { return RVec3{v.x, v.y, v.z}; }
@@ -479,6 +481,10 @@ int main(int argc, char** argv) {
   inf::gen::BuildingMethod building_method = inf::gen::BuildingMethod::GrammarParts;  // --buildings
   bool city_showcase = false;  // --city-showcase: T0021 pipeline check (catalog scene at the first town)
   int city_debug = 0;          // --city-debug N: city pipeline debug view
+  int bench_frames = 0;        // --bench N: after the script/warm-up, mean frame time over N frames, then exit
+  int window_w = 0;            // --window WxH: windowed at this size (measurements at a fixed resolution)
+  int window_h = 0;
+  bool no_city = false;        // --no-city: sites through the mass path only (baseline measurements)
   bool no_ssao = false;        // --no-ssao / --no-shadows / --no-taa: renderer feature toggles
   bool no_shadows = false;
   bool no_taa = false;
@@ -537,6 +543,12 @@ int main(int argc, char** argv) {
       sweep_step = std::atof(argv[++i]);
     } else if (std::strcmp(argv[i], "--sweep-out") == 0 && i + 1 < argc) {
       sweep_out = argv[++i];
+    } else if (std::strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
+      bench_frames = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
+      if (std::sscanf(argv[++i], "%dx%d", &window_w, &window_h) != 2) window_w = window_h = 0;
+    } else if (std::strcmp(argv[i], "--no-city") == 0) {
+      no_city = true;
     } else if (std::strcmp(argv[i], "--no-ssao") == 0) {
       no_ssao = true;
     } else if (std::strcmp(argv[i], "--no-shadows") == 0) {
@@ -718,6 +730,11 @@ int main(int argc, char** argv) {
   GLFWmonitor* monitor = nullptr;
   int win_w = 1280;
   int win_h = 720;
+  if (window_w > 0 && window_h > 0) {
+    windowed = true;
+    win_w = window_w;
+    win_h = window_h;
+  }
   if (!windowed) {
     monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = monitor != nullptr ? glfwGetVideoMode(monitor) : nullptr;
@@ -1263,6 +1280,7 @@ int main(int argc, char** argv) {
   } sweep;
   const long sweep_warmup = 40;
   bool city_active = false;
+  long chunk_uploads = 0;  // chunk meshes uploaded (bench diagnostics)
   const auto build_city_showcase = [&]() {
     city_active = false;
     if (!city_showcase || !anchor || !anchor->civ || !anchor->civ->sites) {
@@ -2090,6 +2108,25 @@ int main(int argc, char** argv) {
         LoadedChunk chunk;
         chunk.mesh_id =
             rhi->create_mesh_mat(data->mesh.vertices.data(), data->mesh.vertices.size());
+        {
+          // Bounding sphere from the vertex positions (10 floats each).
+          float lo[3] = {1e30f, 1e30f, 1e30f};
+          float hi[3] = {-1e30f, -1e30f, -1e30f};
+          const std::vector<float>& vv = data->mesh.vertices;
+          for (std::size_t v = 0; v + 9 < vv.size(); v += 10) {
+            for (int c = 0; c < 3; ++c) {
+              lo[c] = std::min(lo[c], vv[v + c]);
+              hi[c] = std::max(hi[c], vv[v + c]);
+            }
+          }
+          float r2 = 0.0f;
+          for (int c = 0; c < 3; ++c) {
+            chunk.centre[c] = 0.5f * (lo[c] + hi[c]);
+            r2 += 0.25f * (hi[c] - lo[c]) * (hi[c] - lo[c]);
+          }
+          chunk.radius = std::sqrt(r2);
+        }
+        ++chunk_uploads;
         std::memcpy(chunk.palette, data->mesh.palette, sizeof(chunk.palette));
         chunk.origin =
             RVec3{data->mesh.origin[0], data->mesh.origin[1], data->mesh.origin[2]};
@@ -2300,6 +2337,7 @@ int main(int argc, char** argv) {
     }
     // T0020: settlement mass models of the anchor body.
     if (show_surface && anchor->civ != nullptr && !city_active) {
+      anchor->civ->city_enabled = !no_city;
       inf::app::draw_civ_sites(anchor->civ.get(), rhi.get(), *anchor->field, to_render(player.position()),
                                camera_pos, view_projection, &items);
     }
@@ -2315,6 +2353,10 @@ int main(int argc, char** argv) {
       item.mesh = chunk.mesh_id;
       item.shadow_caster = true;  // T0021: terrain shadows the city and itself
       const RVec3 translation = chunk.origin - camera_pos;
+      item.bounds[0] = static_cast<float>(translation.x) + chunk.centre[0];
+      item.bounds[1] = static_cast<float>(translation.y) + chunk.centre[1];
+      item.bounds[2] = static_cast<float>(translation.z) + chunk.centre[2];
+      item.bounds[3] = chunk.radius;
       const Mat4 model = inf::render::translate(translation);
       const Mat4 mvp = inf::render::mul(view_projection, model);
       std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
@@ -3279,6 +3321,34 @@ int main(int argc, char** argv) {
     }
     rhi->render_frame(frame_params, items.data(), items.size());
 
+    if (bench_frames > 0 && frame >= sweep_warmup && script_pc >= script.size() && script_wait <= 0.0) {
+      // Frame time from the wall clock around whole frames (the GPU is
+      // synchronised by the swap chain).
+      static double bench_start = 0.0;
+      static int bench_count = 0;
+      static long bench_uploads_start = 0;
+      const inf::core::LocalClock bench_clock;
+      const double now_s = static_cast<double>(bench_clock.now().ns_since_epoch) * 1e-9;
+      if (bench_count == 0) {
+        bench_start = now_s;
+        bench_uploads_start = chunk_uploads;
+      }
+      if (++bench_count > bench_frames) {
+        const double ms = (now_s - bench_start) / bench_frames * 1000.0;
+        std::size_t city_tris = 0;
+        if (anchor && anchor->civ) {
+          for (const auto& entry : anchor->civ->meshes) {
+            for (const auto& piece : entry.city.pieces) city_tris += piece.triangles;
+          }
+        }
+        for (const auto& piece : city_upload.pieces) city_tris += piece.triangles;
+        std::printf("bench: %d frames, %.2f ms/frame, %dx%d, %zu city triangles resident, %zu chunks (%ld uploaded during), %zu items, ssao %d shadows %d taa %d\n",
+                    bench_frames, ms, state.width, state.height, city_tris, loaded.size(), chunk_uploads - bench_uploads_start,
+                    items.size(), no_ssao ? 0 : 1, no_shadows ? 0 : 1, no_taa ? 0 : 1);
+        std::fflush(stdout);
+        break;
+      }
+    }
     fps_accum += dt;
     ++fps_frames;
     if (fps_accum >= 1.0) {

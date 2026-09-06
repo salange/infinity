@@ -25,6 +25,8 @@ struct CityUpload {
     std::uint32_t mesh{0};
     bool foliage{false};
     std::uint32_t triangles{0};
+    float centre[3]{0.0f, 0.0f, 0.0f};  // bounding sphere relative to the origin
+    float radius{0.0f};
   };
   std::vector<Piece> pieces;
   bool drawable() const { return !pieces.empty(); }

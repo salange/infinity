@@ -51,6 +51,7 @@ struct DrawRange {
   int lod_group{-1};           // objects sharing a group are alternatives
   int lod_level{0};            // 0 = finest
   float lod_max_distance{1e30f};  // draw this level while camera distance < this
+  bool has_fine{false};        // a block whose buildings are also registered individually in `fine`
 };
 
 struct Scene {
@@ -58,10 +59,15 @@ struct Scene {
   Mesh opaque;
   Mesh foliage;
   std::vector<DrawRange> draws;  // finalised by finalize_draws(); unregistered geometry becomes static ranges
+  // Per-building sub-ranges of block ranges (sorted by first): the
+  // granularity of occlusion culling (T0022 B.1). A block-sized range's
+  // bounding sphere always reaches into the sky; a building's does not.
+  std::vector<DrawRange> fine;
   int lod_groups{0};
   // Registers [first, end) of the opaque index buffer as one drawable.
   void register_range(std::uint32_t first, std::uint32_t end, Vec3 centre, float radius, int lod_group = -1,
-                      int lod_level = 0, float lod_max_distance = 1e30f);
+                      int lod_level = 0, float lod_max_distance = 1e30f, bool has_fine = false);
+  void register_fine(std::uint32_t first, std::uint32_t end, Vec3 centre, float radius);
   void finalize_draws();
   std::vector<PointLight> lights;  // on at night
   Vec3 camera_position{0, 40, 200};

@@ -298,8 +298,9 @@ void draw_ecumenopolis(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField
 
 void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& field,
                     const render::Vec3& player_pos, const render::Vec3& camera_pos,
-                    const render::Mat4& view_projection,
-                    std::vector<render::Rhi::DrawItem>* items, CityDrawStats* city_stats) {
+                    const render::Mat4& view_projection, const CityDrawOptions& options,
+                    std::vector<render::Rhi::DrawItem>* items, std::vector<render::Rhi::CityRange>* ranges,
+                    CityDrawStats* city_stats) {
   if (civ == nullptr) return;
   // A finished worker build: commit its meshes to the entry.
   if (civ->pending.active && civ->pending.future.valid() &&
@@ -343,9 +344,12 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
   for (std::size_t i = 0; i < sites.size(); ++i) {
     const gen::Site& site = sites[i];
     CivAnchor::SiteMeshEntry& entry = civ->meshes[i];
-    // Distance from the player to the site centre (surface arc + altitude).
+    // Distance from the player to the site centre (surface arc + height
+    // above the SITE's datum: a settlement on a 5 km mountain is not 5 km
+    // away from a player standing in it).
     const double chord = std::sqrt(gen::chord_sq(player_dir, site.frame.up).to_double()) * R;
-    const double dist = std::sqrt(chord * chord + altitude * altitude);
+    const double above = altitude - site.datum_m;
+    const double dist = std::sqrt(chord * chord + above * above);
     const double range = 40000.0 + 4.0 * site.radius_m;
     if (dist > range) {
       if (entry.mesh != 0) {
@@ -424,6 +428,9 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
           const gen::TerrainField* field_ptr = &field;
           city::SiteBuildStats* stats_ptr = &pend.stats;
           std::vector<city::MaterialDesc>* materials_ptr = &pend.materials;
+          std::printf("city: building site %u (%s) at %.0f m%s\n", site.province,
+                      gen::to_string(static_cast<gen::SettlementTier>(site.tier)), dist,
+                      bp.focus_radius_m > 0.0 ? " (focus)" : "");
           pend.future = std::async(std::launch::async, [sites_ptr, site_ptr, field_ptr, bp, stats_ptr, materials_ptr]() {
             city::Scene scene;
             city::build_site_scene(*sites_ptr, *site_ptr, *field_ptr, bp, &scene, stats_ptr);
@@ -433,7 +440,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
         }
       }
       (void)pending_here;
-      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, items, city_stats);
+      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, options, items, ranges, city_stats);
       if (entry.mesh != 0) {
         CivAnchor::TileEntry as_tile;
         as_tile.mesh = entry.mesh;

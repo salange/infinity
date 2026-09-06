@@ -55,8 +55,16 @@ struct TowerSpec {
 };
 
 // Builds the tower at `centre` with its ground at `base_y`. detail: 2 full,
-// 1 near context (no mullion boxes, coarser members), 0 far context.
+// 1 near context (no mullion boxes, coarser members), 0 far context,
+// -1 the far shell (one quad per plan segment and a roof, beyond ~1.2 km).
 void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rng rng, int detail);
+
+// Far-level facade patterns (T0022 C.2): from the far detail levels
+// the lattice members, fins and louvre blades are a band-limited pattern
+// the shader draws on the glass instead of sub-pixel geometry. Off keeps
+// the geometry for comparison. Process-wide, default on.
+void set_far_patterns(bool on);
+bool far_patterns();
 
 // Named families (the hero buildings), with their parameters exposed.
 TowerSpec spec_diagrid(float half, int floors);
@@ -72,8 +80,8 @@ TowerSpec random_tower(Rng& rng, float footprint_half, int max_floors);
 // Cheaper variant for the far ring.
 TowerSpec random_context_tower(Rng& rng, float footprint_half, int max_floors);
 
-// Shared podium with two or three towers of one family.
-void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail);
+// Shared podium with two or three towers of one family, its ground at base_y.
+void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, float base_y, int detail);
 
 // Helpers shared with the site generator.
 Vec3 P3(Vec2 xz, float y);

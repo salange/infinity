@@ -46,7 +46,9 @@ struct TowerBlockInput {
   LotInput block;          // footprint = the sidewalk plate, ground_y = its top
   int max_floors{24};
   bool heroes{false};
+  bool groups{false};      // tower groups on a shared podium allowed
   int forced_family{-1};   // 0 diagrid, 1 lens, 2 finweave, 3 xframe, 4 hex, 5 sail
+  int finest_level{0};     // the finest detail level this tower carries (geometry budget)
 };
 
 class Architecture {
@@ -58,9 +60,10 @@ class Architecture {
   // One lot. detail: 2 full, 1 near context, 0 far context.
   virtual LotBuildResult build_lot(Scene& sc, const LotInput& lot, Rng rng, int detail) const = 0;
   // A key building at `centre` facing `rot`, `half` metres of half extent,
-  // ground at `y`.
+  // ground at `y`; `stage` is the settlement's capitol stage (0 outpost …
+  // 5 capital) for the buildings that grow with it.
   virtual void build_key(Scene& sc, KeyRole role, Vec2 centre, float rot, float half, float y, Rng rng,
-                         int detail) const = 0;
+                         int detail, int stage = 4) const = 0;
   // One tower on a whole block, with its plaza floor and hedges.
   virtual void build_tower_block(Scene& sc, const TowerBlockInput& in, Rng rng, int detail) const = 0;
 };

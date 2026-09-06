@@ -66,14 +66,20 @@ std::vector<MaterialDesc> TechArchitecture::materials() const { return make_mate
 
 namespace {
 
-// The tower itself: three levels in a group at full detail (switched by
-// the camera at 200 m and 500 m), one level otherwise.
-void emit_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float ground_y, float inradius, Rng tr, int detail) {
+// The tower itself: its detail levels in one group at full detail
+// (switched by the camera at 200 m and 500 m), starting at the finest
+// level its geometry budget allows (T0022 A.3: a level a tower lacks is
+// the next coarser one); one level otherwise.
+void emit_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float ground_y, float inradius, Rng tr, int detail,
+                int finest) {
   if (detail >= 2) {
+    // Levels 0-2 are the real geometry (switched at 200 and 500 m), level
+    // 3 the far shell beyond 1.2 km (T0022 B.1); shadows come from the
+    // coarsest real level.
     const int group = sc.lod_groups++;
     const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
-    const float switch_m[3] = {200.0f, 500.0f, 1e30f};
-    for (int level = 0; level < 3; ++level) {
+    const float switch_m[4] = {200.0f, 500.0f, 1200.0f, 1e30f};
+    for (int level = std::clamp(finest, 0, 2); level < 4; ++level) {
       const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
       build_tower(sc, spec, centre, ground_y, tr, 2 - level);
       sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
@@ -81,7 +87,24 @@ void emit_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float ground_y, f
                         level, switch_m[level]);
     }
   } else {
-    build_tower(sc, spec, centre, ground_y, tr, detail);
+    build_tower(sc, spec, centre, ground_y, tr, std::min(detail, 2 - std::clamp(finest, 0, 2)));
+  }
+}
+
+// A group of two or three towers of one family on a shared podium, the
+// same levels as a single tower.
+void emit_tower_group(Scene& sc, Rng gr, Vec2 centre, float rot, float ground_y, float inradius, int detail, int finest) {
+  if (detail >= 2) {
+    const int group = sc.lod_groups++;
+    const float switch_m[4] = {200.0f, 500.0f, 1200.0f, 1e30f};
+    for (int level = std::clamp(finest, 0, 2); level < 4; ++level) {
+      const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
+      build_tower_group(sc, gr, centre, rot, ground_y, 2 - level);
+      sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
+                        Vec3{centre.x, ground_y + 90.0f, centre.y}, 90.0f + inradius + 2.0f, group, level, switch_m[level]);
+    }
+  } else {
+    build_tower_group(sc, gr, centre, rot, ground_y, std::min(detail, 2 - std::clamp(finest, 0, 2)));
   }
 }
 
@@ -170,7 +193,7 @@ LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng r
     if (detail >= 1 && lot.style.ornament > 0.2f) {
       build_hedge_ring(sc, lot.footprint, 1.5f, 0.8f, 0.8f, lot.ground_y, 20.0f, rng);
     }
-    emit_tower(sc, spec, lot.centre, lot.ground_y, inradius, rng.child(8), detail);
+    emit_tower(sc, spec, lot.centre, lot.ground_y, inradius, rng.child(8), detail, 0);
     out.tower = true;
     out.built = true;
     return out;
@@ -214,10 +237,10 @@ LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng r
 }
 
 void TechArchitecture::build_key(Scene& sc, KeyRole role, Vec2 centre, float rot, float half, float y, Rng rng,
-                                 int detail) const {
+                                 int detail, int stage) const {
   switch (role) {
     case KeyRole::Government:
-      build_government(sc, centre, rot, half, y, rng, detail);
+      build_government(sc, centre, rot, half, y, rng, detail, stage);
       break;
     case KeyRole::UnificationRing:
       build_unification_ring(sc, centre, y, half, rot, detail);
@@ -239,6 +262,15 @@ void TechArchitecture::build_tower_block(Scene& sc, const TowerBlockInput& in, R
   const float half = std::min(inrad - 9.0f, 20.0f);
   if (half < 8.0f) return;
   const int max_floors = std::max(10, in.max_floors);
+  if (in.groups && inrad > 40.0f && in.forced_family < 0 && rng.chance(0.25f)) {
+    // A tower group on a shared podium (the demo's rule for the big
+    // classes): the plaza floor, then the podium with its towers.
+    const float grot = b.rotation + (rng.chance(0.5f) ? 0.0f : kPi * 0.5f);
+    Emit floor(&sc.opaque, M_PLAZA);
+    floor.polygon(plan_offset(b.footprint, -1.0f), b.ground_y + 0.01f, true);
+    emit_tower_group(sc, rng.child(7), b.centre, grot, b.ground_y, inrad, detail, in.finest_level);
+    return;
+  }
   TowerSpec spec = random_tower(rng, half, max_floors);
   if (in.forced_family >= 0) {
     // The core of a metropolis shows every family, in a fixed order.
@@ -258,7 +290,7 @@ void TechArchitecture::build_tower_block(Scene& sc, const TowerBlockInput& in, R
   Emit floor(&sc.opaque, M_PLAZA);
   floor.polygon(plan_offset(b.footprint, -1.0f), b.ground_y + 0.01f, true);
   build_hedge_ring(sc, b.footprint, 2.5f, 0.9f, 0.8f, b.ground_y, 20.0f, rng);
-  emit_tower(sc, spec, b.centre, b.ground_y, inrad, rng.child(8), detail);
+  emit_tower(sc, spec, b.centre, b.ground_y, inrad, rng.child(8), detail, in.finest_level);
 }
 
 const TechArchitecture& instance() {

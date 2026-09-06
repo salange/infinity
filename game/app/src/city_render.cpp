@@ -133,28 +133,40 @@ CityUploadData prepare_city_upload(const city::Scene& scene, const gen::SiteFram
     out[1] = static_cast<float>(ex[1] * x - ny[1] * z + uz[1] * y);
     out[2] = static_cast<float>(ex[2] * x - ny[2] * z + uz[2] * y);
   };
+  const auto unit = [](float* v) {
+    const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (l > 1e-12f) {
+      v[0] /= l;
+      v[1] /= l;
+      v[2] /= l;
+    } else {
+      v[0] = 0.0f;
+      v[1] = 1.0f;
+      v[2] = 0.0f;
+    }
+  };
+  // Placed on the sphere, rotated by the frame, packed into the
+  // renderer's 32-byte layout (T0022 B.1).
   const auto convert_vertex = [&](const city::Vertex& v, render::Rhi::CityVertex* o) {
     double p[3];
     place(v.position.x, v.position.y, v.position.z, p);
-    o->position[0] = static_cast<float>(p[0]);
-    o->position[1] = static_cast<float>(p[1]);
-    o->position[2] = static_cast<float>(p[2]);
-    rotate(v.normal.x, v.normal.y, v.normal.z, o->normal);
-    rotate(v.tangent.x, v.tangent.y, v.tangent.z, o->tangent);
-    o->tangent[3] = v.tangent.w;
-    o->uv[0] = v.uv.x;
-    o->uv[1] = v.uv.y;
-    o->material = v.material;
-    o->aux[0] = v.aux.x;
-    o->aux[1] = v.aux.y;
-    o->aux[2] = v.aux.z;
-    o->aux[3] = v.aux.w;
+    const float position[3] = {static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2])};
+    float normal[3];
+    float tangent[4];
+    rotate(v.normal.x, v.normal.y, v.normal.z, normal);
+    rotate(v.tangent.x, v.tangent.y, v.tangent.z, tangent);
+    unit(normal);
+    unit(tangent);
+    tangent[3] = v.tangent.w;
+    const float uv[2] = {v.uv.x, v.uv.y};
+    const float aux[4] = {v.aux.x, v.aux.y, v.aux.z, v.aux.w};
+    *o = render::Rhi::pack_city_vertex(position, normal, tangent, uv, v.material, aux);
   };
   // Pieces: ranges are appended in index order with their own vertices,
   // so walking the ranges and cutting whenever the referenced vertex
   // span would exceed the cap yields contiguous spans, and every range
   // lies inside one piece.
-  constexpr std::size_t kMaxPieceVertices = 1400000;  // ~95 MB of city vertices
+  constexpr std::size_t kMaxPieceVertices = 3000000;  // ~92 MB of packed city vertices
   const auto span_of = [](const city::Mesh& mesh, std::uint32_t first, std::uint32_t count, std::uint32_t* lo,
                           std::uint32_t* hi) {
     for (std::uint32_t i = first; i < first + count; ++i) {
@@ -162,7 +174,34 @@ CityUploadData prepare_city_upload(const city::Scene& scene, const gen::SiteFram
       *hi = std::max(*hi, mesh.indices[i]);
     }
   };
-  const auto convert_mesh = [&](const city::Mesh& mesh, const std::vector<city::DrawRange>& ranges, bool foliage) {
+  const auto convert_range = [&](const city::DrawRange& d, const CityUploadData::Piece& piece, std::uint32_t piece_index,
+                                 std::uint32_t index_first, std::uint32_t vmin, const city::Mesh& mesh) {
+    CityUploadData::Range out;
+    out.piece = piece_index;
+    out.first = d.first - index_first;
+    out.count = d.count;
+    out.lod_group = d.lod_group;
+    out.lod_level = d.lod_level;
+    out.lod_max_distance = d.lod_max_distance;
+    out.has_fine = d.has_fine;
+    if (d.radius > 0.0f) {
+      double c[3];
+      place(d.centre.x, d.centre.y, d.centre.z, c);
+      out.centre[0] = static_cast<float>(c[0]);
+      out.centre[1] = static_cast<float>(c[1]);
+      out.centre[2] = static_cast<float>(c[2]);
+      out.radius = d.radius;
+    } else {
+      // Unbounded range: its own vertex span.
+      std::uint32_t lo = 0xFFFFFFFFu;
+      std::uint32_t hi = 0;
+      span_of(mesh, d.first, d.count, &lo, &hi);
+      sphere_of(piece.vertices, lo - vmin, static_cast<std::size_t>(hi - vmin) + 1, out.centre, &out.radius);
+    }
+    return out;
+  };
+  const auto convert_mesh = [&](const city::Mesh& mesh, const std::vector<city::DrawRange>& ranges,
+                                const std::vector<city::DrawRange>& fine, bool foliage) {
     if (mesh.indices.empty()) return;
     std::vector<city::DrawRange> all = ranges;
     if (all.empty()) {
@@ -172,6 +211,7 @@ CityUploadData prepare_city_upload(const city::Scene& scene, const gen::SiteFram
       all.push_back(whole);
     }
     std::size_t r = 0;
+    std::size_t f = 0;  // cursor into the sorted fine ranges
     while (r < all.size()) {
       // Grow a piece over consecutive ranges.
       std::uint32_t vmin = 0xFFFFFFFFu;
@@ -195,37 +235,19 @@ CityUploadData prepare_city_upload(const city::Scene& scene, const gen::SiteFram
       for (std::uint32_t i = index_first; i < index_end; ++i) piece.indices[i - index_first] = mesh.indices[i] - vmin;
       sphere_of(piece.vertices, 0, piece.vertices.size(), piece.centre, &piece.radius);
       const std::uint32_t piece_index = static_cast<std::uint32_t>(up.pieces.size());
-      for (std::size_t k = r; k < end; ++k) {
-        const city::DrawRange& d = all[k];
-        CityUploadData::Range out;
-        out.piece = piece_index;
-        out.first = d.first - index_first;
-        out.count = d.count;
-        out.lod_group = d.lod_group;
-        out.lod_level = d.lod_level;
-        out.lod_max_distance = d.lod_max_distance;
-        if (d.radius > 0.0f) {
-          double c[3];
-          place(d.centre.x, d.centre.y, d.centre.z, c);
-          out.centre[0] = static_cast<float>(c[0]);
-          out.centre[1] = static_cast<float>(c[1]);
-          out.centre[2] = static_cast<float>(c[2]);
-          out.radius = d.radius;
-        } else {
-          // Unbounded range: its own vertex span.
-          std::uint32_t lo = 0xFFFFFFFFu;
-          std::uint32_t hi = 0;
-          span_of(mesh, d.first, d.count, &lo, &hi);
-          sphere_of(piece.vertices, lo - vmin, static_cast<std::size_t>(hi - vmin) + 1, out.centre, &out.radius);
-        }
-        up.ranges.push_back(out);
+      for (std::size_t k = r; k < end; ++k) up.ranges.push_back(convert_range(all[k], piece, piece_index, index_first, vmin, mesh));
+      // The fine ranges that fall inside this piece (both lists are
+      // sorted by first).
+      for (; f < fine.size() && fine[f].first < index_end; ++f) {
+        if (fine[f].first < index_first) continue;
+        up.fine.push_back(convert_range(fine[f], piece, piece_index, index_first, vmin, mesh));
       }
       up.pieces.push_back(std::move(piece));
       r = end;
     }
   };
-  convert_mesh(scene.opaque, scene.draws, false);
-  convert_mesh(scene.foliage, {}, true);
+  convert_mesh(scene.opaque, scene.draws, scene.fine, false);
+  convert_mesh(scene.foliage, {}, {}, true);
   up.triangles = static_cast<std::uint32_t>((scene.opaque.indices.size() + scene.foliage.indices.size()) / 3);
   for (const city::PointLight& l : scene.lights) {
     CityUploadData::Light out;
@@ -265,8 +287,14 @@ CityUpload commit_city_upload(render::Rhi& rhi, CityUploadData&& data) {
     r.piece = piece_map[r.piece];
     up.ranges.push_back(r);
   }
+  for (CityUploadData::Range& r : data.fine) {
+    if (piece_map[r.piece] == 0xFFFFFFFFu) continue;
+    r.piece = piece_map[r.piece];
+    up.fine.push_back(r);
+  }
   data.pieces.clear();
   data.ranges.clear();
+  data.fine.clear();
   return up;
 }
 
@@ -279,11 +307,13 @@ void release_city_upload(render::Rhi& rhi, CityUpload* upload) {
   for (const CityUpload::Piece& piece : upload->pieces) rhi.destroy_mesh(piece.mesh);
   upload->pieces.clear();
   upload->ranges.clear();
+  upload->fine.clear();
   upload->lights.clear();
 }
 
 void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
-                      const render::Mat4& view_projection, std::vector<render::Rhi::DrawItem>* items,
+                      const render::Mat4& view_projection, const CityDrawOptions& options,
+                      std::vector<render::Rhi::DrawItem>* items, std::vector<render::Rhi::CityRange>* ranges,
                       CityDrawStats* stats) {
   if (upload.pieces.empty()) return;
   const render::Vec3 origin{upload.origin[0], upload.origin[1], upload.origin[2]};
@@ -292,17 +322,22 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
   const render::Mat4 mvp = render::mul(view_projection, model);
   constexpr double kTilePeriod = 256.0;
   const Frustum frustum(view_projection);
-  // Level per group: the finest level whose switch distance the camera
-  // is within (the demo's rule).
-  int groups = 0;
-  for (const auto& r : upload.ranges) groups = std::max(groups, r.lod_group + 1);
-  std::vector<int> chosen(static_cast<std::size_t>(groups), 99);
-  std::vector<int> coarsest(static_cast<std::size_t>(groups), -1);
   const auto centre_rel = [&](const CityUploadData::Range& r, float* c) {
     c[0] = static_cast<float>(translation.x) + r.centre[0];
     c[1] = static_cast<float>(translation.y) + r.centre[1];
     c[2] = static_cast<float>(translation.z) + r.centre[2];
   };
+  // Level per group: the finest level whose switch distance the camera
+  // is within (the demo's rule), clamped to the finest level the group
+  // actually has (the geometry budget); the coarsest level; and the
+  // shadow level — the coarsest REAL level (< 3; the far shell of level
+  // 3 casts nothing useful).
+  int groups = 0;
+  for (const auto& r : upload.ranges) groups = std::max(groups, r.lod_group + 1);
+  std::vector<int> chosen(static_cast<std::size_t>(groups), 99);
+  std::vector<int> finest(static_cast<std::size_t>(groups), 99);
+  std::vector<int> coarsest(static_cast<std::size_t>(groups), -1);
+  std::vector<int> shadow_level(static_cast<std::size_t>(groups), -1);
   for (const auto& r : upload.ranges) {
     if (r.lod_group < 0) continue;
     float c[3];
@@ -310,17 +345,112 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
     const float dist = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
     const std::size_t g = static_cast<std::size_t>(r.lod_group);
     if (dist < r.lod_max_distance) chosen[g] = std::min(chosen[g], r.lod_level);
+    finest[g] = std::min(finest[g], r.lod_level);
     coarsest[g] = std::max(coarsest[g], r.lod_level);
+    if (r.lod_level < 3) shadow_level[g] = std::max(shadow_level[g], r.lod_level);
   }
-  const auto emit = [&](const CityUploadData::Range& r, bool main, bool caster) {
-    const CityUpload::Piece& piece = upload.pieces[r.piece];
+  for (std::size_t g = 0; g < chosen.size(); ++g) {
+    chosen[g] = std::min(std::max(chosen[g], finest[g]), coarsest[g]);
+    if (shadow_level[g] < 0) shadow_level[g] = coarsest[g];
+  }
+  if (stats != nullptr) stats->resident_triangles += upload.triangles;
+  // Ranges per piece, in piece order (one item each).
+  std::vector<std::uint32_t> piece_first(upload.pieces.size(), 0);
+  std::vector<std::uint32_t> piece_count(upload.pieces.size(), 0);
+  std::vector<std::vector<render::Rhi::CityRange>> per_piece(upload.pieces.size());
+  const auto emit = [&](const CityUploadData::Range& r, std::uint32_t flags, bool occludable) {
+    render::Rhi::CityRange out;
+    out.first = r.first;
+    out.count = r.count;
+    centre_rel(r, out.centre);
+    out.radius = r.radius;
+    out.flags = flags | (occludable && r.radius > 0.0f ? render::Rhi::kCityOcclude : 0u);
+    per_piece[r.piece].push_back(out);
+    if (stats != nullptr) {
+      if ((flags & render::Rhi::kCityMain) != 0u) stats->drawn_triangles += r.count / 3;
+      if ((flags & (render::Rhi::kCityCastNear | render::Rhi::kCityCastFar)) != 0u) stats->shadow_triangles += r.count / 3;
+    }
+  };
+  const std::uint32_t cast_all = render::Rhi::kCityCastNear | render::Rhi::kCityCastFar;
+  std::size_t fine_cursor = 0;  // the fine ranges are sorted by (piece, first), as the ranges are
+  for (const auto& r : upload.ranges) {
+    float c[3];
+    centre_rel(r, c);
+    const bool in_view = r.radius <= 0.0f || frustum.visible(c, r.radius);
+    const float dist = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+    bool main = false;
+    std::uint32_t casts = 0;
+    bool fine_expand = false;
+    if (r.lod_group < 0) {
+      main = in_view;
+      casts = cast_all;
+      // Far-cascade LOD: bounded ranges more than 350 m away (building
+      // blocks, props) stay out of the far cascade.
+      if (options.shadow_far_lod && r.radius > 0.0f && dist - r.radius > 350.0f) casts = render::Rhi::kCityCastNear;
+      fine_expand = main && r.has_fine && options.fine_ranges;
+    } else {
+      const std::size_t g = static_cast<std::size_t>(r.lod_group);
+      main = r.lod_level == chosen[g] && in_view;
+      const bool has_shell = coarsest[g] == 3;
+      if (r.lod_level == shadow_level[g]) {
+        // The real geometry casts; with the far-cascade LOD the far
+        // cascade takes the shell instead when the group has one.
+        casts = (options.shadow_far_lod && has_shell) ? render::Rhi::kCityCastNear : cast_all;
+      } else if (options.shadow_far_lod && r.lod_level == 3) {
+        casts = render::Rhi::kCityCastFar;
+      }
+    }
+    if (!main && casts == 0) continue;
+    if (fine_expand) {
+      // The block's buildings individually (frustum-tested) with the
+      // gaps between them as unbounded ranges, so nothing is lost; the
+      // block as a whole still casts its shadows in one range.
+      if (casts != 0) emit(r, casts, false);
+      const std::vector<CityUploadData::Range>& fine = upload.fine;
+      while (fine_cursor < fine.size() &&
+             (fine[fine_cursor].piece < r.piece || (fine[fine_cursor].piece == r.piece && fine[fine_cursor].first < r.first))) {
+        ++fine_cursor;
+      }
+      std::uint32_t covered = r.first;
+      std::size_t k = fine_cursor;
+      for (; k < fine.size() && fine[k].piece == r.piece && fine[k].first < r.first + r.count; ++k) {
+        const CityUploadData::Range& fr = fine[k];
+        if (fr.first > covered) {
+          CityUploadData::Range gap;
+          gap.piece = r.piece;
+          gap.first = covered;
+          gap.count = fr.first - covered;
+          emit(gap, render::Rhi::kCityMain, false);
+        }
+        float fc[3];
+        centre_rel(fr, fc);
+        if (frustum.visible(fc, fr.radius)) emit(fr, render::Rhi::kCityMain, true);
+        covered = fr.first + fr.count;
+      }
+      if (covered < r.first + r.count) {
+        CityUploadData::Range gap;
+        gap.piece = r.piece;
+        gap.first = covered;
+        gap.count = r.first + r.count - covered;
+        emit(gap, render::Rhi::kCityMain, false);
+      }
+      continue;
+    }
+    emit(r, (main ? render::Rhi::kCityMain : 0u) | casts, main);
+  }
+  for (std::size_t p = 0; p < upload.pieces.size(); ++p) {
+    if (per_piece[p].empty()) continue;
+    const CityUpload::Piece& piece = upload.pieces[p];
+    piece_first[p] = static_cast<std::uint32_t>(ranges->size());
+    piece_count[p] = static_cast<std::uint32_t>(per_piece[p].size());
+    ranges->insert(ranges->end(), per_piece[p].begin(), per_piece[p].end());
     render::Rhi::DrawItem item;
     item.mesh = piece.mesh;
     item.mode = 8;
-    item.first_index = r.first;
-    item.index_count = r.count;
-    item.shadow_caster = caster;
-    item.shadow_only = !main;
+    item.city_range_first = piece_first[p];
+    item.city_range_count = piece_count[p];
+    item.shadow_caster = true;
+    item.prepass = true;
     std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
     item.aux[0] = static_cast<float>(translation.x);
     item.aux[1] = static_cast<float>(translation.y);
@@ -328,34 +458,11 @@ void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
     item.extra[0] = static_cast<float>(std::fmod(upload.origin[0], kTilePeriod));
     item.extra[1] = static_cast<float>(std::fmod(upload.origin[1], kTilePeriod));
     item.extra[2] = static_cast<float>(std::fmod(upload.origin[2], kTilePeriod));
-    centre_rel(r, item.bounds);
-    item.bounds[3] = r.radius;
+    item.bounds[3] = 0.0f;  // the ranges carry the bounds
     items->push_back(item);
     if (stats != nullptr) {
       ++stats->items;
-      if (main) stats->drawn_triangles += r.count / 3;
-      if (caster) stats->shadow_triangles += r.count / 3;
-    }
-  };
-  if (stats != nullptr) stats->resident_triangles += upload.triangles;
-  for (const auto& r : upload.ranges) {
-    float c[3];
-    centre_rel(r, c);
-    const bool in_view = r.radius <= 0.0f || frustum.visible(c, r.radius);
-    if (r.lod_group < 0) {
-      if (in_view) emit(r, true, true);
-      continue;
-    }
-    const std::size_t g = static_cast<std::size_t>(r.lod_group);
-    const int pick = std::min(chosen[g], coarsest[g]);
-    const bool is_pick = r.lod_level == pick;
-    const bool is_coarsest = r.lod_level == coarsest[g];
-    // The picked level in the main pass; shadows from the coarsest level
-    // (behind the camera too: the cascades cull by their own box).
-    if (is_pick && in_view) {
-      emit(r, true, is_coarsest);
-    } else if (is_coarsest) {
-      emit(r, false, true);
+      stats->ranges += piece_count[p];
     }
   }
 }

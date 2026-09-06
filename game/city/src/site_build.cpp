@@ -96,8 +96,31 @@ bool arterial_crosses(const gen::Site& site, double cx, double cy, double half_d
 }  // namespace
 
 double civic_centre_radius_m(const gen::Site& site) {
-  if (!site.capital || site.style.level < 5) return 0.0;
-  return std::min(110.0, 0.12 * site.radius_m);
+  // Every settlement from a village up has its union square; a capital's
+  // is the largest.
+  if (site.tier < static_cast<int>(gen::SettlementTier::Village)) return 0.0;
+  const double r = std::clamp(0.12 * site.radius_m, 55.0, 110.0);
+  return site.capital ? 110.0 : r;
+}
+
+// Tower rules by tier (the demo's size classes): the tallest tower, the
+// share of inner blocks given to one, whether the hero facade families
+// (diagrid, X-frame, hex lattice) appear.
+// The core is an absolute radius (the demo's cities are 260-900 m across;
+// a 12 km capital's towers still stand in its centre), the density is
+// the demo's scaled to 80 m blocks; the height falls off toward the
+// core's edge.
+struct TowerRules {
+  int max_floors;
+  float density;
+  double core_m;  // full density inside, 0.4 of it out to 1.6 x
+  bool heroes;
+};
+TowerRules tower_rules(const gen::Site& site) {
+  if (site.tier >= static_cast<int>(gen::SettlementTier::Metropolis)) return {52, 0.32f, 450.0, true};
+  if (site.tier >= static_cast<int>(gen::SettlementTier::City)) return {40, 0.26f, 350.0, true};
+  if (site.tier >= static_cast<int>(gen::SettlementTier::Town)) return {24, 0.2f, 250.0, false};
+  return {12, 0.0f, 0.0, false};
 }
 
 void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const gen::TerrainField& field,
@@ -129,6 +152,8 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
   // lamps at the corners, a plaza in the courtyard of the bigger blocks;
   // arterials with medians; overpasses between plazas.
   const SizeClass sizes = size_class(site.style.level);
+  const TowerRules towers = tower_rules(site);
+  int forced_family = 0;
   int tree_budget = sizes.trees;
   int lamp_budget = params.lamp_budget > 0 ? std::min(params.lamp_budget * 3, sizes.lamps) : sizes.lamps;
   const bool streets = site.street_m > 0.0 && site.family != gen::LayoutFamily::Hive &&
@@ -248,6 +273,44 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
         for (const Vec2& p : square) {
           lo = vmin(lo, Vec3{p.x, g - 1.0f, p.y});
           hi = vmax(hi, Vec3{p.x, g + 8.0f, p.y});
+        }
+      }
+      // A tower block: inside the core, one tower takes the whole block
+      // (its lots stand aside — the skyline is the city layer's).
+      if (streets && towers.density > 0.0f) {
+        const double x0 = bx * B;
+        const double y0 = by * B;
+        const double bdist = std::sqrt(bwx * bwx + bwy * bwy);
+        const float t = clampf(static_cast<float>(bdist / (1.6 * towers.core_m)), 0.0f, 1.0f);
+        const float tower_p = bdist < towers.core_m ? towers.density : (bdist < 1.6 * towers.core_m ? towers.density * 0.4f : 0.0f);
+        const bool on_arterial = arterial_crosses(site, bwx, bwy, 0.5 * B * 1.4142);
+        const bool civic_block = civic_r > 0.0 && bwx * bwx + bwy * bwy < (civic_r + 0.7 * B) * (civic_r + 0.7 * B);
+        Rng tr(core::derive_child(buildings_key, gen::kind::Lot,
+                                  0x400000000LL + (static_cast<std::int64_t>(bx) + 4096) * 8192 + (static_cast<std::int64_t>(by) + 4096)));
+        if (!on_arterial && !civic_block && B - 2.0 * hs >= 38.0 && tr.chance(tower_p)) {
+          TowerBlockInput in_t;
+          in_t.block.footprint = lattice_rect(x0 + hs, y0 + hs, x0 + B - hs, y0 + B - hs);
+          in_t.block.centre = plan_centroid(in_t.block.footprint);
+          const Vec2 e = lattice_to_scene(x0 + B, y0) - lattice_to_scene(x0, y0);
+          in_t.block.rotation = std::atan2(e.y, e.x);
+          in_t.block.ground_y = static_cast<float>(ground_z(bwx, bwy)) + kCurb;
+          in_t.block.t = t;
+          in_t.block.style = site.style;
+          in_t.block.usage = gen::LotUsage::Civic;
+          in_t.max_floors = std::max(10, static_cast<int>(static_cast<float>(towers.max_floors) * (1.0f - 0.6f * t)));
+          in_t.heroes = towers.heroes;
+          if (towers.heroes && site.tier >= static_cast<int>(gen::SettlementTier::Metropolis) && forced_family < 6 && t < 0.5f) {
+            in_t.forced_family = forced_family++;
+          }
+          const std::uint32_t tower_first = static_cast<std::uint32_t>(sc.opaque.indices.size());
+          site_arch.build_tower_block(sc, in_t, tr.child(1), block_detail);
+          const std::uint32_t tris = (static_cast<std::uint32_t>(sc.opaque.indices.size()) - tower_first) / 3;
+          if (tris > 0) {
+            ++st.towers;
+            st.max_tower_triangles = std::max(st.max_tower_triangles, tris);
+            hi = vmax(hi, Vec3{hi.x, in_t.block.ground_y + static_cast<float>(in_t.max_floors) * 4.5f + 20.0f, hi.z});
+            lots.clear();  // the block is the tower's
+          }
         }
       }
       for (const gen::Lot& lot : lots) {
@@ -447,10 +510,50 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
     site_arch.build_key(sc, KeyRole::UnificationRing, axis * (half * 1.7f), rot + kPi * 0.5f,
                         std::min(14.0f, half * 0.35f), y, r.child(2), params.detail);
     build_hedge_ring(sc, plaza, 3.0f, 0.9f, 0.9f, y, 16.0f, r);
+    // Union square: fountains either side of the axis between the two,
+    // round basins in the corners, a ring of trees inside the hedge,
+    // benches at the fountains, lamps around.
+    const float cr = static_cast<float>(civic_r);
+    const Vec2 side{axis.y, -axis.x};
+    const Vec2 mid = axis * (half * 0.55f);
+    for (const float sgn : {-1.0f, 1.0f}) {
+      const Vec2 fc = mid + side * (sgn * cr * 0.5f);
+      build_fountain(sc, fc, std::min(12.0f, cr * 0.11f), y, r, params.detail);
+      for (int k = 0; k < 6; ++k) {
+        const float a = static_cast<float>(k) / 6.0f * 2.0f * kPi + 0.4f;
+        gen_bench(sc, P3(fc + Vec2{std::cos(a), std::sin(a)} * std::min(18.0f, cr * 0.17f), y), a + kPi * 0.5f);
+      }
+    }
+    for (const float sx : {-1.0f, 1.0f}) {
+      for (const float sz : {-1.0f, 1.0f}) {
+        const Vec2 bc = axis * (sz * cr * 0.7f) + side * (sx * cr * 0.7f);
+        build_basin(sc, bc, std::min(9.0f, cr * 0.09f), std::min(9.0f, cr * 0.09f), true, y, 0.4f);
+        gen_planter(sc, r.child(static_cast<std::uint32_t>(60 + static_cast<int>(sx + 1.0f) * 2 + static_cast<int>(sz + 1.0f))),
+                    bc + side * (sx * cr * 0.12f), 4.0f, 1.5f, y);
+      }
+    }
+    if (params.detail >= 1) {
+      // The square's trees are its own (not the site's budget): a ring
+      // inside the hedge and an inner ring around the fountains.
+      const int n_trees = cr > 80.0f ? 24 : 16;
+      for (int k = 0; k < n_trees; ++k) {
+        const float a = static_cast<float>(k) / static_cast<float>(n_trees) * 2.0f * kPi + 0.2f;
+        const Vec2 p{std::cos(a) * cr * 0.84f, std::sin(a) * cr * 0.84f};
+        gen_tree(sc, r.child(static_cast<std::uint32_t>(40 + k)), P3(p, y + 0.02f), r.range(7.0f, 11.0f));
+      }
+      if (cr > 80.0f) {
+        for (int k = 0; k < 12; ++k) {
+          const float a = static_cast<float>(k) / 12.0f * 2.0f * kPi;
+          const Vec2 p{std::cos(a) * cr * 0.55f, std::sin(a) * cr * 0.55f};
+          if (std::fabs(dot(normalize(p), axis)) > 0.8f) continue;  // keep the axis between the two open
+          gen_tree(sc, r.child(static_cast<std::uint32_t>(80 + k)), P3(p, y + 0.02f), r.range(6.0f, 9.0f));
+        }
+      }
+    }
     int lamps = std::min(params.lamp_budget, 12);
     for (int k = 0; k < lamps; ++k) {
       const float a = static_cast<float>(k) / static_cast<float>(lamps) * 2.0f * kPi;
-      const Vec2 p{std::cos(a) * static_cast<float>(civic_r) * 0.8f, std::sin(a) * static_cast<float>(civic_r) * 0.8f};
+      const Vec2 p{std::cos(a) * cr * 0.62f, std::sin(a) * cr * 0.62f};
       gen_lamp(sc, P3(p, y), a + kPi);
     }
     st.key_buildings += 2;

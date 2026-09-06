@@ -39,6 +39,16 @@ struct LotBuildResult {
   bool built{false};
 };
 
+// A whole block given to one tower (the demo's rule): the plate polygon,
+// the tallest allowed tower, whether the hero facade families are
+// allowed here, and a family forced by the layout (-1 = the key picks).
+struct TowerBlockInput {
+  LotInput block;          // footprint = the sidewalk plate, ground_y = its top
+  int max_floors{24};
+  bool heroes{false};
+  int forced_family{-1};   // 0 diagrid, 1 lens, 2 finweave, 3 xframe, 4 hex, 5 sail
+};
+
 class Architecture {
  public:
   virtual ~Architecture() = default;
@@ -51,6 +61,8 @@ class Architecture {
   // ground at `y`.
   virtual void build_key(Scene& sc, KeyRole role, Vec2 centre, float rot, float half, float y, Rng rng,
                          int detail) const = 0;
+  // One tower on a whole block, with its plaza floor and hedges.
+  virtual void build_tower_block(Scene& sc, const TowerBlockInput& in, Rng rng, int detail) const = 0;
 };
 
 // The architecture for a style: by race type and faction type, with the

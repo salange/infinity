@@ -30,6 +30,7 @@ class TechArchitecture final : public Architecture {
   LotBuildResult build_lot(Scene& sc, const LotInput& lot, Rng rng, int detail) const override;
   void build_key(Scene& sc, KeyRole role, Vec2 centre, float rot, float half, float y, Rng rng,
                  int detail) const override;
+  void build_tower_block(Scene& sc, const TowerBlockInput& in, Rng rng, int detail) const override;
 };
 
 const TechArchitecture& instance();

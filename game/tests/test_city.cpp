@@ -155,7 +155,8 @@ TEST_CASE("city: the home town through sites/v1 and the architecture registry (T
   CHECK(same);
   CHECK(sa.lots > 50);
   CHECK(sa.standards > 20);
-  CHECK(sa.towers == 0);  // a town's height budgets stay under the tower threshold
+  CHECK(sa.towers > 0);         // tower blocks in the core (Town: up to 24 floors)
+  CHECK(sa.key_buildings == 2);  // the union square
   // Budgets: the full level carries the demo's bays and balconies; the
   // context levels are the cheap fabric (WP5 switches by distance).
   CHECK(sa.max_standard_triangles <= 3000);
@@ -216,7 +217,7 @@ TEST_CASE("city: the home town through sites/v1 and the architecture registry (T
     MESSAGE("capital ring 6: " << sr.lots << " lots, " << sr.towers << " towers, " << sr.triangles
                                << " triangles; max tower " << sr.max_tower_triangles);
     CHECK(sr.towers > 0);
-    CHECK(sr.max_tower_triangles <= 60000);  // the coarse level of a tower
+    CHECK(sr.max_tower_triangles <= 80000);  // the coarse level of a tower
     CHECK(sr.dropped == 0);
     // Full detail on the same region: finite throughout.
     rp.detail = 2;

@@ -64,6 +64,49 @@ FactionMaterials faction_materials(const gen::StyleVector& style) {
 
 std::vector<MaterialDesc> TechArchitecture::materials() const { return make_materials(); }
 
+namespace {
+
+// The tower itself: three levels in a group at full detail (switched by
+// the camera at 200 m and 500 m), one level otherwise.
+void emit_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float ground_y, float inradius, Rng tr, int detail) {
+  if (detail >= 2) {
+    const int group = sc.lod_groups++;
+    const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
+    const float switch_m[3] = {200.0f, 500.0f, 1e30f};
+    for (int level = 0; level < 3; ++level) {
+      const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
+      build_tower(sc, spec, centre, ground_y, tr, 2 - level);
+      sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
+                        Vec3{centre.x, ground_y + height * 0.5f, centre.y}, height * 0.5f + inradius + 2.0f, group,
+                        level, switch_m[level]);
+    }
+  } else {
+    build_tower(sc, spec, centre, ground_y, tr, detail);
+  }
+}
+
+// Faction materials and facade rules on a tower spec.
+void style_tower(TowerSpec* spec, const FactionMaterials& fm, const gen::StyleVector& style, bool heroes, Rng& rng) {
+  const bool machine = style.faction_type == gen::FactionType::AlignedMachine ||
+                       style.faction_type == gen::FactionType::RenegadeMachine;
+  spec->glass = fm.glass_tower;
+  spec->frame = fm.frame;
+  spec->member = fm.member;
+  const bool hero_facade = spec->facade == FacadeKind::Diagrid || spec->facade == FacadeKind::HexLattice ||
+                           spec->facade == FacadeKind::XFrame;
+  if (machine && !hero_facade) {
+    spec->facade = rng.chance(0.5f) ? FacadeKind::HexLattice : FacadeKind::Diagrid;
+  } else if (!heroes && hero_facade) {
+    spec->facade = rng.chance(0.5f) ? FacadeKind::Curtain : FacadeKind::Ribbon;
+    spec->crown = CrownKind::Parapet;
+  }
+  if (style.faction_type == gen::FactionType::Outlaw && spec->crown == CrownKind::Lantern) {
+    spec->crown = CrownKind::Parapet;
+  }
+}
+
+}  // namespace
+
 LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng rng, int detail) const {
   LotBuildResult out;
   if (lot.footprint.size() < 3) return out;
@@ -72,8 +115,6 @@ LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng r
   const float area = std::fabs(plan_area(lot.footprint));
   const float construction = clampf(lot.style.construction, 0.0f, 1.0f);
   const float height = lot.height_budget * (0.25f + 0.75f * construction);
-  const bool machine = lot.style.faction_type == gen::FactionType::AlignedMachine ||
-                       lot.style.faction_type == gen::FactionType::RenegadeMachine;
   switch (lot.usage) {
     case gen::LotUsage::Pad: {
       build_landing_pad(sc, lot.centre, std::max(6.0f, inradius * 0.9f), lot.ground_y, rng, detail);
@@ -121,16 +162,7 @@ LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng r
     const int max_floors = std::clamp(static_cast<int>(height / 4.0f), 8, 60);
     TowerSpec spec = random_tower(rng, half, max_floors);
     spec.floors = std::min(spec.floors, max_floors);
-    spec.glass = fm.glass_tower;
-    spec.frame = fm.frame;
-    spec.member = fm.member;
-    if (machine && !(spec.facade == FacadeKind::Diagrid || spec.facade == FacadeKind::HexLattice ||
-                     spec.facade == FacadeKind::XFrame)) {
-      spec.facade = rng.chance(0.5f) ? FacadeKind::HexLattice : FacadeKind::Diagrid;
-    }
-    if (lot.style.faction_type == gen::FactionType::Outlaw && spec.crown == CrownKind::Lantern) {
-      spec.crown = CrownKind::Parapet;
-    }
+    style_tower(&spec, fm, lot.style, false, rng);
     spec.rot += lot.rotation;
     // A plaza floor over the lot, then the tower.
     Emit floor(&sc.opaque, fm.floor);
@@ -138,24 +170,7 @@ LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng r
     if (detail >= 1 && lot.style.ornament > 0.2f) {
       build_hedge_ring(sc, lot.footprint, 1.5f, 0.8f, 0.8f, lot.ground_y, 20.0f, rng);
     }
-    const Rng tr = rng.child(8);
-    if (detail >= 2) {
-      // Three levels of the same tower in one group, switched by the
-      // camera's distance (200 m, 500 m): fins, mullions and lattice
-      // members below a pixel alias into moire whenever the camera moves.
-      const int group = sc.lod_groups++;
-      const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
-      const float switch_m[3] = {200.0f, 500.0f, 1e30f};
-      for (int level = 0; level < 3; ++level) {
-        const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
-        build_tower(sc, spec, lot.centre, lot.ground_y, tr, 2 - level);
-        sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
-                          Vec3{lot.centre.x, lot.ground_y + height * 0.5f, lot.centre.y}, height * 0.5f + inradius + 2.0f,
-                          group, level, switch_m[level]);
-      }
-    } else {
-      build_tower(sc, spec, lot.centre, lot.ground_y, tr, detail);
-    }
+    emit_tower(sc, spec, lot.centre, lot.ground_y, inradius, rng.child(8), detail);
     out.tower = true;
     out.built = true;
     return out;
@@ -214,6 +229,36 @@ void TechArchitecture::build_key(Scene& sc, KeyRole role, Vec2 centre, float rot
       build_monument(sc, static_cast<MonumentKind>(rng.irange(0, 3)), centre, y, half / 12.0f, rng, detail);
       break;
   }
+}
+
+void TechArchitecture::build_tower_block(Scene& sc, const TowerBlockInput& in, Rng rng, int detail) const {
+  const LotInput& b = in.block;
+  if (b.footprint.size() < 3) return;
+  const FactionMaterials fm = faction_materials(b.style);
+  const float inrad = plan_inradius(b.footprint);
+  const float half = std::min(inrad - 9.0f, 20.0f);
+  if (half < 8.0f) return;
+  const int max_floors = std::max(10, in.max_floors);
+  TowerSpec spec = random_tower(rng, half, max_floors);
+  if (in.forced_family >= 0) {
+    // The core of a metropolis shows every family, in a fixed order.
+    switch (in.forced_family) {
+      case 0: spec = spec_diagrid(half, max_floors); break;
+      case 1: spec = spec_lens(half * 1.35f, half * 0.55f, max_floors - 4, rng.range(0, kPi)); spec.base = BaseKind::Lobby; break;
+      case 2: spec = spec_finweave(half * 0.95f, max_floors - 8); break;
+      case 3: spec = spec_xframe(half * 1.3f, half * 0.7f, 16); break;
+      case 4: spec = spec_hex(half, max_floors - 6); break;
+      default: spec = spec_sail(half * 1.3f, half * 0.6f, max_floors - 2, rng.range(0, kPi)); spec.base = BaseKind::Podium; break;
+    }
+    spec.random = rng.next();
+  }
+  style_tower(&spec, fm, b.style, in.heroes, rng);
+  spec.rot += b.rotation;
+  // The plaza floor over the plate, hedges around it, then the tower.
+  Emit floor(&sc.opaque, M_PLAZA);
+  floor.polygon(plan_offset(b.footprint, -1.0f), b.ground_y + 0.01f, true);
+  build_hedge_ring(sc, b.footprint, 2.5f, 0.9f, 0.8f, b.ground_y, 20.0f, rng);
+  emit_tower(sc, spec, b.centre, b.ground_y, inrad, rng.child(8), detail);
 }
 
 const TechArchitecture& instance() {

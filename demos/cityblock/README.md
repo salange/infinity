@@ -174,6 +174,33 @@ Materials are three RGBA8 texture arrays (albedo sRGB, tangent normal,
 AO/roughness/height) with CPU mip chains; the sets are CC0 from ambientCG
 listed in `assets/manifest.json`, fetched by `tools/fetch-assets.py`.
 
+### Depth precision
+
+The camera passes use reversed Z (near = 1, far = 0) on a float depth buffer.
+With standard Z and a 0.3 m near plane the depth resolution at 500 m is about
+5 cm, so the ground kit — paths and lawns 1–2 cm above plaza floors and
+sidewalk plates — z-fought a few hundred metres out and flickered between
+materials as the camera moved (visible as the ground changing tint). Reversed
+Z keeps the resolution near 0.1 mm at that distance. The shadow cascades are
+orthographic and stay standard Z. The depth pyramid for occlusion culling
+therefore keeps the *minimum* per 2×2 block, and sky is depth 0.
+
+### Far facade patterns
+
+Beyond the near detail levels the lattice members, fins and louvre blades
+would be thinner than a pixel; as geometry they alias into moiré whenever the
+camera moves. From level 2 on (lattices, 500 m) and from level 1 on (fins and
+blades, 200 m) they are not emitted; instead the glass panels carry a pattern
+code (aux.w: 1 diagrid, 2 x-frame, 3 hex lattice, 4 ribbon fins, 5 fin weave,
+6 louvres, +8 for dark members) and the pattern's module and cell height in
+their uv, and `main.wgsl` draws the pattern analytically: box-filtered line
+coverage from each line family's own screen derivative, falling back to the
+family's mean coverage once a period spans under ~4 px. Nothing is left to
+alias, the far towers keep their look (compare `--showcase-detail 2` with
+`--showcase-detail 0` from 700 m), and the metropolis drops from 8.7 M to
+7.3 M resident triangles. `--no-pattern` restores the member geometry for
+comparison.
+
 ## Performance options
 
 Every option below is a runtime toggle (key) and a flag, so the game can
@@ -204,15 +231,27 @@ ranges drawn vs total and the GPU-occluded count.
 
 ## Measuring temporal artifacts
 
-`--sweep N [--sweep-step m] [--sweep-out name]` renders N frames while the
-camera slides sideways by `step` per frame, reads back each final frame
-and the depth buffer, reprojects every pixel into the previous frame
-(exact for a static world) and subtracts the change a band-limited image
-would show (local gradient × screen motion). What remains is temporal
-aliasing — shimmer, moiré, crawling edges. It prints the mean residual,
-the ten materials that contribute most (via the material-id debug view),
-and writes `name-heat.png` (amplified residual, dark = stable) and
-`name-frame.png`. `--no-taa` measures the MSAA-only path for comparison.
+`--sweep N [--sweep-step m] [--sweep-dir right|forward|down] [--sweep-blur R]
+[--sweep-out name]` renders N frames while the camera moves by `sweep-step`
+per frame (1.2 m is flying at 72 m/s and 60 Hz). Every pixel of a frame is
+reprojected into the previous frame through the depth buffer and the two
+view-projections (exact for a static world), the previous frame is sampled
+there and differenced; half a pixel of local gradient is tolerated as
+resampling blur. What remains is temporal aliasing — shimmer, moiré,
+crawling edges, popping — reported as a luminance and a *chroma* residual
+(colour-only flicker such as z-fighting between materials), attributed per
+material, and written as `name-heat.png`. `--sweep-blur 2` box-blurs both
+frames first so that a well-filtered 1 px line sliding across pixels does not
+count and only low-frequency shimmer does. `--sweep-step 0` measures a
+static camera (TAA convergence). Debug views (`--debug N`, F1) isolate
+albedo, normals, AO, sun, IBL and specular so a residual can be attributed to
+one term.
+
+`--stress N` recreates the render targets N times headless (as resizes and
+option toggles do) as a leak and lifetime check. `--showcase-detail L` builds
+the showcase towers at detail level L (-1 far shell … 2 full) so the levels
+can be compared from one camera.
+
 `--bench N` renders N offscreen frames and prints ms/frame. `--showcase`
 replaces the city with the asset catalog: all tower families, the five
 standard types and the ground kit arranged for one camera. A metropolis

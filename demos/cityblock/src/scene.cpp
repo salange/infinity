@@ -473,8 +473,9 @@ Scene generate_scene(const SceneParams& params) {
   Scene sc;
   sc.materials = make_materials();
   Rng root = root_rng(params.seed);
+  set_far_patterns(params.far_patterns);
   if (params.showcase) {
-    generate_showcase(sc, root.child(200));
+    generate_showcase(sc, root.child(200), params.showcase_detail);
     sc.city_size = "showcase";
     sc.finalize_draws();
     return sc;

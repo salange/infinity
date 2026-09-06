@@ -57,6 +57,8 @@ struct TowerSpec {
 // Builds the tower at `centre` with its ground at `base_y`. detail: 2 full,
 // 1 near context (no mullion boxes, coarser members), 0 far context.
 void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rng rng, int detail);
+// Far-level facade patterns on/off (off: sub-pixel member geometry as before, for comparison).
+void set_far_patterns(bool on);
 
 // Named families (the hero buildings), with their parameters exposed.
 TowerSpec spec_diagrid(float half, int floors);

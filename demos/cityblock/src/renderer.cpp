@@ -243,7 +243,7 @@ struct PostParams {
 // (a,b,c,d) with the inside being positive.
 struct Frustum {
   Vec4 planes[6];
-  static Frustum from(const Mat4& m) {
+  static Frustum from(const Mat4& m, bool reversed_z = false) {
     Frustum f;
     auto row = [&](int r) { return Vec4{m.at(r, 0), m.at(r, 1), m.at(r, 2), m.at(r, 3)}; };
     const Vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
@@ -253,8 +253,9 @@ struct Frustum {
     f.planes[1] = sub(r3, r0);  // right
     f.planes[2] = add(r3, r1);  // bottom
     f.planes[3] = sub(r3, r1);  // top
-    f.planes[4] = r2;           // near (z >= 0)
-    f.planes[5] = sub(r3, r2);  // far
+    // standard Z: 0 <= z <= w; reversed Z swaps which side is near
+    f.planes[4] = reversed_z ? sub(r3, r2) : r2;  // near
+    f.planes[5] = reversed_z ? r2 : sub(r3, r2);  // far
     for (Vec4& p : f.planes) {
       const float l = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
       if (l > 0) { p.x /= l; p.y /= l; p.z /= l; p.w /= l; }
@@ -469,6 +470,7 @@ bool Renderer::init(Gpu* gpu, const std::string& shader_dir, RenderSettings sett
   {
     PipelineOpts o;
     o.module = sm_pre; o.layout = I.prepass_layout; o.fs = "fs_main"; o.color = hdr_fmt; o.depth = WGPUTextureFormat_Depth32Float;
+    o.depth_compare = WGPUCompareFunction_Greater;  // reversed Z
     I.p_prepass = make_pipeline(dev, o);
     o.fs = "fs_foliage"; o.cull = WGPUCullMode_None;
     I.p_prepass_foliage = make_pipeline(dev, o);
@@ -490,7 +492,7 @@ bool Renderer::init(Gpu* gpu, const std::string& shader_dir, RenderSettings sett
     (variant == 0 ? I.p_sky : I.p_sky1) = make_pipeline(dev, o);
     PipelineOpts m;
     m.module = sm_main; m.layout = I.main_layout; m.fs = "fs_main"; m.color = hdr_fmt; m.depth = WGPUTextureFormat_Depth32Float;
-    m.samples = samples;
+    m.samples = samples; m.depth_compare = WGPUCompareFunction_Greater;  // reversed Z
     (variant == 0 ? I.p_main : I.p_main1) = make_pipeline(dev, m);
     m.cull = WGPUCullMode_None; m.alpha_to_coverage = samples > 1;
     (variant == 0 ? I.p_foliage : I.p_foliage1) = make_pipeline(dev, m);
@@ -807,7 +809,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   const float zn = 0.3f, zf = 4000.0f;
   FrameUniform fu{};
   fu.view = camera.view();
-  fu.proj = perspective(camera.fov_y, aspect, zn, zf);
+  fu.proj = perspective_reversed(camera.fov_y, aspect, zn, zf);
   const Mat4 view_proj_clean = mul(fu.proj, fu.view);
   float jx = settings_.jitter_x, jy = settings_.jitter_y;
   const bool taa_on = settings_.taa && settings_.debug_view != 12;
@@ -886,7 +888,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   const bool occlusion_wanted = settings_.occlusion && I.p_cull != nullptr;
   // ---- draw selection: LOD by distance, frustum culling ---------------------------
   {
-    const Frustum frustum = Frustum::from(fu.view_proj);
+    const Frustum frustum = Frustum::from(fu.view_proj, true);  // reversed Z
     I.sel_main.clear();
     I.sel_shadow.clear();
     I.cand.clear();
@@ -1017,12 +1019,14 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     wgpuRenderPassEncoderSetIndexBuffer(pass, I.opaque.indices, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
     for (const auto& r : sel) wgpuRenderPassEncoderDrawIndexed(pass, r.second, 1, r.first, 0, 0);
   };
-  auto depth_attachment = [](WGPUTextureView v, bool clear) {
+  // camera passes use reversed Z (clear to 0, pass if greater); the
+  // orthographic shadow cascades keep standard Z (clear to 1, pass if less)
+  auto depth_attachment = [](WGPUTextureView v, bool clear, float clear_value) {
     WGPURenderPassDepthStencilAttachment a{};
     a.view = v;
     a.depthLoadOp = clear ? WGPULoadOp_Clear : WGPULoadOp_Load;
     a.depthStoreOp = WGPUStoreOp_Store;
-    a.depthClearValue = 1.0f;
+    a.depthClearValue = clear_value;
     return a;
   };
   auto color_attachment = [](WGPUTextureView v, WGPUTextureView resolve, bool clear) {
@@ -1040,7 +1044,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   if (settings_.shadows && I.env->has_sun) {
     for (std::uint32_t c = 0; c < kCascades; ++c) {
       if (!update_cascade[c]) continue;
-      WGPURenderPassDepthStencilAttachment da = depth_attachment(I.shadow_layer_views[c], true);
+      WGPURenderPassDepthStencilAttachment da = depth_attachment(I.shadow_layer_views[c], true, 1.0f);
       WGPURenderPassDescriptor rp{};
       rp.depthStencilAttachment = &da;
       WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
@@ -1060,7 +1064,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   // ---- prepass (depth + view normal) ------------------------------------------------
   if (need_prepass) {
     WGPURenderPassColorAttachment ca = color_attachment(I.normal_pre.view, nullptr, true);
-    WGPURenderPassDepthStencilAttachment da = depth_attachment(I.depth_pre.view, true);
+    WGPURenderPassDepthStencilAttachment da = depth_attachment(I.depth_pre.view, true, 0.0f);
     WGPURenderPassDescriptor rp{};
     rp.colorAttachmentCount = 1;
     rp.colorAttachments = &ca;
@@ -1180,7 +1184,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
   {
     const bool msaa = settings_.msaa > 1;
     WGPURenderPassColorAttachment ca = color_attachment(msaa ? I.hdr_msaa.view : I.hdr.view, msaa ? I.hdr.view : nullptr, true);
-    WGPURenderPassDepthStencilAttachment da = depth_attachment(I.depth_msaa.view, true);
+    WGPURenderPassDepthStencilAttachment da = depth_attachment(I.depth_msaa.view, true, 0.0f);
     WGPURenderPassDescriptor rp{};
     rp.colorAttachmentCount = 1;
     rp.colorAttachments = &ca;
@@ -1223,7 +1227,7 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
   };
-  const bool run_taa = taa_on && settings_.ssao;  // needs the 1x depth of the prepass
+  const bool run_taa = taa_on;  // the prepass (1x depth) runs whenever TAA is on
   const int par = I.taa_parity;
   if (run_taa) {
     struct TaaUniform { Mat4 inv_vp; Mat4 prev_vp; Vec4 params; Vec4 jitter; } tu;

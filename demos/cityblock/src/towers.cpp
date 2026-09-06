@@ -17,6 +17,52 @@ void wall_quad(Emit& e, Vec3 A, Vec3 B, Vec3 C, Vec3 D, Vec2 uvA, Vec2 uvB, Vec2
 
 int sides_for(int detail, int full) { return std::max(4, detail >= 2 ? full : (detail == 1 ? full * 2 / 3 : full / 2)); }
 
+// ---- analytic facade patterns -------------------------------------------------
+// At the far detail levels the lattice members, fins and louvre blades would
+// be thinner than a pixel and alias into moire whenever the camera moves.
+// They are not emitted as geometry there; instead the glass panels carry a
+// pattern code in aux.w (1 diagrid, 2 x-frame, 3 hex lattice, 4 ribbon fins,
+// 5 fin weave, 6 louvres; +8 for dark members) and the pattern's module and
+// cell height in uv, and the shader draws the pattern band-limited.
+bool g_far_patterns = true;
+
+int pattern_kind(FacadeKind f) {
+  switch (f) {
+    case FacadeKind::Diagrid: return 1;
+    case FacadeKind::XFrame: return 2;
+    case FacadeKind::HexLattice: return 3;
+    case FacadeKind::Ribbon: return 4;
+    case FacadeKind::FinWeave: return 5;
+    case FacadeKind::Louvre: return 6;
+    default: return 0;
+  }
+}
+bool is_lattice(FacadeKind f) { return f == FacadeKind::Diagrid || f == FacadeKind::XFrame || f == FacadeKind::HexLattice; }
+// Module of the lattice along the perimeter (m): the same rounding as lattice().
+float lattice_module(const TowerSpec& s, float perimeter) {
+  const float module = s.facade == FacadeKind::XFrame ? std::max(6.0f, s.module_w * 3.0f)
+                                                      : (s.facade == FacadeKind::HexLattice ? s.module_w * 1.6f : s.module_w * 2.0f);
+  const int M = std::max(6, static_cast<int>(std::round(perimeter / module)));
+  return perimeter / static_cast<float>(M);
+}
+// Pattern instead of geometry at this detail level? Lattice members (~0.8 m)
+// fall below 1.5 px beyond 500 m (level 2), fins and blades (0.1-0.2 m)
+// below a pixel beyond 200 m (level 1).
+bool pattern_at(const TowerSpec& s, int detail) {
+  if (!g_far_patterns) return false;
+  if (is_lattice(s.facade)) return detail <= 0;
+  return pattern_kind(s.facade) != 0 && detail <= 1;
+}
+struct PatternParams { Vec2 uv; float code; };
+PatternParams pattern_params(const TowerSpec& s, float perimeter) {
+  PatternParams p{};
+  const bool dark = s.member == M_BRONZE || s.member == M_DARK_METAL;
+  p.code = static_cast<float>(pattern_kind(s.facade) + (dark ? 8 : 0)) / 127.0f;
+  if (is_lattice(s.facade)) p.uv = Vec2{lattice_module(s, perimeter), static_cast<float>(std::max(1, s.lattice_rows)) * s.floor_h};
+  else p.uv = Vec2{s.module_w, s.floor_h};
+  return p;
+}
+
 std::vector<Vec2> base_plan(const TowerSpec& s, int detail) {
   const int seg = detail >= 2 ? 96 : (detail == 1 ? 48 : (detail == 0 ? 24 : 12));
   switch (s.plan) {
@@ -94,6 +140,18 @@ void panel_glass(Ctx& c, Vec3 A, Vec3 B, Vec3 C, Vec3 D, float u0, float u1, flo
   Emit g(c.mesh, glass);
   g.element_random = c.s->random;
   const Vec3 rec = n3 * (-recess);
+  if (pattern_at(*c.s, c.detail)) {
+    // facade coordinates from the position (aux), pattern parameters in uv
+    const PatternParams pp = pattern_params(*c.s, plan_perimeter(c.prof.at(0)));
+    const Vec3 along = normalize(B - A);
+    g.facade = true;
+    g.facade_u = along;
+    g.facade_v = Vec3{0, 1, 0};
+    g.facade_origin = Vec3{A.x - along.x * u0, 0.0f, A.z - along.z * u0};
+    g.occlusion = pp.code;
+    wall_quad(g, A + rec, B + rec, C + rec, D + rec, pp.uv, pp.uv, pp.uv, pp.uv);
+    return;
+  }
   wall_quad(g, A + rec, B + rec, C + rec, D + rec, Vec2{u0, y0}, Vec2{u1, y0}, Vec2{u1, y1}, Vec2{u0, y1});
 }
 
@@ -124,7 +182,8 @@ void facade_floor(Ctx& c, int f, const std::vector<Vec2>& p0, const std::vector<
   const std::size_t n = p0.size();
   float u = 0.0f;
   const float recess = (s.facade == FacadeKind::Sail) ? 0.0f : 0.06f;
-  const bool boxes = c.detail >= 2 || (c.detail == 1 && (s.facade == FacadeKind::Ribbon || s.facade == FacadeKind::FinWeave));
+  // below full detail, fins and blades are the shader's pattern (unless disabled for comparison)
+  const bool boxes = c.detail >= 2 || (!g_far_patterns && c.detail == 1 && (s.facade == FacadeKind::Ribbon || s.facade == FacadeKind::FinWeave));
   const float sp = s.spandrel_h;
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t j = (i + 1) % n;
@@ -162,7 +221,7 @@ void facade_floor(Ctx& c, int f, const std::vector<Vec2>& p0, const std::vector<
           break;
         case FacadeKind::FinWeave: {
           if (boxes) panel_transom(c, D, C, n3, along, 0.45f, 0.1f, recess);
-          if (c.detail >= 1) {
+          if (c.detail >= (g_far_patterns ? 2 : 1)) {
             Emit fin(c.mesh, s.member);
             fin.occlusion = 0.95f;
             const float shift = (f % 2) ? 0.5f : 0.0f;
@@ -175,7 +234,7 @@ void facade_floor(Ctx& c, int f, const std::vector<Vec2>& p0, const std::vector<
         }
         case FacadeKind::Louvre: {
           if (boxes) panel_mullion(c, A, D, n3, along, 0.06f, 0.1f, recess);
-          if (c.detail >= 1) {
+          if (c.detail >= (g_far_patterns ? 2 : 1)) {
             Emit bl(c.mesh, s.member);
             bl.occlusion = 0.95f;
             const int blades = c.detail >= 2 ? 4 : 2;
@@ -483,23 +542,26 @@ void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rn
     Emit g(&sc.opaque, spec.glass);
     g.element_random = spec.random;
     const std::vector<Vec2> p1 = prof.at(spec.floors);
+    // lattices, fins and blades: the shader's band-limited pattern on the glass
+    const bool pattern = g_far_patterns && pattern_kind(spec.facade) != 0;
+    const PatternParams pp = pattern_params(spec, plan_perimeter(p0));
+    if (pattern) { g.facade = true; g.facade_v = Vec3{0, 1, 0}; g.occlusion = pp.code; }
     float u = 0.0f;
     for (std::size_t i = 0; i < p0.size(); ++i) {
       const std::size_t j = (i + 1) % p0.size();
       const float w = length(p0[j] - p0[i]);
-      g.quad(P3(p0[j], y0), P3(p0[i], y0), P3(p1[i], y1), P3(p1[j], y1), QuadUV{{u + w, y0}, {u, y0}, {u, y1}, {u + w, y1}});
+      if (pattern) {
+        const Vec3 along = normalize(P3(p0[j], 0.0f) - P3(p0[i], 0.0f));
+        g.facade_u = along;
+        g.facade_origin = P3(p0[i], 0.0f) - along * u;
+        g.quad(P3(p0[j], y0), P3(p0[i], y0), P3(p1[i], y1), P3(p1[j], y1), QuadUV{pp.uv, pp.uv, pp.uv, pp.uv});
+      } else {
+        g.quad(P3(p0[j], y0), P3(p0[i], y0), P3(p1[i], y1), P3(p1[j], y1), QuadUV{{u + w, y0}, {u, y0}, {u, y1}, {u + w, y1}});
+      }
       u += w;
     }
     Emit roof(&sc.opaque, M_ROOF);
     roof.polygon(p1, y1, true);
-    if (spec.facade == FacadeKind::Diagrid || spec.facade == FacadeKind::XFrame || spec.facade == FacadeKind::HexLattice) {
-      // lattice towers read white from afar: a thin bright ring per lattice cell
-      Emit band(&sc.opaque, spec.member);
-      const float cell = static_cast<float>(std::max(1, spec.lattice_rows)) * spec.floor_h;
-      for (float y = y0 + bh; y < y1; y += cell * 2.0f) {
-        band.wall(plan_offset(prof.at(static_cast<int>((y - y0) / spec.floor_h)), 0.3f), y, y + 0.35f, true, true);
-      }
-    }
     return;
   }
   Ctx c{&sc, &sc.opaque, &spec, Profile{&spec, base_plan(spec, detail), centre}, rng, detail, base_y, base_y};
@@ -530,7 +592,7 @@ void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rn
     }
   }
   const float top = shaft_base + spec.floor_h * static_cast<float>(spec.floors);
-  if (lattice_facade) {
+  if (lattice_facade && detail >= (g_far_patterns ? 1 : 0)) {  // beyond 500 m the glass pattern carries the lattice
     int rows = std::max(1, spec.floors / std::max(1, spec.lattice_rows));
     if (spec.facade == FacadeKind::HexLattice) rows = std::max(1, static_cast<int>(std::ceil(static_cast<float>(rows) / 0.75f)) - 1);
     const int extra = spec.crown == CrownKind::Lattice ? 2 : 0;
@@ -734,5 +796,7 @@ void roof_equipment(Mesh& mesh, Rng& rng, const std::vector<Vec2>& plan, float y
     if (--count <= 0) break;
   }
 }
+
+void set_far_patterns(bool on) { g_far_patterns = on; }
 
 }  // namespace cb

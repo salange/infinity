@@ -163,6 +163,75 @@ fn interior_color(aux: vec2<f32>, view_ts: vec3<f32>, room: vec4<f32>, seed: f32
   return col;
 }
 
+// ---- analytic facade patterns -----------------------------------------------------
+// Far detail levels carry lattice members, fins and louvre blades as a pattern
+// on the glass instead of geometry: code in aux.w (1 diagrid, 2 x-frame,
+// 3 hex lattice, 4 ribbon fins, 5 fin weave, 6 louvres; +8 dark members),
+// module and cell height (m) in uv. Drawn band-limited: exact coverage while
+// a cell spans several pixels, the pattern's mean coverage once it does not.
+fn sd_seg(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+  let ab = b - a;
+  let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+  return length(p - a - ab * t);
+}
+// Anti-aliased coverage of the periodic line family f = integer: `wpx` is
+// the pixel footprint of f (periods per pixel, from its screen derivative),
+// `rr` the member half width in periods. Box-filtered while a period spans
+// pixels; the family's mean coverage once it spans under ~4 px, where even
+// the filtered pattern would alias.
+fn line_cov(f: f32, wpx_in: f32, rr: f32) -> f32 {
+  let wpx = max(wpx_in, 1e-5);
+  let d = abs(fract(f + 0.5) - 0.5);
+  let exact = clamp((rr + 0.5 * wpx - d) / wpx, 0.0, 1.0);
+  let mean = min(2.0 * rr, 1.0);
+  return mix(mean, exact, clamp((1.0 / wpx - 2.0) / 2.0, 0.0, 1.0));
+}
+fn cov_union(a: f32, b: f32) -> f32 { return 1.0 - (1.0 - a) * (1.0 - b); }
+// pixel footprint (fwidth) of the linear function a*u + b*y of the facade
+// coordinates, from their screen derivatives dax = dpdx(uv), day = dpdy(uv)
+fn fw_lin(a: f32, b: f32, dax: vec2<f32>, day: vec2<f32>) -> f32 {
+  return abs(a * dax.x + b * dax.y) + abs(a * day.x + b * day.y);
+}
+// Coverage of the facade pattern `kind` at facade point p (m), module M, cell H.
+fn pattern_cov(kind: u32, p: vec2<f32>, M: f32, H: f32, dax: vec2<f32>, day: vec2<f32>) -> f32 {
+  if (kind == 1u || kind == 2u) {
+    // diagonals through the cell corners (both directions), x-frame adds the chords
+    let gd = sqrt(1.0 / (M * M) + 1.0 / (H * H));  // |grad f| in 1/m
+    let r = select(0.42, 0.5, kind == 2u) * gd;    // half width in periods
+    let f1 = p.x / M + p.y / H;
+    let f2 = p.x / M - p.y / H;
+    var c = cov_union(line_cov(f1, fw_lin(1.0 / M, 1.0 / H, dax, day), r), line_cov(f2, fw_lin(1.0 / M, -1.0 / H, dax, day), r));
+    if (kind == 2u) { c = cov_union(c, line_cov(p.y / H, fw_lin(0.0, 1.0 / H, dax, day), 0.5 / H)); }
+    return c;
+  } else if (kind == 3u) {
+    // hex lattice: rows 0.75 cells apart, odd rows shifted half a module (see lattice())
+    let rowh = 0.75 * H;
+    let j = floor(p.y / rowh);
+    let yy = p.y - j * rowh;
+    let shift = select(0.0, 0.5, (i32(j) & 1) == 1);
+    let xx = fract(p.x / M - shift) * M;
+    let dv = length(vec2<f32>(min(xx, M - xx), max(0.0, 0.25 * H - yy)));  // vertical sides
+    let q = vec2<f32>(xx, yy);
+    let dz = min(sd_seg(q, vec2<f32>(0.0, 0.25 * H), vec2<f32>(0.5 * M, 0.0)),
+                 sd_seg(q, vec2<f32>(0.5 * M, 0.0), vec2<f32>(M, 0.25 * H)));  // zigzag
+    let d = min(dv, dz);
+    let fd = max(0.5 * (fw_lin(1.0, 0.0, dax, day) + fw_lin(0.0, 1.0, dax, day)), 1e-4);  // metres per pixel
+    let r = 0.3;
+    let exact = clamp((r + 0.5 * fd - d) / fd, 0.0, 1.0);
+    let mean = clamp(2.0 * r * (0.5 * H + 2.0 * sqrt(0.25 * M * M + H * H / 16.0)) / (M * rowh), 0.0, 1.0);
+    return mix(mean, exact, clamp((min(M, rowh) / fd - 2.0) / 2.0, 0.0, 1.0));
+  } else if (kind == 4u) {
+    return line_cov(p.y / H, fw_lin(0.0, 1.0 / H, dax, day), 0.26 / H);  // a fin ledge at every floor line
+  } else if (kind == 5u) {
+    // vertical fins, one per module, shifted half a module on odd floors
+    let shift = select(0.0, 0.5, (i32(floor(p.y / H)) & 1) == 1);
+    return line_cov(p.x / M - 0.5 - shift, fw_lin(1.0 / M, 0.0, dax, day), 0.16 / M);
+  } else if (kind == 6u) {
+    return line_cov(2.0 * p.y / H, fw_lin(0.0, 2.0 / H, dax, day), 0.18 * 2.0 / H);  // two blades per floor
+  }
+  return 0.0;
+}
+
 struct FsOut { @location(0) color: vec4<f32> };
 
 @fragment fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> FsOut {
@@ -281,6 +350,8 @@ struct FsOut { @location(0) color: vec4<f32> };
     // Distance LOD: when a room spans few pixels, fade the parallax detail
     // toward the room's mean so the facade does not alias into moire.
     let fw = fwidth(in.aux.xy);
+    let dax = dpdx(in.aux.xy);
+    let day = dpdy(in.aux.xy);
     let px_per_room = m.room.x / max(fw.x, 1e-4);
     let detail = clamp((px_per_room - 6.0) / 30.0, 0.0, 1.0);
     let cell = floor(in.aux.xy / m.room.xy);
@@ -310,6 +381,22 @@ struct FsOut { @location(0) color: vec4<f32> };
     let tint = m.misc.yzw;
     color = refl * brdf + sun * spec_sun * shadow + inside * (1.0 - brdf) * tint;
     color = mix(color, vec3<f32>(0.02, 0.02, 0.022) * (sh_irradiance(N) / PI + sun * ndl * shadow / PI), frame_line * 0.85);
+    // far-level facade pattern (lattice members, fins, blades) on the glass
+    let pcode = u32(in.aux.w * 127.0 + 0.5);
+    if (pcode < 16u && (pcode & 7u) != 0u && in.uv.x > 0.0 && in.uv.y > 0.0) {
+      let cov = pattern_cov(pcode & 7u, in.aux.xy, in.uv.x, in.uv.y, dax, day);
+      // members are tubes and ledges lit mostly from above; dark metal members
+      // read as a dim reflection of the sky rather than a diffuse brown
+      let dark = (pcode & 8u) != 0u;
+      let mem_alb = select(vec3<f32>(0.80, 0.80, 0.78), vec3<f32>(0.20, 0.15, 0.11), dark);
+      let Nm = normalize(N + vec3<f32>(0.0, 0.9, 0.0));
+      let ndl_m = max(dot(Nm, L), 0.0);
+      // the facade's own shadow lookup is biased for a grazing sun and speckles;
+      // look the members up with their own normal
+      let shadow_m = shadow_factor(in.world, Nm, in.view_z, ndl_m, in.pos.xy);
+      let mem_lit = mem_alb * (sh_irradiance(Nm) + sun * ndl_m * shadow_m) / PI;
+      color = mix(color, mem_lit, cov);
+    }
     // dust/dirt on glass: a faint diffuse term
     color += diffuse_color * 0.02 * (sh_irradiance(N) + sun * ndl * shadow) / PI;
   } else {
@@ -385,6 +472,8 @@ struct FsOut { @location(0) color: vec4<f32> };
   else if (dbg == 8) { color = dbg_ibl_s; }
   else if (dbg == 9) { color = dbg_spec; }
   else if (dbg == 12) { color = vec3<f32>(f32(in.material) / 255.0, 0.0, 0.0); }
+
+
   var o: FsOut;
   o.color = vec4<f32>(color, alpha);
   return o;

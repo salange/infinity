@@ -53,9 +53,13 @@ struct Args {
   bool shadow_far_lod{false};
   int size{-1};
   bool showcase{false};
+  int showcase_detail{2};
+  bool no_pattern{false};
+  int sweep_blur{0};
   int sweep{0};
   float sweep_step{0.03f};
   std::string sweep_out{"sweep"};
+  int sweep_dir{0};  // 0 right, 1 forward, 2 down
 };
 
 bool parse_vec3(const char* s, cb::Vec3* v) {
@@ -101,9 +105,13 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
     else if (!std::strcmp(argv[i], "--stress")) a.stress = std::atoi(next("--stress"));
     else if (!std::strcmp(argv[i], "--showcase")) a.showcase = true;
+    else if (!std::strcmp(argv[i], "--no-pattern")) a.no_pattern = true;
+    else if (!std::strcmp(argv[i], "--sweep-blur")) a.sweep_blur = std::atoi(next("--sweep-blur"));
+    else if (!std::strcmp(argv[i], "--showcase-detail")) a.showcase_detail = std::atoi(next("--showcase-detail"));
     else if (!std::strcmp(argv[i], "--sweep")) a.sweep = std::atoi(next("--sweep"));
     else if (!std::strcmp(argv[i], "--sweep-step")) a.sweep_step = static_cast<float>(std::atof(next("--sweep-step")));
     else if (!std::strcmp(argv[i], "--sweep-out")) a.sweep_out = next("--sweep-out");
+    else if (!std::strcmp(argv[i], "--sweep-dir")) { const char* d = next("--sweep-dir"); a.sweep_dir = !std::strcmp(d, "forward") ? 1 : (!std::strcmp(d, "down") ? 2 : 0); }
     else if (!std::strcmp(argv[i], "--size")) {
       const std::string t = next("--size");
       a.size = t == "outpost" ? 0 : (t == "village" ? 1 : (t == "small" ? 2 : (t == "medium" ? 3 : (t == "large" ? 4 : (t == "metropolis" ? 5 : -1)))));
@@ -181,6 +189,8 @@ int main(int argc, char** argv) {
   sp.context_detail = args.context_detail;
   sp.size = args.size;
   sp.showcase = args.showcase;
+  sp.showcase_detail = args.showcase_detail;
+  sp.far_patterns = !args.no_pattern;
   cb::Scene scene = cb::generate_scene(sp);
   std::printf("  city: %s, radius %.0f m, %d blocks, %d towers, %d standard buildings, %d plazas\n", scene.city_size.c_str(),
               scene.city_radius, scene.stats_blocks, scene.stats_towers, scene.stats_standards, scene.stats_plazas);
@@ -233,12 +243,15 @@ int main(int argc, char** argv) {
   cam.look_at_point(args.have_cam ? args.cam_target : scene.camera_target);
 
   if (args.sweep > 0) {
-    // Temporal-artifact analysis under motion. The camera slides sideways
-    // by `sweep_step` per frame; consecutive final frames are differenced,
-    // and the per-pixel screen motion (from the depth buffer and the two
-    // view-projections, exact for a static world) times the local gradient
-    // is subtracted: that is the change a band-limited image would show.
-    // The residual is temporal aliasing: shimmer, moire, crawling edges.
+    // Temporal-artifact analysis under motion. The camera moves by
+    // `sweep_step` per frame (sideways, forward or down). Each pixel of the
+    // current frame is reprojected into the previous frame through the
+    // depth buffer and the two view-projections (exact for a static world),
+    // the previous frame is sampled there bilinearly, and the difference is
+    // taken. A band-limited image would give zero up to resampling blur, so
+    // a tolerance of half a pixel of local gradient is subtracted. What is
+    // left is temporal aliasing: shimmer, moire, crawling edges, popping.
+    // Luminance and chroma are kept apart so colour-only flicker shows up.
     std::vector<std::uint8_t> prev, cur, ids;
     std::vector<float> depth;
     std::uint32_t w = 0, h = 0;
@@ -248,44 +261,87 @@ int main(int argc, char** argv) {
     renderer.read_frame(&ids, &w, &h);
     renderer.settings().debug_view = saved_debug;
     renderer.reset_history();
-    std::vector<float> resid(static_cast<std::size_t>(w) * h, 0.0f), raw(resid.size(), 0.0f);
+    std::vector<float> resid(static_cast<std::size_t>(w) * h, 0.0f), raw(resid.size(), 0.0f), chroma(resid.size(), 0.0f);
     cb::Camera c2 = cam;
     // warm-up so TAA history converges before measuring
     for (int i = 0; i < 12; ++i) renderer.render(c2, 0.0f, nullptr);
     renderer.render(c2, 0.0f, nullptr);
     renderer.read_frame(&prev, &w, &h);
     cb::Mat4 prev_vp = renderer.last_view_proj();
+    // optional box blur (radius sweep_blur) of both frames: a well-filtered
+    // 1 px line still trips the differencing when it moves; the blur leaves
+    // the low-frequency beating (moire, shimmer) that the eye actually sees
+    auto blur = [&](std::vector<std::uint8_t>& img) {
+      const int R = args.sweep_blur;
+      if (R <= 0) return;
+      std::vector<std::uint8_t> tmp(img.size());
+      for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+        int sum = 0, n = 0;
+        for (int k = -R; k <= R; ++k) { const int xx = static_cast<int>(x) + k; if (xx < 0 || xx >= static_cast<int>(w)) continue; sum += img[(static_cast<std::size_t>(y) * w + xx) * 4 + c]; ++n; }
+        tmp[(static_cast<std::size_t>(y) * w + x) * 4 + c] = static_cast<std::uint8_t>(sum / std::max(n, 1));
+      }
+      for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+        int sum = 0, n = 0;
+        for (int k = -R; k <= R; ++k) { const int yy = static_cast<int>(y) + k; if (yy < 0 || yy >= static_cast<int>(h)) continue; sum += tmp[(static_cast<std::size_t>(yy) * w + x) * 4 + c]; ++n; }
+        img[(static_cast<std::size_t>(y) * w + x) * 4 + c] = static_cast<std::uint8_t>(sum / std::max(n, 1));
+      }
+    };
     auto lum = [](const std::vector<std::uint8_t>& img, std::size_t px) {
       return (0.299f * img[px * 4] + 0.587f * img[px * 4 + 1] + 0.114f * img[px * 4 + 2]) / 255.0f;
     };
+    // bilinear sample of one channel (0..2 = rgb, 3 = luminance) at a fractional position
+    auto sample = [&](const std::vector<std::uint8_t>& img, float fx, float fy, int ch) {
+      fx = std::min(std::max(fx, 0.0f), static_cast<float>(w) - 1.001f);
+      fy = std::min(std::max(fy, 0.0f), static_cast<float>(h) - 1.001f);
+      const std::uint32_t x0 = static_cast<std::uint32_t>(fx), y0 = static_cast<std::uint32_t>(fy);
+      const float tx = fx - static_cast<float>(x0), ty = fy - static_cast<float>(y0);
+      auto at = [&](std::uint32_t x, std::uint32_t y) {
+        const std::size_t px = static_cast<std::size_t>(y) * w + x;
+        return ch == 3 ? lum(img, px) : img[px * 4 + static_cast<std::size_t>(ch)] / 255.0f;
+      };
+      return (at(x0, y0) * (1.0f - tx) + at(x0 + 1, y0) * tx) * (1.0f - ty) + (at(x0, y0 + 1) * (1.0f - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+    };
+    blur(prev);
     int measured = 0;
     for (int i = 0; i < args.sweep; ++i) {
-      c2.position += c2.right() * args.sweep_step;
+      if (args.sweep_dir == 1) c2.position += c2.forward() * args.sweep_step;
+      else if (args.sweep_dir == 2) c2.position.y -= args.sweep_step;
+      else c2.position += c2.right() * args.sweep_step;
       renderer.render(c2, static_cast<float>(i + 1) * 0.016f, nullptr);
       renderer.read_frame(&cur, &w, &h);
+      blur(cur);
       renderer.read_depth(&depth, &w, &h);
       const cb::Mat4 cur_vp = renderer.last_view_proj();
       const cb::Mat4 inv_cur = cb::inverse(cur_vp);
       for (std::uint32_t y = 1; y + 1 < h; ++y) {
         for (std::uint32_t x = 1; x + 1 < w; ++x) {
           const std::size_t px = static_cast<std::size_t>(y) * w + x;
-          const float d = std::fabs(lum(cur, px) - lum(prev, px));
-          raw[px] += d;
+          const float lc = lum(cur, px);
+          raw[px] += std::fabs(lc - lum(prev, px));
           // where was this pixel's surface in the previous frame?
           const float z = depth[px];
-          const cb::Vec4 ndc{(static_cast<float>(x) + 0.5f) / w * 2.0f - 1.0f, 1.0f - (static_cast<float>(y) + 0.5f) / h * 2.0f, z, 1.0f};
-          cb::Vec4 wp = cb::mul(inv_cur, ndc);
-          cb::Vec3 world = cb::Vec3{wp.x / wp.w, wp.y / wp.w, wp.z / wp.w};
-          cb::Vec4 pc = cb::mul(prev_vp, cb::Vec4{world, 1.0f});
-          float mx = 0.0f, my = 0.0f;
-          if (pc.w > 1e-4f) {
-            mx = (pc.x / pc.w * 0.5f + 0.5f) * w - (static_cast<float>(x) + 0.5f);
-            my = (0.5f - pc.y / pc.w * 0.5f) * h - (static_cast<float>(y) + 0.5f);
+          float fx = static_cast<float>(x) + 0.5f, fy = static_cast<float>(y) + 0.5f;
+          if (z > 1e-7f) {  // not sky (reversed Z)
+            const cb::Vec4 ndc{fx / w * 2.0f - 1.0f, 1.0f - fy / h * 2.0f, z, 1.0f};
+            cb::Vec4 wp = cb::mul(inv_cur, ndc);
+            cb::Vec3 world = cb::Vec3{wp.x / wp.w, wp.y / wp.w, wp.z / wp.w};
+            cb::Vec4 pc = cb::mul(prev_vp, cb::Vec4{world, 1.0f});
+            if (pc.w <= 1e-4f) continue;
+            fx = (pc.x / pc.w * 0.5f + 0.5f) * w;
+            fy = (0.5f - pc.y / pc.w * 0.5f) * h;
+            if (fx < 1.0f || fy < 1.0f || fx > w - 2.0f || fy > h - 2.0f) continue;  // came from off-screen
           }
+          const float lp = sample(prev, fx - 0.5f, fy - 0.5f, 3);
           const float gx = 0.5f * std::fabs(lum(cur, px + 1) - lum(cur, px - 1));
           const float gy = 0.5f * std::fabs(lum(cur, px + w) - lum(cur, px - w));
-          const float expected = std::fabs(mx) * gx + std::fabs(my) * gy;
-          resid[px] += std::max(0.0f, d - 1.5f * expected - 0.004f);
+          const float tol = 0.5f * (gx + gy) + 0.004f;
+          resid[px] += std::max(0.0f, std::fabs(lc - lp) - tol);
+          // chroma: red and blue relative to green, the same tolerance rule
+          const float rc = cur[px * 4] / 255.0f - cur[px * 4 + 1] / 255.0f;
+          const float bc = cur[px * 4 + 2] / 255.0f - cur[px * 4 + 1] / 255.0f;
+          const float rp = sample(prev, fx - 0.5f, fy - 0.5f, 0) - sample(prev, fx - 0.5f, fy - 0.5f, 1);
+          const float bp = sample(prev, fx - 0.5f, fy - 0.5f, 2) - sample(prev, fx - 0.5f, fy - 0.5f, 1);
+          chroma[px] += std::max(0.0f, 0.5f * (std::fabs(rc - rp) + std::fabs(bc - bp)) - tol);
         }
       }
       prev.swap(cur);
@@ -293,36 +349,39 @@ int main(int argc, char** argv) {
       ++measured;
     }
     const float norm = 1.0f / static_cast<float>(std::max(measured, 1));
-    double mat_sum[256] = {}, mat_cnt[256] = {}, total = 0.0, total_raw = 0.0;
+    double mat_sum[256] = {}, mat_cnt[256] = {}, mat_chroma[256] = {}, total = 0.0, total_raw = 0.0, total_chroma = 0.0;
     std::vector<std::uint8_t> heat(static_cast<std::size_t>(w) * h * 4, 255);
     for (std::size_t px = 0; px < resid.size(); ++px) {
       const float f = resid[px] * norm;
       total += f;
       total_raw += raw[px] * norm;
+      total_chroma += chroma[px] * norm;
       const bool sky = ids[px * 4 + 1] > 8 || ids[px * 4 + 2] > 8;
       const int id = sky ? 255 : ids[px * 4];
       mat_sum[id] += f;
+      mat_chroma[id] += chroma[px] * norm;
       mat_cnt[id] += 1.0;
       const float v = std::min(1.0f, f * 10.0f);
       heat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
       heat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
       heat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
     }
-    std::printf("  sweep: %d steps of %.3f m, taa %s; mean temporal residual %.5f (raw frame difference %.5f)\n", measured,
-                args.sweep_step, renderer.settings().taa ? "on" : "off", total / static_cast<double>(resid.size()),
-                total_raw / static_cast<double>(resid.size()));
-    struct Row { int id; double mean; double share; };
+    const char* dir_name = args.sweep_dir == 1 ? "forward" : (args.sweep_dir == 2 ? "down" : "right");
+    std::printf("  sweep: %d steps of %.3f m %s, taa %s; mean temporal residual %.5f, chroma %.5f (raw frame difference %.5f)\n", measured,
+                args.sweep_step, dir_name, renderer.settings().taa ? "on" : "off", total / static_cast<double>(resid.size()),
+                total_chroma / static_cast<double>(resid.size()), total_raw / static_cast<double>(resid.size()));
+    struct Row { int id; double mean; double chroma; double share; };
     std::vector<Row> rows;
     for (int id = 0; id < 256; ++id) {
       if (mat_cnt[id] < 200) continue;
-      rows.push_back(Row{id, mat_sum[id] / mat_cnt[id], mat_sum[id] / std::max(total, 1e-9)});
+      rows.push_back(Row{id, mat_sum[id] / mat_cnt[id], mat_chroma[id] / mat_cnt[id], mat_sum[id] / std::max(total, 1e-9)});
     }
     std::sort(rows.begin(), rows.end(), [](const Row& p1, const Row& p2) { return p1.share > p2.share; });
-    std::printf("  %-4s %-18s %-10s %-10s %s\n", "id", "material", "pixels", "residual", "share");
-    for (std::size_t i = 0; i < rows.size() && i < 10; ++i) {
+    std::printf("  %-4s %-18s %-10s %-10s %-10s %s\n", "id", "material", "pixels", "residual", "chroma", "share");
+    for (std::size_t i = 0; i < rows.size() && i < 12; ++i) {
       const Row& r = rows[i];
       const char* name = r.id == 255 ? "(sky)" : (r.id < static_cast<int>(scene.materials.size()) ? scene.materials[static_cast<std::size_t>(r.id)].name.c_str() : "?");
-      std::printf("  %-4d %-18s %-10.0f %-10.5f %.1f%%\n", r.id, name, mat_cnt[r.id], r.mean, r.share * 100.0);
+      std::printf("  %-4d %-18s %-10.0f %-10.5f %-10.5f %.1f%%\n", r.id, name, mat_cnt[r.id], r.mean, r.chroma, r.share * 100.0);
     }
     stbi_write_png((args.sweep_out + "-heat.png").c_str(), static_cast<int>(w), static_cast<int>(h), 4, heat.data(), static_cast<int>(w * 4));
     renderer.capture_png(args.sweep_out + "-frame.png");

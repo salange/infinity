@@ -637,7 +637,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
   st.trees += tree_budget;  // remaining budget unused; report placed count
   return st;
 }
-void generate_showcase(Scene& sc, Rng root) {
+void generate_showcase(Scene& sc, Rng root, int tower_detail) {
   Mesh& mesh = sc.opaque;
   const float y = kCurb;
   // ground: a wide marble plaza on a raised plate, asphalt beyond
@@ -670,7 +670,7 @@ void generate_showcase(Scene& sc, Rng root) {
   for (Entry& e : row) {
     e.spec.random = root.child(static_cast<std::uint32_t>(k)).next();
     const float z = -20.0f + 0.0006f * e.x * e.x;  // arc bulging away in the middle
-    build_tower(sc, e.spec, Vec2{e.x, z}, y, root.child(static_cast<std::uint32_t>(10 + k)), 2);
+    build_tower(sc, e.spec, Vec2{e.x, z}, y, root.child(static_cast<std::uint32_t>(10 + k)), tower_detail);
     ++k;
   }
   // middle row: the five standard types with different entrances and roofs

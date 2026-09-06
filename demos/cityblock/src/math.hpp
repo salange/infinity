@@ -119,6 +119,19 @@ inline Mat4 perspective(float fov_y, float aspect, float zn, float zf) {
   r.at(3, 2) = -1.0f;
   return r;
 }
+// Reversed Z: near maps to depth 1, far to 0. With a float depth buffer the
+// precision then follows the distance (about 1e-7 relative), instead of
+// collapsing to centimetres a few hundred metres out as standard Z does.
+inline Mat4 perspective_reversed(float fov_y, float aspect, float zn, float zf) {
+  const float f = 1.0f / std::tan(fov_y * 0.5f);
+  Mat4 r;
+  r.at(0, 0) = f / aspect;
+  r.at(1, 1) = f;
+  r.at(2, 2) = zn / (zf - zn);
+  r.at(2, 3) = zn * zf / (zf - zn);
+  r.at(3, 2) = -1.0f;
+  return r;
+}
 inline Mat4 ortho(float l, float r_, float b, float t, float zn, float zf) {
   Mat4 r = Mat4::identity();
   r.at(0, 0) = 2.0f / (r_ - l);

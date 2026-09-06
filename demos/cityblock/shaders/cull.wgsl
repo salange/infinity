@@ -47,17 +47,17 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
       let lo = vec2<i32>(floor(uv_min / scale));
       let hi = vec2<i32>(floor((uv_max - vec2<f32>(0.5)) / scale));
       let dims = vec2<i32>(textureDimensions(hiz, level));
-      var farthest = 0.0;
+      var farthest = 1.0;  // reversed Z: farther is smaller
       for (var y = lo.y; y <= min(hi.y, lo.y + 1); y = y + 1) {
         for (var x = lo.x; x <= min(hi.x, lo.x + 1); x = x + 1) {
           let c = clamp(vec2<i32>(x, y), vec2<i32>(0), dims - 1);
-          farthest = max(farthest, textureLoad(hiz, c, level).r);
+          farthest = min(farthest, textureLoad(hiz, c, level).r);
         }
       }
       // the sphere's nearest point in depth-buffer units; hidden if even that
       // lies behind everything drawn in its footprint
       let near_depth = depth_ndc_of_view_z(zn);
-      if (near_depth > farthest + 1e-5) { visible = false; }
+      if (near_depth < farthest * (1.0 - 1e-4) - 1e-7) { visible = false; }
     }
   }
   let o = i * 5u;

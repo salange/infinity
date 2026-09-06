@@ -24,22 +24,24 @@ NodeSpec universe_spec(const core::Key&, const core::tree::Node*) {
   return spec;
 }
 
-NodeSpec cluster_spec(const core::Key& entity_key, const core::tree::Node*) {
+NodeSpec cluster_spec(const core::Key&, const core::tree::Node*) {
   NodeSpec spec;
   AxisDesc galaxies;
   galaxies.name = name::GalaxiesAxis;
   galaxies.child_kind = kind::Galaxy;
   galaxies.topo = Topology::IndexedList;
   // Real galaxy counts (T0017 WP5): 10-1000 per cluster, drawn from
-  // galaxy-layout/v1 off the cluster entity; positions come from the
-  // same layer (galaxy_position_in_cluster).
-  galaxies.count = [entity_key](const core::tree::Node&, const core::Key&) {
-    return static_cast<std::uint64_t>(galaxy_count_in_cluster(entity_key));
+  // galaxy-layout/v1 off the cluster ENTITY key (the owner node's key —
+  // the generator's first argument is the params key, and counting from
+  // it made the axis disagree with galaxy_count_in_cluster(entity), so
+  // indices past the smaller count materialized as null); positions come
+  // from the same layer (galaxy_position_in_cluster).
+  galaxies.count = [](const core::tree::Node& owner, const core::Key&) {
+    return static_cast<std::uint64_t>(galaxy_count_in_cluster(owner.key()));
   };
-  galaxies.occupied = [entity_key](const core::tree::Node&, const core::Key&,
-                                   const Cell& cell) {
+  galaxies.occupied = [](const core::tree::Node& owner, const core::Key&, const Cell& cell) {
     return cell.x >= 0 &&
-           cell.x < static_cast<std::int64_t>(galaxy_count_in_cluster(entity_key));
+           cell.x < static_cast<std::int64_t>(galaxy_count_in_cluster(owner.key()));
   };
   spec.axes = {galaxies};
   return spec;
@@ -98,7 +100,14 @@ NodeSpec galaxy_spec(const core::Key& entity_key, const core::tree::Node*) {
     return cell.x >= 0 && cell.x < 32 && cell.y >= 0 && cell.y < 32 && cell.z >= 0 &&
            cell.z < 32;
   };
-  spec.axes = {satellites, systems, nebulae, star_clusters};
+  // Deep-space objects (T0020 WP2): dead wormhole gates of the human
+  // enclaves live here (kind Wormhole). Data only; occupancy is the
+  // human-enclaves/v1 enumeration (home_galaxy_gates), not a cell test.
+  AxisDesc deepspace;
+  deepspace.name = name::DeepSpaceAxis;
+  deepspace.child_kind = kind::Wormhole;
+  deepspace.topo = Topology::IndexedList;
+  spec.axes = {satellites, systems, nebulae, star_clusters, deepspace};
   return spec;
 }
 
@@ -172,6 +181,7 @@ GeneratorRegistry make_registry() {
   registry.register_kind(kind::Star, leaf_spec);
   registry.register_kind(kind::Belt, leaf_spec);
   registry.register_kind(kind::Barycenter, leaf_spec);
+  registry.register_kind(kind::Wormhole, leaf_spec);
   return registry;
 }
 
@@ -321,6 +331,31 @@ core::Key galaxy_key_in_cluster(const core::Seed128& seed, std::int64_t cx,
           .child(Step{name::ClustersAxis, Cell::grid(cx, cy, cz)})
           .child(Step{name::GalaxiesAxis, Cell::index(static_cast<std::int64_t>(index))});
   return tree->get(address)->key();
+}
+
+core::Key system_key_in_galaxy(const core::Key& galaxy_entity_key, const SystemCell& cell) {
+  const core::Key children = core::derive_named(galaxy_entity_key, core::tree::kChildrenName);
+  const core::Key axis = core::derive_named(children, name::SystemsAxis);
+  return core::derive_child(axis, kind::System, cell.x, cell.y, cell.z, cell.level);
+}
+
+BodyKeys body_keys_in_system(const core::Key& system_entity_key, int slot) {
+  const core::Key children = core::derive_named(system_entity_key, core::tree::kChildrenName);
+  const core::Key axis = core::derive_named(children, name::PlanetsAxis);
+  BodyKeys keys;
+  keys.entity = core::derive_child(axis, kind::Body, slot);
+  keys.params = core::derive_named(keys.entity, core::tree::kParamsName);
+  return keys;
+}
+
+BodyKeys moon_keys_in_system(const core::Key& system_entity_key, int slot, int moon_index) {
+  const BodyKeys planet = body_keys_in_system(system_entity_key, slot);
+  const core::Key children = core::derive_named(planet.entity, core::tree::kChildrenName);
+  const core::Key axis = core::derive_named(children, name::MoonsAxis);
+  BodyKeys keys;
+  keys.entity = core::derive_child(axis, kind::Body, moon_index);
+  keys.params = core::derive_named(keys.entity, core::tree::kParamsName);
+  return keys;
 }
 
 core::Key home_galaxy_key(const core::Seed128& seed) {

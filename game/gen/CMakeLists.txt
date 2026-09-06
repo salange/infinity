@@ -10,12 +10,28 @@ endif()
 configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/gen/version.hpp @ONLY)
 
 add_library(game_gen STATIC
+  src/biome.cpp
+  src/civ_names.cpp
+  src/civ_types.cpp
+  src/civilization.cpp
+  src/colony.cpp
+  src/civ_census.cpp
+  src/settlements.cpp
+  src/sites.cpp
+  src/civil.cpp
+  src/site_mesh.cpp
+  src/buildings.cpp
+  src/ecumenopolis.cpp
+  src/human.cpp
+  src/golden_civ.cpp
   src/caves.cpp
+  src/climate.cpp
   src/deep_sky.cpp
   src/drainage.cpp
   src/features.cpp
   src/galaxy.cpp
   src/galaxy_octree.cpp
+  src/life.cpp
   src/macro.cpp
   src/planet_texture.cpp
   src/material.cpp

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <vector>
 
 #include "gen/terrain.hpp"
 #include "world/chunk_sampler.hpp"
@@ -67,8 +68,103 @@ class TerrainSampler final : public world::ChunkSampler {
     return padded;
   }
 
+  // material/v2 on the worker: one ParamCache per chunk (the province
+  // blend is the cost; a chunk spans a handful of lattice cells).
+  // material/v2 on the worker: one ParamCache per chunk (the province
+  // blend is the cost; a chunk spans a handful of lattice cells).
+  //
+  // Per-chunk PALETTE: the four materials with the most weight over the
+  // chunk's vertices; each vertex stores its normalised weights over that
+  // palette. Weights interpolate continuously across every triangle and
+  // across LOD levels, so no transition can follow a triangle edge (a
+  // per-triangle pair made hard-edged patches at every pair switch).
+  void classify_mesh(world::ChunkMesh& mesh) const override {
+    TerrainField::ParamCache cache;
+    constexpr std::size_t kStride = world::ChunkMesh::kVertexFloats;
+    const std::size_t count = mesh.vertices.size() / kStride;
+    if (count == 0) {
+      return;
+    }
+    std::vector<double> all(count * kMaterialCount);
+    double total[kMaterialCount] = {};
+    for (std::size_t v = 0; v < count; ++v) {
+      const float* p = mesh.vertices.data() + v * kStride;
+      double* w = all.data() + v * kMaterialCount;
+      field_.material_weights(mesh.origin[0] + static_cast<double>(p[0]),
+                              mesh.origin[1] + static_cast<double>(p[1]),
+                              mesh.origin[2] + static_cast<double>(p[2]),
+                              static_cast<double>(p[3]), static_cast<double>(p[4]),
+                              static_cast<double>(p[5]), &cache, w);
+      // Presence matters more than mass: a material that dominates a few
+      // vertices must make the palette even if it is rare in the chunk.
+      double vmax = 0.0;
+      for (std::size_t m = 1; m < kMaterialCount; ++m) {
+        vmax = w[m] > vmax ? w[m] : vmax;
+      }
+      if (vmax > 0.0) {
+        for (std::size_t m = 1; m < kMaterialCount; ++m) {
+          total[m] += w[m] / vmax;
+        }
+      }
+    }
+    std::size_t palette[world::ChunkMesh::kPaletteSize] = {0, 0, 0, 0};
+    for (std::size_t slot = 0; slot < world::ChunkMesh::kPaletteSize; ++slot) {
+      double best = 0.0;
+      std::size_t pick = 0;
+      for (std::size_t m = 1; m < kMaterialCount; ++m) {
+        if (total[m] > best) {
+          best = total[m];
+          pick = m;
+        }
+      }
+      palette[slot] = pick;
+      if (pick != 0) {
+        total[pick] = -1.0;  // taken
+      }
+      mesh.palette[slot] = static_cast<std::uint8_t>(pick);
+    }
+    for (std::size_t v = 0; v < count; ++v) {
+      float* p = mesh.vertices.data() + v * kStride;
+      const double* w = all.data() + v * kMaterialCount;
+      double sum = 0.0;
+      double ws[world::ChunkMesh::kPaletteSize];
+      for (std::size_t slot = 0; slot < world::ChunkMesh::kPaletteSize; ++slot) {
+        ws[slot] = palette[slot] != 0 ? w[palette[slot]] : 0.0;
+        sum += ws[slot];
+      }
+      for (std::size_t slot = 0; slot < world::ChunkMesh::kPaletteSize; ++slot) {
+        p[6 + slot] = sum > 0.0 ? static_cast<float>(ws[slot] / sum) : (slot == 0 ? 1.0f : 0.0f);
+      }
+    }
+  }
+
   double surface_elevation_m(const world::Dir3& unit_dir) const override {
     return field_.elevation_m(unit_dir).to_double();
+  }
+
+  // Centre + four corners of the column, through the shared column cache
+  // (the province lattice makes the extra probes ~1 us each).
+  void surface_elevation_range_m(const world::Dir3& center, std::uint8_t face, double u_center,
+                                 double v_center, double half_uv, double* lo_m,
+                                 double* hi_m) const override {
+    const std::lock_guard<std::mutex> lock(cave_cache_mutex_);
+    const auto sample = [&](const world::Dir3& dir) {
+      const auto canonical = field_.canonical_params(dir_to_face_uv(dir), &cave_cache_);
+      const BlendedParams params = TerrainField::to_blended(canonical);
+      return field_.elevation_from_params(dir, params, canonical.macro_rel, &cave_cache_)
+          .to_double();
+    };
+    double lo = sample(center);
+    double hi = lo;
+    for (int corner = 0; corner < 4; ++corner) {
+      const double u = u_center + ((corner & 1) != 0 ? half_uv : -half_uv) * 0.98;
+      const double v = v_center + ((corner & 2) != 0 ? half_uv : -half_uv) * 0.98;
+      const double e = sample(face_uv_to_dir(FaceUV{face, det::Real(u), det::Real(v)}));
+      lo = std::min(lo, e);
+      hi = std::max(hi, e);
+    }
+    *lo_m = lo;
+    *hi_m = hi;
   }
 
   int underground_intervals(const world::Dir3& unit_dir, DepthInterval* out,

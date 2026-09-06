@@ -134,6 +134,7 @@ struct ChunkManager::Impl {
       }
       data->density_hash = hash.value();
       data->mesh = mesh_chunk(grid, padded, job.mask);
+      sampler.classify_mesh(data->mesh);
       {
         const std::lock_guard<std::mutex> lock(done_mutex);
         done.push_back(std::move(data));
@@ -151,16 +152,39 @@ struct ChunkManager::Impl {
     return face_uv_to_dir(FaceUV{face, Real(u), Real(v)});
   }
 
+  // Camera as the split criterion sees it: projected onto the nominal
+  // sphere for the tangential distance, plus its height above the GROUND
+  // under it for the vertical one. Measuring against the nominal sphere
+  // alone made a 2 km plateau look like 2 km of altitude — refinement
+  // stalled at chunks the size of the elevation, 33 m voxels under a
+  // walking player, whose analytic ground then sat metres away from the
+  // rendered mesh (the "fall through the floor" reports).
+  struct CameraView {
+    Vec3d projected;   // camera direction * nominal radius
+    double vertical;   // height above the terrain under the camera (>= 0)
+  };
+  CameraView camera_view(const Vec3d& camera) const {
+    const double radius = sampler.radius_m();
+    const double len = std::max(1.0, length(camera));
+    const Dir3 dir{Real(camera.x / len), Real(camera.y / len), Real(camera.z / len)};
+    const double ground = radius + sampler.surface_elevation_m(dir);
+    return CameraView{Vec3d{camera.x / len * radius, camera.y / len * radius,
+                            camera.z / len * radius},
+                      std::max(0.0, len - ground)};
+  }
+
   void collect_columns(std::uint8_t face, std::uint8_t lod, std::uint32_t i, std::uint32_t j,
-                       const Vec3d& camera, std::vector<Column>* out) const {
+                       const CameraView& camera, std::vector<Column>* out) const {
     const double radius = sampler.radius_m();
     const double size = 2.0 * radius / static_cast<double>(std::uint64_t{1} << lod);
     const Dir3 center = cell_center_dir(face, lod, i, j);
     const Vec3d center_pos{center.x.to_double() * radius, center.y.to_double() * radius,
                            center.z.to_double() * radius};
-    const Vec3d delta{camera.x - center_pos.x, camera.y - center_pos.y,
-                      camera.z - center_pos.z};
-    const double distance = std::max(1.0, length(delta) - size);
+    const Vec3d delta{camera.projected.x - center_pos.x, camera.projected.y - center_pos.y,
+                      camera.projected.z - center_pos.z};
+    const double tangential = length(delta);
+    const double distance = std::max(
+        1.0, std::sqrt(tangential * tangential + camera.vertical * camera.vertical) - size);
     const bool split = lod < config.max_lod && size / distance > config.split_factor;
     if (!split) {
       out->push_back(Column{face, lod, i, j});
@@ -288,8 +312,16 @@ struct ChunkManager::Impl {
     const double radius = sampler.radius_m();
     const double thickness = 2.0 * radius / static_cast<double>(std::uint64_t{1} << col.lod);
     const Dir3 center = cell_center_dir(col.face, col.lod, col.i, col.j);
-    const double elevation = sampler.surface_elevation_m(center);
-    const int shell_mid = static_cast<int>(std::floor(elevation / thickness));
+    const double cells = static_cast<double>(std::uint64_t{1} << col.lod);
+    const double half_uv = 1.0 / cells;
+    const double u_center = -1.0 + 2.0 * (static_cast<double>(col.i) + 0.5) / cells;
+    const double v_center = -1.0 + 2.0 * (static_cast<double>(col.j) + 0.5) / cells;
+    double elev_lo = 0.0;
+    double elev_hi = 0.0;
+    sampler.surface_elevation_range_m(center, col.face, u_center, v_center, half_uv, &elev_lo,
+                                      &elev_hi);
+    const int shell_lo = static_cast<int>(std::floor(elev_lo / thickness));
+    const int shell_hi = static_cast<int>(std::floor(elev_hi / thickness));
     // Surface band plus depth-aware extras: columns crossing underground
     // voids request the shells covering exactly those radial intervals so
     // caves are meshed and collidable, not just generated (T0015 WP7
@@ -308,7 +340,9 @@ struct ChunkManager::Impl {
       }
       shells[shell_count++] = shell;
     };
-    for (int shell = shell_mid - 1; shell <= shell_mid + 1; ++shell) {
+    // Every shell the column's surface can pass through, one spare on
+    // each side (the range is a five-point probe, not a bound).
+    for (int shell = shell_lo - 1; shell <= shell_hi + 1; ++shell) {
       push_shell(shell);
     }
     ChunkSampler::DepthInterval intervals[kMaxDepthIntervals];
@@ -331,8 +365,9 @@ struct ChunkManager::Impl {
   std::vector<std::pair<core::ChunkAddr, TransitionMask>> desired_set(
       const Vec3d& camera) const {
     std::vector<Column> columns;
+    const CameraView view = camera_view(camera);
     for (std::uint8_t face = 0; face < 6; ++face) {
-      collect_columns(face, 0, 0, 0, camera, &columns);
+      collect_columns(face, 0, 0, 0, view, &columns);
     }
     balance(&columns);
     std::unordered_set<std::uint64_t> leaves;
@@ -402,6 +437,79 @@ std::vector<ChunkEvent> ChunkManager::update(double camera_x, double camera_y,
     }
     impl.ready[data->addr] = data;
     events.push_back(ChunkEvent{ChunkEvent::Kind::Ready, data->addr, data});
+  }
+
+  // Stale chunks (no longer desired) are dropped as soon as the desired
+  // chunks covering their column are all ready — a coarse parent must
+  // never keep drawing over its finer children (double surfaces: a
+  // walking player stands on the analytic ground while a 30 m-voxel
+  // parent floats metres above the eye), and a column nothing desires any
+  // more is simply gone. Coverage is tracked per column: every desired
+  // chunk counts itself into its own column and all ancestor columns.
+  {
+    struct Coverage {
+      std::uint32_t desired = 0;
+      std::uint32_t ready = 0;
+    };
+    std::unordered_map<std::uint64_t, Coverage> coverage;
+    coverage.reserve(desired.size() * 4);
+    for (const auto& [addr, mask] : desired) {
+      const bool is_ready = impl.ready.contains(addr);
+      for (int lod = addr.lod; lod >= 0; --lod) {
+        const std::uint32_t shift = static_cast<std::uint32_t>(addr.lod - lod);
+        Coverage& c = coverage[pack_column(addr.face, static_cast<std::uint8_t>(lod),
+                                           addr.i >> shift, addr.j >> shift)];
+        ++c.desired;
+        c.ready += is_ready ? 1 : 0;
+      }
+    }
+    std::unordered_set<std::uint64_t> desired_keys;
+    desired_keys.reserve(desired.size() * 2);
+    for (const auto& [addr, mask] : desired) {
+      desired_keys.insert(pack_column(addr.face, addr.lod, addr.i, addr.j) ^
+                          (static_cast<std::uint64_t>(static_cast<std::uint16_t>(addr.shell)) << 44U));
+    }
+    std::vector<core::ChunkAddr> drop;
+    for (const auto& [addr, data] : impl.ready) {
+      const std::uint64_t key = pack_column(addr.face, addr.lod, addr.i, addr.j) ^
+                                (static_cast<std::uint64_t>(static_cast<std::uint16_t>(addr.shell)) << 44U);
+      if (desired_keys.contains(key)) {
+        continue;
+      }
+      // Descendants (finer replacements) of this column.
+      bool overlapped = false;
+      bool covered = true;
+      if (const auto it = coverage.find(pack_column(addr.face, addr.lod, addr.i, addr.j));
+          it != coverage.end()) {
+        overlapped = true;
+        covered = it->second.ready == it->second.desired;
+      }
+      // Ancestors (a coarser replacement when the camera left). Desired
+      // columns are quadtree leaves, so an ancestor's coverage counts are
+      // exactly its own shells.
+      if (!overlapped) {
+        for (int lod = addr.lod - 1; lod >= 0; --lod) {
+          const std::uint32_t shift = static_cast<std::uint32_t>(addr.lod - lod);
+          const std::uint64_t anc = pack_column(addr.face, static_cast<std::uint8_t>(lod),
+                                                addr.i >> shift, addr.j >> shift);
+          const auto it = coverage.find(anc);
+          if (it == coverage.end()) {
+            continue;
+          }
+          overlapped = true;
+          covered = it->second.ready == it->second.desired;
+          break;
+        }
+      }
+      if (!overlapped || covered) {
+        drop.push_back(addr);
+      }
+    }
+    for (const core::ChunkAddr& addr : drop) {
+      impl.ready.erase(addr);
+      impl.last_wanted.erase(addr);
+      events.push_back(ChunkEvent{ChunkEvent::Kind::Evicted, addr, nullptr});
+    }
   }
 
   if (impl.ready.size() > impl.config.resident_budget) {

@@ -126,7 +126,7 @@ TEST_CASE("terrain+mesher: surface chunk meshes with outward normals") {
   // center (outward orientation — pins the winding convention).
   std::size_t outward = 0;
   std::size_t total = 0;
-  for (std::size_t v = 0; v + 6 <= mesh.vertices.size(); v += 6) {
+  for (std::size_t v = 0; v + 10 <= mesh.vertices.size(); v += 10) {
     for (int c = 0; c < 6; ++c) {
       REQUIRE(std::isfinite(mesh.vertices[v + c]));
     }

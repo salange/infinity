@@ -29,6 +29,9 @@ struct TargetInfo {
   std::string name;
   double distance_m{0.0};
   double eta_s{-1.0};  // < 0: not closing on the target
+  // T0020: owner race, faction (type) and development level of the
+  // targeted body — empty when uninhabited.
+  std::string civ_line;
 };
 
 // In-game HUD (Sascha 2026-08-30):

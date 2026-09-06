@@ -1,8 +1,12 @@
 #include "render/rhi.hpp"
 
+#include "city_passes.hpp"
+#include "city_shader.hpp"
+
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>  // wgpuDevicePoll (wgpu-native extension)
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -32,8 +36,8 @@ namespace {
 
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
-constexpr std::uint64_t kItemUniformSize = 112;  // mvp + color + aux + extra
-constexpr std::uint64_t kFrameUniformSize = 144;  // 9 vec4s (see Frame in WGSL)
+constexpr std::uint64_t kItemUniformSize = 128;  // mvp + color + aux + extra + palette
+constexpr std::uint64_t kFrameUniformSize = 160;  // 10 vec4s (see Frame in WGSL)
 
 constexpr const char* kMeshShader = R"(
 // Per-item block. aux/extra are mode-specific:
@@ -50,11 +54,15 @@ constexpr const char* kMeshShader = R"(
 //           and planet limb glow.
 //   mode 4: analytic sky dome (opaque, fullscreen quad at far depth):
 //           per-pixel view-ray gradient sky from the frame uniforms.
+//   mode 9: light beam (additive pass) — colour * extra.x, fading with
+//           weights.x (1 base .. 0 top) and softened across weights.y
+//           (0 centre .. 1 edge): the site beacons.
 struct Uniforms {
   mvp: mat4x4<f32>,
   color: vec4<f32>,
   aux: vec4<f32>,
   extra: vec4<f32>,
+  palette: vec4<f32>,  // lit terrain: four material ids (0 = unused)
 };
 // Per-frame globals (frame of the meshes = anchor-planet-local):
 //   sun_dir.xyz light direction; sun_color.rgb light tint, .a time (s);
@@ -75,9 +83,67 @@ struct Frame {
   atmo: vec4<f32>,
   planet_center: vec4<f32>,
   material: vec4<f32>,  // x = per-planet palette shift (-1..1)
+  jitter: vec4<f32>,    // xy = temporal AA projection jitter (NDC units)
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<uniform> frame: Frame;
+// T0021 WP1: what lit terrain receives from the city passes — the
+// cascade matrices and split distances, the shadow maps, the ambient
+// occlusion of the prepass.
+struct CityFrame {
+  view: mat4x4<f32>,
+  proj: mat4x4<f32>,
+  view_proj: mat4x4<f32>,
+  inv_view_proj: mat4x4<f32>,
+  inv_proj: mat4x4<f32>,
+  shadow0: mat4x4<f32>,
+  shadow1: mat4x4<f32>,
+  shadow2: mat4x4<f32>,
+  sh: array<vec4<f32>, 9>,
+  cascade: vec4<f32>,
+  cascade_extent: vec4<f32>,
+  screen: vec4<f32>,
+  params: vec4<f32>,
+  params2: vec4<f32>,
+  jitter: vec4<f32>,
+};
+@group(3) @binding(0) var<uniform> cfr: CityFrame;
+@group(3) @binding(1) var rc_shadow_tex: texture_depth_2d_array;
+@group(3) @binding(2) var rc_shadow_samp: sampler_comparison;
+@group(3) @binding(3) var rc_ao_tex: texture_2d<f32>;
+@group(3) @binding(4) var rc_clamp_samp: sampler;
+@group(3) @binding(5) var rc_depth_pre: texture_depth_2d;
+const RC_POISSON: array<vec2<f32>, 12> = array<vec2<f32>, 12>(
+  vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457), vec2<f32>(-0.203, 0.621),
+  vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480), vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893),
+  vec2<f32>(0.507, 0.064), vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598));
+fn rc_shadow_factor(world: vec3<f32>, n: vec3<f32>, view_z: f32, ndl: f32, pixel: vec2<f32>) -> f32 {
+  if (cfr.params2.w < 0.5) { return 1.0; }
+  var idx = -1;
+  if (view_z < cfr.cascade.x) { idx = 0; } else if (view_z < cfr.cascade.y) { idx = 1; } else if (view_z < cfr.cascade.z) { idx = 2; }
+  if (idx < 0) { return 1.0; }
+  var m = cfr.shadow0;
+  var extent = cfr.cascade_extent.x;
+  if (idx == 1) { m = cfr.shadow1; extent = cfr.cascade_extent.y; }
+  if (idx == 2) { m = cfr.shadow2; extent = cfr.cascade_extent.z; }
+  let texel_world = 2.0 * extent * cfr.cascade.w;
+  let offset = n * texel_world * (1.6 - 1.0 * ndl) + frame.sun_dir.xyz * texel_world * 0.5;
+  let lp = m * vec4<f32>(world + offset, 1.0);
+  let uv = vec2<f32>(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
+  let noise = fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715)))) * 6.2831853;
+  let cs = cos(noise); let sn = sin(noise);
+  let radius = cfr.cascade.w * 1.6;
+  var lit = 0.0;
+  for (var i = 0u; i < 12u; i = i + 1u) {
+    let p = RC_POISSON[i];
+    let r = vec2<f32>(p.x * cs - p.y * sn, p.x * sn + p.y * cs) * radius;
+    lit += textureSampleCompare(rc_shadow_tex, rc_shadow_samp, uv + r, idx, lp.z - 0.0004);
+  }
+  // Fade the last cascade out at its far edge.
+  let fade = select(1.0, clamp((cfr.cascade.z - view_z) / (0.15 * cfr.cascade.z), 0.0, 1.0), idx == 2);
+  return mix(1.0, lit / 12.0, fade);
+}
 // Planet cube-map pair (T0016, mode 6): height normalized to [-1,1] over
 // the body's amplitude, material albedo; layer = cube face in the SAME
 // cube-sphere frame the generators use, so texel<->surface mapping is
@@ -85,6 +151,137 @@ struct Frame {
 @group(1) @binding(0) var planet_height: texture_2d_array<f32>;
 @group(1) @binding(1) var planet_material: texture_2d_array<f32>;
 @group(1) @binding(2) var planet_sampler: sampler;
+
+// Surface material library (T0019): albedo.rgb + height.a, normal.xy +
+// roughness.z + ao/emissive.w, one layer per material id, repeat sampler.
+@group(2) @binding(0) var mat_albedo: texture_2d_array<f32>;
+@group(2) @binding(1) var mat_normal: texture_2d_array<f32>;
+@group(2) @binding(2) var mat_sampler: sampler;
+struct MaterialTable {
+  a: array<vec4<f32>, 64>,  // tint.rgb, tile size (m)
+  b: array<vec4<f32>, 64>,  // roughness, emissive, normal strength, ready
+  c: array<vec4<f32>, 64>,  // untinted mean albedo.rgb
+};
+@group(2) @binding(3) var<uniform> mats: MaterialTable;
+
+const kTilePeriodM: f32 = 256.0;  // must match the app's origin modulo
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+  return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+fn hash2(p: vec2<f32>) -> vec2<f32> {
+  var q = vec3<f32>(fract(p.x * 0.1031), fract(p.y * 0.1030), fract((p.x + p.y) * 0.0973));
+  q += dot(q, q.yzx + 33.33);
+  return fract(vec2<f32>((q.x + q.y) * q.z, (q.x + q.z) * q.y));
+}
+
+struct TileSample {
+  albedo: vec3<f32>,
+  height: f32,
+  tnormal: vec2<f32>,  // -1..1
+  rough: f32,
+  aux: f32,            // ao, or emissive mask
+};
+
+// Stochastic tiling on a square lattice split into triangles (the
+// Heitz-Neyret triangle-grid blend with Mikkelsen's sharpened weights and
+// a variance-preserving colour blend around the tile mean). Each lattice
+// vertex owns a random rotation + offset of the tile. Vertex ids are
+// hashed MODULO the tile period so the per-chunk coordinate offsets the
+// CPU applies (multiples of the period) never change a tile's look —
+// no seams at chunk borders, no f32 swim at planet radii.
+fn sample_tiled(layer: i32, uv: vec2<f32>, ddx_uv: vec2<f32>, ddy_uv: vec2<f32>,
+                period_cells: f32, mean: vec3<f32>) -> TileSample {
+  let cell = floor(uv);
+  let f = uv - cell;
+  var verts = array<vec2<f32>, 3>(cell, cell + vec2<f32>(1.0, 0.0), cell + vec2<f32>(0.0, 1.0));
+  var w = vec3<f32>(1.0 - f.x - f.y, f.x, f.y);
+  if (f.x + f.y >= 1.0) {
+    verts[0] = cell + vec2<f32>(1.0, 1.0);
+    w = vec3<f32>(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+  }
+  w = w * w * w;
+  w = w * w;  // ^6: mostly one tile, narrow blend bands
+  w = w / (w.x + w.y + w.z);
+  var acc_a = vec3<f32>(0.0);
+  var acc_h = 0.0;
+  var acc_n = vec2<f32>(0.0);
+  var acc_r = 0.0;
+  var acc_x = 0.0;
+  for (var i = 0; i < 3; i++) {
+    let vm = verts[i] - period_cells * floor(verts[i] / period_cells);
+    let r = hash2(vm + vec2<f32>(0.37, 0.11));
+    let ang = r.y * 6.2831853;
+    let c = cos(ang);
+    let sn = sin(ang);
+    // rotated about the vertex, then a random offset
+    let d = uv - verts[i];
+    let suv = vec2<f32>(c * d.x - sn * d.y, sn * d.x + c * d.y) + r * 7.31;
+    let gx = vec2<f32>(c * ddx_uv.x - sn * ddx_uv.y, sn * ddx_uv.x + c * ddx_uv.y);
+    let gy = vec2<f32>(c * ddy_uv.x - sn * ddy_uv.y, sn * ddy_uv.x + c * ddy_uv.y);
+    let a = textureSampleGrad(mat_albedo, mat_sampler, suv, layer, gx, gy);
+    let nm = textureSampleGrad(mat_normal, mat_sampler, suv, layer, gx, gy);
+    let n2 = nm.xy * 2.0 - 1.0;
+    // rotate the tangent normal back into the uv frame (inverse rotation)
+    let n2r = vec2<f32>(c * n2.x + sn * n2.y, -sn * n2.x + c * n2.y);
+    let wi = w[i];
+    acc_a += wi * (a.rgb - mean);
+    acc_h += wi * a.a;
+    acc_n += wi * n2r;
+    acc_r += wi * nm.z;
+    acc_x += wi * nm.w;
+  }
+  let norm = inverseSqrt(dot(w, w));
+  var out: TileSample;
+  out.albedo = max(mean + acc_a * norm, vec3<f32>(0.0));
+  out.height = acc_h;
+  out.tnormal = acc_n;
+  out.rough = acc_r;
+  out.aux = acc_x;
+  return out;
+}
+
+// One material on one projection plane: fine scale hex-tiled + coarse
+// scale (8x larger, plain) blended by distance (NMS's two-scale trick),
+// so close-ups get photographic detail and the horizon gets no moire.
+fn sample_material(layer: i32, p: vec2<f32>, dpx: vec2<f32>, dpy: vec2<f32>,
+                   coarse_w: f32) -> TileSample {
+  let tile = max(mats.a[layer].w, 0.25);
+  let mean = srgb_to_linear(mats.c[layer].rgb);
+  let fine = sample_tiled(layer, p / tile, dpx / tile, dpy / tile, kTilePeriodM / tile, mean);
+  let ct = tile * 8.0;
+  let cuv = p / ct + vec2<f32>(0.5, 0.25);
+  let ca = textureSampleGrad(mat_albedo, mat_sampler, cuv, layer, dpx / ct, dpy / ct);
+  let cn = textureSampleGrad(mat_normal, mat_sampler, cuv, layer, dpx / ct, dpy / ct);
+  var out: TileSample;
+  out.albedo = mix(fine.albedo, ca.rgb, coarse_w);
+  out.height = mix(fine.height, ca.a, coarse_w);
+  out.tnormal = mix(fine.tnormal, cn.xy * 2.0 - 1.0, coarse_w);
+  out.rough = mix(fine.rough, cn.z, coarse_w);
+  out.aux = mix(fine.aux, cn.w, coarse_w);
+  return out;
+}
+
+// Height-based blend of the vertex's two materials (contrast-preserving:
+// the taller texel wins within a soft band), then the planet tint.
+fn blend_pair(s0: TileSample, s1: TileSample, blend: f32) -> TileSample {
+  let h0 = s0.height + (1.0 - blend);
+  let h1 = s1.height + blend;
+  let ma = max(h0, h1) - 0.3;
+  var w0 = max(h0 - ma, 0.0);
+  var w1 = max(h1 - ma, 0.0);
+  let inv = 1.0 / max(w0 + w1, 1.0e-4);
+  w0 *= inv;
+  w1 *= inv;
+  var out: TileSample;
+  out.albedo = s0.albedo * w0 + s1.albedo * w1;
+  out.height = s0.height * w0 + s1.height * w1;
+  out.tnormal = s0.tnormal * w0 + s1.tnormal * w1;
+  out.rough = s0.rough * w0 + s1.rough * w1;
+  out.aux = s0.aux * w0 + s1.aux * w1;
+  return out;
+}
 
 // Direction -> (u01, v01, face), mirroring world/cubesphere.cpp exactly
 // (dominant axis, ties broken x, y, z).
@@ -132,16 +329,15 @@ struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) opos: vec3<f32>,
-  // material/v1 (T0015 WP3): two material ids packed as mat0*256+mat1,
-  // FLAT so the pair never interpolates across a triangle; the blend
-  // fraction interpolates smoothly.
-  @location(2) @interpolate(flat) mat_pack: f32,
-  @location(3) mat_blend: f32,
+  // T0019: per-vertex weights over the item's four-material palette
+  // (interpolated, so transitions never follow triangle edges). Star
+  // billboards reuse .x as a packed rgb and .y as the twinkle phase.
+  @location(2) weights: vec4<f32>,
 };
 
 @vertex
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
-           @location(2) mat_pack: f32, @location(3) mat_blend: f32) -> VSOut {
+           @location(2) weights: vec4<f32>) -> VSOut {
   var out: VSOut;
   let mode = u32(u.extra.w + 0.5);
   if (mode == 6u) {
@@ -152,10 +348,11 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     let fuv = cube_face_uv(dir);
     let h = textureSampleLevel(planet_height, planet_sampler, fuv.xy, i32(fuv.z), 0.0).r;
     out.pos = u.mvp * vec4<f32>(dir * (1.0 + h * u.extra.x), 1.0);
+    out.pos.x += frame.jitter.x * out.pos.w;
+    out.pos.y += frame.jitter.y * out.pos.w;
     out.opos = dir;  // undisplaced unit direction; fragment re-derives uv
     out.normal = dir;
-    out.mat_pack = 0.0;
-    out.mat_blend = 0.0;
+    out.weights = vec4<f32>(0.0);
     return out;
   }
   if (mode == 7u) {
@@ -174,15 +371,15 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
                         clip.w * 3.0e-22, clip.w);
     out.opos = vec3<f32>(corner.x / half_len, corner.y / half_len, 0.0);
     out.normal = vec3<f32>(normal.z, 0.0, 0.0);
-    out.mat_pack = mat_pack;
-    out.mat_blend = mat_blend;
+    out.weights = weights;
     return out;
   }
   out.pos = u.mvp * vec4<f32>(position, 1.0);
+  out.pos.x += frame.jitter.x * out.pos.w;
+  out.pos.y += frame.jitter.y * out.pos.w;
   out.normal = normal;
   out.opos = position;
-  out.mat_pack = mat_pack;
-  out.mat_blend = mat_blend;
+  out.weights = weights;
   return out;
 }
 
@@ -373,6 +570,14 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let mode = u32(u.extra.w + 0.5);
   let time = frame.sun_color.a;
+  if (mode == 9u) {
+    let h = clamp(in.weights.x, 0.0, 1.0);
+    let fade = pow(h, 2.2) * (0.6 + 0.4 * h);
+    let e = clamp(in.weights.y, 0.0, 1.0);
+    let soft = (1.0 - e * e) * (1.0 - e * e);
+    let core = exp(-e * e * 14.0) * 0.8;  // a brighter filament in the middle
+    return vec4<f32>(u.color.rgb * (u.extra.x * fade * (soft * 0.35 + core)), 1.0);
+  }
   if (mode == 3u) {
     let r = length(in.opos.xy);
     var base = 0.0;
@@ -398,14 +603,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // and adding 0.5 above 2^23 creates a round-to-even tie that bumps
     // the integer — wrapping a 255 blue byte to 0 (blue-white stars
     // rendered yellow until this was found the hard way).
-    let pack = u32(in.mat_pack);
+    let pack = u32(in.weights.x);
     let tint = vec3<f32>(f32(pack >> 16u), f32((pack >> 8u) & 255u),
                          f32(pack & 255u)) / 255.0;
     var flux = in.normal.x;
     let atmo_depth = clamp(1.0 - frame.cam_fwd.w, 0.0, 1.0);
     if (atmo_depth > 0.0) {
-      let tw = sin(time * (7.0 + in.mat_blend * 9.0) + in.mat_blend * 251.0) *
-               sin(time * 13.7 + in.mat_blend * 617.0);
+      let tw = sin(time * (7.0 + in.weights.y * 9.0) + in.weights.y * 251.0) *
+               sin(time * 13.7 + in.weights.y * 617.0);
       flux *= 1.0 - 0.45 * atmo_depth * (0.5 + 0.5 * tw);
     }
     let shape = exp(-r2 * 9.0) + exp(-r2 * 2.2) * 0.06;
@@ -419,7 +624,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let fuv = cube_face_uv(dir);
     let layer = i32(fuv.z);
     let face = u32(fuv.z + 0.5);
-    let alb = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb;
+    let alb4 = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0);
+    let alb = alb4.rgb;
     let texel = 1.0 / f32(textureDimensions(planet_height).x);
     let du = vec2<f32>(texel, 0.0);
     let dv = vec2<f32>(0.0, texel);
@@ -444,6 +650,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let base6 = alb * (0.84 + 0.24 * mo);
     var c6 = base6 * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
     c6 += base6 * max(dot(n, -light), 0.0) * vec3<f32>(0.05, 0.07, 0.12);
+    // Settlement lights (T0020): the bake's alpha is the night-light
+    // mask; warm sodium glow that fades in as the sun sets over it.
+    let night6 = 1.0 - smoothstep(-0.05, 0.12, dot(n, light));
+    c6 += vec3<f32>(1.0, 0.72, 0.38) * alb4.a * night6 * 0.06;
     return vec4<f32>(c6, 1.0);
   }
   if (mode == 1u) {
@@ -476,35 +686,208 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let radial = normalize(in.opos + u.aux.xyz - frame.planet_center.xyz);
     n = normalize(mix(n, radial, frame.planet_center.w));
   }
-  let ndl = max(dot(n, light), 0.0);
-  // Soft terminator wrap so the day/night line does not alias harshly.
-  let wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
-  // Albedo: material palette when the vertex carries materials, else the
+  // Albedo: material library when the vertex carries materials, else the
   // default terrain material or the item's rgb override (e.g. the
   // ocean-blue sea-level impostor).
   var base = vec3<f32>(0.55, 0.52, 0.45);
   if (u.color.r + u.color.g + u.color.b > 0.001) {
     base = u.color.rgb;
   }
-  if (in.mat_pack >= 255.5) {
-    let pack = u32(in.mat_pack + 0.5);
-    let m0 = pack >> 8u;
-    let m1 = pack & 255u;
-    base = mix(material_albedo(m0), material_albedo(m1), clamp(in.mat_blend, 0.0, 1.0));
-    // Two-scale procedural modulation in PLANET-LOCAL space (stable under
-    // camera motion; 3D noise needs no projection — the triplanar idea
-    // without textures). Fine scale ~3 m, coarse ~45 m.
-    let world = in.opos + u.aux.xyz - frame.planet_center.xyz;
-    let coarse = vnoise(world * 0.022);
-    let fine = vnoise(world * 0.34);
-    base = base * (0.82 + 0.24 * coarse + 0.12 * fine);
-    // Per-planet palette shift: a subtle hue rotation.
-    let shift = frame.material.x;
-    base = base * (vec3<f32>(1.0) + shift * vec3<f32>(0.10, 0.02, -0.08));
+  var rough = 0.85;
+  var ao = 1.0;
+  var emissive = vec3<f32>(0.0);
+  var ndl = max(dot(n, light), 0.0);
+  var wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+  let n_geo = n;
+  // T0021: cascaded shadows and screen-space occlusion from the city
+  // passes (both fall back to 1 when the passes did not run).
+  let rc_world = in.opos + u.aux.xyz;
+  let rc_view_z = dot(frame.cam_fwd.xyz, rc_world);
+  let shadow = rc_shadow_factor(rc_world, n_geo, rc_view_z, ndl, in.pos.xy);
+  var ao_ss = 1.0;
+  if (cfr.params2.z > 0.5) {
+    // Only where this surface is the one the prepass saw (items outside
+    // the prepass, or hidden by ones that were, keep full ambient).
+    let d_pre = textureLoad(rc_depth_pre, vec2<i32>(in.pos.xy), 0);
+    if (abs(d_pre - in.pos.z) < 0.02 * in.pos.z) {
+      ao_ss = pow(textureSample(rc_ao_tex, rc_clamp_samp, in.pos.xy * cfr.screen.zw).r, cfr.params.y);
+    }
   }
-  var color = base * (0.02 + 1.08 * mix(ndl, wrap, 0.35)) * frame.sun_color.rgb;
+  // Debug views shared with the city shader (3 ao, 4 shadow).
+  let rc_dbg = i32(cfr.jitter.z + 0.5);
+  if (rc_dbg == 3) { return vec4<f32>(vec3<f32>(ao_ss), 1.0); }
+  if (rc_dbg == 4) { return vec4<f32>(vec3<f32>(shadow), 1.0); }
+  let p0 = i32(u.palette.x + 0.5);
+  if (p0 > 0) {
+    // Normalised palette weights (four materials per chunk, T0019).
+    var wv = max(in.weights, vec4<f32>(0.0));
+    let wsum = wv.x + wv.y + wv.z + wv.w;
+    wv = select(vec4<f32>(1.0, 0.0, 0.0, 0.0), wv / wsum, wsum > 1.0e-5);
+    let ids = vec4<i32>(p0, i32(u.palette.y + 0.5), i32(u.palette.z + 0.5), i32(u.palette.w + 0.5));
+    var ready = true;
+    for (var k = 0; k < 4; k++) {
+      if (wv[k] > 0.004 && ids[k] > 0 && mats.b[ids[k]].w < 0.5) { ready = false; }
+    }
+    // Planet-local position for km-scale variation (f32 is fine there)
+    // and the precise chunk-local + period-offset position for tiling.
+    let world = in.opos + u.aux.xyz - frame.planet_center.xyz;
+    let macro_v = 0.86 + 0.20 * vnoise(world * 0.022) + 0.10 * vnoise(world * 0.0016);
+    if (ready) {
+      let p = in.opos + u.extra.xyz;
+      let dpx = dpdx(p);
+      let dpy = dpdy(p);
+      let dist = length(in.opos + u.aux.xyz);
+      let coarse_w = 0.18 + 0.55 * smoothstep(40.0, 900.0, dist);
+      // Biplanar projection (Quilez): the two planes the normal faces most.
+      let an = abs(n);
+      var ma = vec3<i32>(0, 1, 2);
+      if (an.y > an.x && an.y > an.z) { ma = vec3<i32>(1, 2, 0); }
+      else if (an.z > an.x && an.z > an.y) { ma = vec3<i32>(2, 0, 1); }
+      var mi = vec3<i32>(0, 1, 2);
+      if (an.y < an.x && an.y < an.z) { mi = vec3<i32>(1, 2, 0); }
+      else if (an.z < an.x && an.z < an.y) { mi = vec3<i32>(2, 0, 1); }
+      let me = vec3<i32>(3, 3, 3) - mi - ma;
+      let uv1 = vec2<f32>(p[ma.y], p[ma.z]);
+      let uv2 = vec2<f32>(p[me.y], p[me.z]);
+      let dx1 = vec2<f32>(dpx[ma.y], dpx[ma.z]);
+      let dy1 = vec2<f32>(dpy[ma.y], dpy[ma.z]);
+      let dx2 = vec2<f32>(dpx[me.y], dpx[me.z]);
+      let dy2 = vec2<f32>(dpy[me.y], dpy[me.z]);
+      var pw = vec2<f32>(an[ma.x], an[me.x]);
+      pw = clamp((pw - 0.5773) / (1.0 - 0.5773), vec2<f32>(0.0), vec2<f32>(1.0));
+      pw = pw * pw * pw;
+      pw = pw / max(pw.x + pw.y, 1.0e-4);
+      // Per plane: sample every palette material with a visible weight,
+      // height-blend them (taller texel wins inside a soft band, the
+      // band dithered by the vertex weights themselves), tint each with
+      // its own planet pigment.
+      var acc = array<TileSample, 2>();
+      for (var plane = 0; plane < 2; plane++) {
+        var uvp = uv1; var dxp = dx1; var dyp = dy1;
+        if (plane == 1) { uvp = uv2; dxp = dx2; dyp = dy2; }
+        var samples = array<TileSample, 4>();
+        var hb = vec4<f32>(-10.0);
+        for (var k = 0; k < 4; k++) {
+          if (wv[k] > 0.004 && ids[k] > 0) {
+            var sm = sample_material(ids[k], uvp, dxp, dyp, coarse_w);
+            sm.albedo *= mats.a[ids[k]].rgb;
+            samples[k] = sm;
+            hb[k] = sm.height * 0.6 + wv[k];
+          }
+        }
+        let hmax = max(max(hb.x, hb.y), max(hb.z, hb.w)) - 0.28;
+        var bw = max(hb - vec4<f32>(hmax), vec4<f32>(0.0));
+        bw = bw / max(bw.x + bw.y + bw.z + bw.w, 1.0e-5);
+        var out: TileSample;
+        out.albedo = vec3<f32>(0.0);
+        out.height = 0.0;
+        out.tnormal = vec2<f32>(0.0);
+        out.rough = 0.0;
+        out.aux = 0.0;
+        for (var k = 0; k < 4; k++) {
+          if (bw[k] > 0.0) {
+            out.albedo += samples[k].albedo * bw[k];
+            out.height += samples[k].height * bw[k];
+            out.tnormal += samples[k].tnormal * bw[k];
+            out.rough += samples[k].rough * bw[k];
+            out.aux += samples[k].aux * bw[k];
+          }
+        }
+        acc[plane] = out;
+      }
+      let s1 = acc[0];
+      let s2 = acc[1];
+      base = (s1.albedo * pw.x + s2.albedo * pw.y) * macro_v;
+      // Detail normal: whiteout-style per-plane perturbation of the
+      // analytic terrain normal, scaled by the material's strength.
+      var strength = 0.0;
+      var emis_amt = 0.0;
+      for (var k = 0; k < 4; k++) {
+        if (ids[k] > 0) {
+          strength += wv[k] * mats.b[ids[k]].z;
+          emis_amt += wv[k] * mats.b[ids[k]].y;
+        }
+      }
+      let tn1 = s1.tnormal * strength * pw.x;
+      let tn2 = s2.tnormal * strength * pw.y;
+      var pert = vec3<f32>(0.0);
+      pert[ma.y] += tn1.x * sign(n[ma.x]);
+      pert[ma.z] += tn1.y;
+      pert[me.y] += tn2.x * sign(n[me.x]);
+      pert[me.z] += tn2.y;
+      n = normalize(n + pert);
+      rough = clamp(s1.rough * pw.x + s2.rough * pw.y, 0.05, 1.0);
+      let aux_v = s1.aux * pw.x + s2.aux * pw.y;
+      if (emis_amt > 0.0) {
+        // Lit windows and glowing crusts: a night-light level (a lit
+        // window is far dimmer than sunlit ground), fading in as the sun
+        // sets over the planet surface below the fragment.
+        let dusk = 1.0 - smoothstep(-0.05, 0.15, dot(n_geo, light));
+        emissive = aux_v * emis_amt * (s1.albedo * pw.x + s2.albedo * pw.y) * (0.003 + 0.03 * dusk);
+      } else {
+        ao = 0.35 + 0.65 * aux_v;
+      }
+      ndl = max(dot(n, light), 0.0);
+      wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+    } else {
+      // No library yet: the table's mean colours (sRGB, decoded here).
+      var mean = vec3<f32>(0.0);
+      var rsum = 0.0;
+      for (var k = 0; k < 4; k++) {
+        if (ids[k] > 0) {
+          mean += wv[k] * srgb_to_linear(mats.c[ids[k]].rgb) * mats.a[ids[k]].rgb;
+          rsum += wv[k] * mats.b[ids[k]].x;
+        }
+      }
+      base = mean * macro_v * (0.94 + 0.12 * vnoise(world * 0.34));
+      rough = rsum;
+    }
+  }
+  // Far field (T0019): beyond a few km the per-vertex palettes of coarse
+  // chunks would show as seams, so lit terrain fades into the planet's
+  // baked far-view albedo (the same cube map the impostor uses — one
+  // continuous surface from the ground to orbit). aux.w flags a bound
+  // far texture; the detail normal fades with it.
+  if (u.aux.w > 0.5 && p0 > 0) {
+    let world_far = in.opos + u.aux.xyz - frame.planet_center.xyz;
+    let dist_far = length(in.opos + u.aux.xyz);
+    let k_far = smoothstep(2500.0, 14000.0, dist_far);
+    if (k_far > 0.0) {
+      let fuv_far = cube_face_uv(normalize(world_far));
+      let far4 = textureSampleLevel(planet_material, planet_sampler, fuv_far.xy,
+                                    i32(fuv_far.z), 0.0);
+      let far = far4.rgb;
+      base = mix(base, far, k_far);
+      n = normalize(mix(n, n_geo, k_far));
+      ndl = max(dot(n, light), 0.0);
+      wrap = max((dot(n, light) + 0.08) / 1.08, 0.0);
+      ao = mix(ao, 1.0, k_far);
+      // Settlement lights (T0020): the bake's alpha is the night-light
+      // mask; the far field carries the same warm glow the impostor does,
+      // fading in as the sun sets over it.
+      let night_far = 1.0 - smoothstep(-0.05, 0.12, dot(n_geo, light));
+      emissive = emissive * (1.0 - k_far) +
+                 vec3<f32>(1.0, 0.72, 0.38) * far4.a * night_far * k_far * 0.06;
+      rough = mix(rough, 0.9, k_far);
+    }
+  }
+  var color = base * ao * (0.02 + 1.08 * mix(ndl, wrap, 0.35) * shadow) * frame.sun_color.rgb;
+  color *= mix(1.0, ao_ss, 0.7);
   let fill = max(dot(n, -light), 0.0);
-  color += base * fill * vec3<f32>(0.012, 0.017, 0.03);
+  color += base * ao * fill * vec3<f32>(0.012, 0.017, 0.03);
+  // Specular: GGX-shaped sun highlight driven by the material roughness
+  // (wet sand, ice and glossy mats read as such; rock stays matte).
+  {
+    let view = normalize(-(in.opos + u.aux.xyz));
+    let hv = normalize(light + view);
+    let ndh = max(dot(n, hv), 0.0);
+    let a2 = max(rough * rough * rough * rough, 1.0e-4);
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let dist_ggx = a2 / (3.14159 * dd * dd);
+    let f0 = 0.04;
+    color += frame.sun_color.rgb * dist_ggx * f0 * ndl * shadow * (0.25 + 0.75 * (1.0 - rough));
+  }
+  color += emissive;
   // Submerged terrain shades toward deep water by depth (atmo.a carries
   // the sea radius). This keeps the streamed seabed consistent with the
   // opaque ocean impostor — the ocean no longer flips color when chunks
@@ -703,7 +1086,58 @@ WGPUSurface create_surface(WGPUInstance instance, GLFWwindow* window,
 struct MeshEntry {
   WGPUBuffer buffer = nullptr;
   std::uint32_t vertex_count = 0;
+  // City meshes (T0021): indexed, in the 68-byte city vertex layout.
+  WGPUBuffer index_buffer = nullptr;
+  std::uint32_t index_count = 0;
 };
+
+// Column-major 4x4 helpers for the city frame block.
+void mat_mul(const float* a, const float* b, float* out) {
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      float sum = 0.0f;
+      for (int k = 0; k < 4; ++k) sum += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = sum;
+    }
+  }
+}
+bool mat_inverse(const float* m, float* out) {
+  float inv[16];
+  inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+  inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+  inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+  inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+  inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+  inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+  inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+  inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+  inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+  inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+  inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+  inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+  inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+  inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+  inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+  inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+  float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+  if (std::fabs(det) < 1e-30f) {
+    for (int i = 0; i < 16; ++i) out[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    return false;
+  }
+  det = 1.0f / det;
+  for (int i = 0; i < 16; ++i) out[i] = inv[i] * det;
+  return true;
+}
+std::uint16_t float_to_half(float f) {
+  std::uint32_t x;
+  std::memcpy(&x, &f, 4);
+  const std::uint32_t sign = (x >> 16) & 0x8000u;
+  std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xffu) - 127 + 15;
+  std::uint32_t mant = x & 0x7fffffu;
+  if (exp <= 0) return static_cast<std::uint16_t>(sign);
+  if (exp >= 31) return static_cast<std::uint16_t>(sign | 0x7c00u);
+  return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+}
 
 }  // namespace
 
@@ -740,6 +1174,128 @@ struct Rhi::Impl {
   };
   WGPUBindGroupLayout tex_layout = nullptr;
   WGPUSampler planet_sampler = nullptr;
+
+  // Surface material library (T0019): group 2 = albedo array + normal
+  // array + repeat sampler + material table uniform.
+  struct MaterialLib {
+    WGPUTexture albedo = nullptr;
+    WGPUTexture normal = nullptr;
+    WGPUTextureView albedo_view = nullptr;
+    WGPUTextureView normal_view = nullptr;
+    WGPUBindGroup group = nullptr;
+    std::uint32_t size = 0;
+    std::uint32_t layers = 0;
+    std::uint32_t mips = 1;
+  };
+  static constexpr std::uint32_t kMaterialSlots = 64;
+  static constexpr std::uint64_t kMaterialTableSize = kMaterialSlots * 3 * 16;
+  WGPUBindGroupLayout mat_layout = nullptr;
+  WGPUSampler material_sampler = nullptr;
+  WGPUBuffer material_table = nullptr;
+  MaterialLib material_lib;
+  float material_cpu[kMaterialSlots * 12] = {};
+  bool material_ready[kMaterialSlots] = {};
+  bool material_dirty = true;
+
+  MaterialLib make_material_lib(std::uint32_t size, std::uint32_t layers) {
+    MaterialLib lib;
+    lib.size = size;
+    lib.layers = layers;
+    lib.mips = 1;
+    while ((size >> lib.mips) >= 1U && lib.mips < 16) {
+      ++lib.mips;
+    }
+    WGPUTextureDescriptor desc{};
+    desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+    desc.dimension = WGPUTextureDimension_2D;
+    desc.size = WGPUExtent3D{size, size, layers};
+    desc.mipLevelCount = lib.mips;
+    desc.sampleCount = 1;
+    // Albedo is sRGB-encoded (photographs and generated colours alike):
+    // the sRGB format decodes to linear in the sampler, so the HDR chain
+    // lights physically plausible albedos. Normal/roughness/ao stay linear.
+    desc.format = WGPUTextureFormat_RGBA8UnormSrgb;
+    desc.label = sv("material-albedo");
+    lib.albedo = wgpuDeviceCreateTexture(device, &desc);
+    desc.format = WGPUTextureFormat_RGBA8Unorm;
+    desc.label = sv("material-normal");
+    lib.normal = wgpuDeviceCreateTexture(device, &desc);
+    WGPUTextureViewDescriptor view_desc{};
+    view_desc.dimension = WGPUTextureViewDimension_2DArray;
+    view_desc.baseArrayLayer = 0;
+    view_desc.arrayLayerCount = layers;
+    view_desc.baseMipLevel = 0;
+    view_desc.mipLevelCount = lib.mips;
+    view_desc.format = WGPUTextureFormat_RGBA8UnormSrgb;
+    view_desc.aspect = WGPUTextureAspect_All;
+    lib.albedo_view = wgpuTextureCreateView(lib.albedo, &view_desc);
+    view_desc.format = WGPUTextureFormat_RGBA8Unorm;
+    lib.normal_view = wgpuTextureCreateView(lib.normal, &view_desc);
+    WGPUBindGroupEntry entries[4] = {};
+    entries[0].binding = 0;
+    entries[0].textureView = lib.albedo_view;
+    entries[1].binding = 1;
+    entries[1].textureView = lib.normal_view;
+    entries[2].binding = 2;
+    entries[2].sampler = material_sampler;
+    entries[3].binding = 3;
+    entries[3].buffer = material_table;
+    entries[3].offset = 0;
+    entries[3].size = kMaterialTableSize;
+    WGPUBindGroupDescriptor group_desc{};
+    group_desc.layout = mat_layout;
+    group_desc.entryCount = 4;
+    group_desc.entries = entries;
+    lib.group = wgpuDeviceCreateBindGroup(device, &group_desc);
+    return lib;
+  }
+
+  void release_material_lib(MaterialLib& lib) {
+    if (lib.group != nullptr) wgpuBindGroupRelease(lib.group);
+    if (lib.albedo_view != nullptr) wgpuTextureViewRelease(lib.albedo_view);
+    if (lib.normal_view != nullptr) wgpuTextureViewRelease(lib.normal_view);
+    if (lib.albedo != nullptr) wgpuTextureRelease(lib.albedo);
+    if (lib.normal != nullptr) wgpuTextureRelease(lib.normal);
+    lib = MaterialLib{};
+  }
+
+  // Uploads one layer with a CPU box-filtered mip chain.
+  void write_material_layer(WGPUTexture texture, std::uint32_t layer, const std::uint8_t* rgba) {
+    std::vector<std::uint8_t> level(rgba, rgba + static_cast<std::size_t>(material_lib.size) *
+                                                    material_lib.size * 4);
+    std::uint32_t size = material_lib.size;
+    for (std::uint32_t mip = 0; mip < material_lib.mips; ++mip) {
+      WGPUTexelCopyTextureInfo dst{};
+      dst.texture = texture;
+      dst.mipLevel = mip;
+      dst.origin = WGPUOrigin3D{0, 0, layer};
+      dst.aspect = WGPUTextureAspect_All;
+      WGPUTexelCopyBufferLayout layout{};
+      layout.offset = 0;
+      layout.bytesPerRow = size * 4;
+      layout.rowsPerImage = size;
+      const WGPUExtent3D extent{size, size, 1};
+      wgpuQueueWriteTexture(queue, &dst, level.data(), level.size(), &layout, &extent);
+      if (size == 1) {
+        break;
+      }
+      const std::uint32_t half = size / 2;
+      std::vector<std::uint8_t> next(static_cast<std::size_t>(half) * half * 4);
+      for (std::uint32_t y = 0; y < half; ++y) {
+        for (std::uint32_t x = 0; x < half; ++x) {
+          for (std::uint32_t c = 0; c < 4; ++c) {
+            const std::uint32_t sum =
+                level[((2 * y) * size + 2 * x) * 4 + c] + level[((2 * y) * size + 2 * x + 1) * 4 + c] +
+                level[((2 * y + 1) * size + 2 * x) * 4 + c] +
+                level[((2 * y + 1) * size + 2 * x + 1) * 4 + c];
+            next[(y * half + x) * 4 + c] = static_cast<std::uint8_t>((sum + 2) / 4);
+          }
+        }
+      }
+      level.swap(next);
+      size = half;
+    }
+  }
 
   // --- T0018 WP1: HDR post chain ---------------------------------------
   static constexpr WGPUTextureFormat kHdrFormat = WGPUTextureFormat_RGBA16Float;
@@ -963,21 +1519,20 @@ struct Rhi::Impl {
 
   void write_ppm(const std::string& path, std::uint32_t w, std::uint32_t h,
                  const std::uint8_t* rgb) {
-    std::FILE* file = std::fopen(path.c_str(), "wb");
+    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(std::fopen(path.c_str(), "wb"), &std::fclose);
     if (file == nullptr) {
       std::fprintf(stderr, "recorder: FAILED to open %s\n", path.c_str());
       return;
     }
-    std::fprintf(file, "P6\n%u %u\n255\n", w, h);
-    std::fwrite(rgb, 1, static_cast<std::size_t>(w) * h * 3, file);
-    std::fclose(file);
+    std::fprintf(file.get(), "P6\n%u %u\n255\n", w, h);
+    std::fwrite(rgb, 1, static_cast<std::size_t>(w) * h * 3, file.get());
   }
 
   void append_time_index(float time_s) {
-    std::FILE* file = std::fopen((rec_dir + "/times.txt").c_str(), "a");
+    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(
+        std::fopen((rec_dir + "/times.txt").c_str(), "a"), &std::fclose);
     if (file != nullptr) {
-      std::fprintf(file, "seq-%04d %.4f\n", rec_seq_index, time_s);
-      std::fclose(file);
+      std::fprintf(file.get(), "seq-%04d %.4f\n", rec_seq_index, time_s);
     }
   }
 
@@ -1013,7 +1568,8 @@ struct Rhi::Impl {
     }
     WGPUTextureDescriptor desc{};
     desc.label = sv("depth");
-    desc.usage = WGPUTextureUsage_RenderAttachment;
+    desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding |
+                 WGPUTextureUsage_CopySrc;
     desc.dimension = WGPUTextureDimension_2D;
     desc.size = WGPUExtent3D{width, height, 1};
     desc.format = WGPUTextureFormat_Depth32Float;
@@ -1023,10 +1579,13 @@ struct Rhi::Impl {
     depth_view = wgpuTextureCreateView(depth_texture, nullptr);
   }
 
+  void ensure_city_resources_early();
+
   void ensure_mesh_pipeline() {
     if (mesh_pipeline != nullptr) {
       return;
     }
+    ensure_city_resources_early();
     WGPUShaderSourceWGSL wgsl{};
     wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
     wgsl.code = sv(kMeshShader);
@@ -1041,7 +1600,7 @@ struct Rhi::Impl {
     layout_entries[0].buffer.hasDynamicOffset = 1U;
     layout_entries[0].buffer.minBindingSize = kItemUniformSize;
     layout_entries[1].binding = 1;
-    layout_entries[1].visibility = WGPUShaderStage_Fragment;
+    layout_entries[1].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
     layout_entries[1].buffer.type = WGPUBufferBindingType_Uniform;
     layout_entries[1].buffer.hasDynamicOffset = 0U;
     layout_entries[1].buffer.minBindingSize = kFrameUniformSize;
@@ -1082,30 +1641,87 @@ struct Rhi::Impl {
     sampler_desc.maxAnisotropy = 1;
     planet_sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
 
-    WGPUBindGroupLayout group_layouts[2] = {bind_layout, tex_layout};
+    // Group 2: the surface material library (T0019).
+    WGPUBindGroupLayoutEntry mat_entries[4] = {};
+    mat_entries[0].binding = 0;
+    mat_entries[0].visibility = WGPUShaderStage_Fragment;
+    mat_entries[0].texture.sampleType = WGPUTextureSampleType_Float;
+    mat_entries[0].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+    mat_entries[1].binding = 1;
+    mat_entries[1].visibility = WGPUShaderStage_Fragment;
+    mat_entries[1].texture.sampleType = WGPUTextureSampleType_Float;
+    mat_entries[1].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+    mat_entries[2].binding = 2;
+    mat_entries[2].visibility = WGPUShaderStage_Fragment;
+    mat_entries[2].sampler.type = WGPUSamplerBindingType_Filtering;
+    mat_entries[3].binding = 3;
+    mat_entries[3].visibility = WGPUShaderStage_Fragment;
+    mat_entries[3].buffer.type = WGPUBufferBindingType_Uniform;
+    mat_entries[3].buffer.hasDynamicOffset = 0U;
+    mat_entries[3].buffer.minBindingSize = kMaterialTableSize;
+    WGPUBindGroupLayoutDescriptor mat_layout_desc{};
+    mat_layout_desc.entryCount = 4;
+    mat_layout_desc.entries = mat_entries;
+    mat_layout = wgpuDeviceCreateBindGroupLayout(device, &mat_layout_desc);
+    {
+      WGPUSamplerDescriptor msd{};
+      msd.label = sv("material-sampler");
+      msd.addressModeU = WGPUAddressMode_Repeat;
+      msd.addressModeV = WGPUAddressMode_Repeat;
+      msd.addressModeW = WGPUAddressMode_Repeat;
+      msd.magFilter = WGPUFilterMode_Linear;
+      msd.minFilter = WGPUFilterMode_Linear;
+      msd.mipmapFilter = WGPUMipmapFilterMode_Linear;
+      msd.lodMinClamp = 0.0f;
+      msd.lodMaxClamp = 32.0f;
+      msd.maxAnisotropy = 8;
+      material_sampler = wgpuDeviceCreateSampler(device, &msd);
+      WGPUBufferDescriptor bd{};
+      bd.label = sv("material-table");
+      bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+      bd.size = kMaterialTableSize;
+      material_table = wgpuDeviceCreateBuffer(device, &bd);
+      for (std::uint32_t i = 0; i < kMaterialSlots; ++i) {
+        float* row = material_cpu + i * 12;
+        row[0] = row[1] = row[2] = 1.0f;
+        row[3] = 4.0f;
+        row[4] = 0.85f;
+        row[5] = 0.0f;
+        row[6] = 1.0f;
+        row[7] = 0.0f;
+        row[8] = row[9] = row[10] = 0.5f;
+        row[11] = 0.0f;
+      }
+      material_dirty = true;
+      // A 1x1 placeholder library so every pipeline can bind group 2.
+      material_lib = make_material_lib(1, 1);
+      const std::uint8_t grey[4] = {128, 128, 128, 128};
+      const std::uint8_t flat[4] = {128, 128, 220, 255};
+      write_material_layer(material_lib.albedo, 0, grey);
+      write_material_layer(material_lib.normal, 0, flat);
+    }
+
+    WGPUBindGroupLayout group_layouts[4] = {bind_layout, tex_layout, mat_layout, receive_layout};
     WGPUPipelineLayoutDescriptor pipeline_layout_desc{};
-    pipeline_layout_desc.bindGroupLayoutCount = 2;
+    pipeline_layout_desc.bindGroupLayoutCount = 4;
     pipeline_layout_desc.bindGroupLayouts = group_layouts;
     WGPUPipelineLayout pipeline_layout =
         wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
 
-    WGPUVertexAttribute attributes[4] = {};
+    WGPUVertexAttribute attributes[3] = {};
     attributes[0].format = WGPUVertexFormat_Float32x3;
     attributes[0].offset = 0;
     attributes[0].shaderLocation = 0;
     attributes[1].format = WGPUVertexFormat_Float32x3;
     attributes[1].offset = 12;
     attributes[1].shaderLocation = 1;
-    attributes[2].format = WGPUVertexFormat_Float32;  // mat_pack
+    attributes[2].format = WGPUVertexFormat_Float32x4;  // palette weights
     attributes[2].offset = 24;
     attributes[2].shaderLocation = 2;
-    attributes[3].format = WGPUVertexFormat_Float32;  // material blend
-    attributes[3].offset = 28;
-    attributes[3].shaderLocation = 3;
     WGPUVertexBufferLayout vertex_layout{};
-    vertex_layout.arrayStride = 32;
+    vertex_layout.arrayStride = 40;
     vertex_layout.stepMode = WGPUVertexStepMode_Vertex;
-    vertex_layout.attributeCount = 4;
+    vertex_layout.attributeCount = 3;
     vertex_layout.attributes = attributes;
 
     WGPUDepthStencilState depth_state{};
@@ -1357,14 +1973,931 @@ struct Rhi::Impl {
                           &extent);
   }
 
+  // --- T0021: the city pipeline ----------------------------------------
+  // Indexed 68-byte vertices, the demo's forward PBR shader (city_shader.
+  // hpp) on the game's frame. Group 1 carries the city frame block,
+  // materials, lights, the leaf texture, shadow cascades, ambient
+  // occlusion, the sky cube and (dynamic) the cascade matrix. WP1 adds
+  // the passes: three shadow cascades, a depth/normal prepass with SSAO,
+  // and temporal anti-aliasing; lit terrain receives shadows and AO
+  // through group 3.
+  static constexpr std::uint32_t kCityCascades = 3;
+  static constexpr std::uint32_t kShadowSize = 2048;
+  static constexpr std::uint64_t kCityFrameSize = 8 * 64 + 9 * 16 + 6 * 16;  // 800
+  static constexpr std::uint32_t kCitySkySize = 32;
+  static constexpr std::uint32_t kCitySkyMips = 6;
+  WGPURenderPipeline city_pipeline = nullptr;
+  WGPURenderPipeline city_shadow_pipeline = nullptr;
+  WGPURenderPipeline city_prepass_pipeline = nullptr;
+  WGPURenderPipeline terrain_shadow_pipeline = nullptr;
+  WGPURenderPipeline terrain_prepass_pipeline = nullptr;
+  WGPURenderPipeline ssao_pipeline = nullptr;
+  WGPURenderPipeline blur_pipeline_ao = nullptr;
+  WGPURenderPipeline taa_pipeline = nullptr;
+  WGPUBindGroupLayout city_layout = nullptr;
+  WGPUBindGroupLayout receive_layout = nullptr;      // terrain group 3
+  WGPUBindGroupLayout terrain_pass_layout = nullptr; // shadow/prepass group 1
+  WGPUBindGroupLayout ao_layout = nullptr;           // ssao/blur group 0
+  WGPUBindGroupLayout taa_layout = nullptr;          // taa group 1
+  WGPUBindGroup city_group = nullptr;
+  WGPUBindGroup receive_group = nullptr;
+  WGPUBindGroup terrain_pass_group = nullptr;
+  WGPUBindGroup ssao_group = nullptr;
+  WGPUBindGroup blur_group = nullptr;
+  WGPUBindGroup taa_group[2] = {nullptr, nullptr};
+  WGPUBindGroup post_taa_only[2] = {nullptr, nullptr};
+  WGPUBindGroup post_taa[2] = {nullptr, nullptr};
+  WGPUBuffer city_frame_buf = nullptr;
+  WGPUBuffer city_material_buf = nullptr;
+  WGPUBuffer city_light_buf = nullptr;
+  WGPUBuffer city_cascade_buf = nullptr;
+  WGPUBuffer taa_buf = nullptr;
+  std::uint64_t city_material_size = 0;
+  std::uint64_t city_light_size = 0;
+  std::uint32_t city_light_count = 0;
+  bool city_group_dirty = true;
+  bool city_resources_ready = false;
+  WGPUSampler city_leaf_samp = nullptr;
+  WGPUSampler city_shadow_samp = nullptr;
+  WGPUSampler city_clamp_samp = nullptr;
+  WGPUSampler city_cube_samp = nullptr;
+  WGPUTexture city_leaf = nullptr;
+  WGPUTextureView city_leaf_view = nullptr;
+  WGPUTexture city_shadow = nullptr;        // depth array, kCityCascades layers
+  WGPUTextureView city_shadow_view = nullptr;
+  WGPUTexture city_shadow_dummy = nullptr;
+  WGPUTextureView city_shadow_dummy_view = nullptr;
+  WGPUBindGroup city_caster_group = nullptr;
+  WGPUTextureView city_shadow_layer[kCityCascades] = {nullptr, nullptr, nullptr};
+  WGPUTexture city_sky = nullptr;           // small prefiltered sky cube
+  WGPUTextureView city_sky_view = nullptr;
+  // Size-dependent targets.
+  std::uint32_t city_w = 0;
+  std::uint32_t city_h = 0;
+  WGPUTexture depth_pre = nullptr;
+  WGPUTextureView depth_pre_view = nullptr;
+  WGPUTexture normal_pre = nullptr;
+  WGPUTextureView normal_pre_view = nullptr;
+  WGPUTexture ao_a = nullptr;
+  WGPUTextureView ao_a_view = nullptr;
+  WGPUTexture ao_b = nullptr;
+  WGPUTextureView ao_b_view = nullptr;
+  WGPUTexture taa_hist[2] = {nullptr, nullptr};
+  WGPUTextureView taa_hist_view[2] = {nullptr, nullptr};
+  int taa_parity = 0;
+  bool taa_valid = false;
+  float frame_jitter[2] = {0.0f, 0.0f};   // NDC units
+  float cascade_vp[kCityCascades][16] = {};  // this frame's light matrices (culling)
+  float cascade_radius[kCityCascades] = {1.0f, 1.0f, 1.0f};
+  float frame_jitter_px[2] = {0.0f, 0.0f};
+  float city_view_proj_clean[16] = {};
+  CitySettings city_settings;
+  float city_prev_view_proj[16] = {};
+  bool passes_ran = false;  // shadows/AO produced this frame
+  // Readback (--sweep).
+  bool readback_requested = false;
+  bool readback_ready = false;
+  std::vector<std::uint8_t> readback_rgba;
+  std::vector<float> readback_depth;
+  std::uint32_t readback_w = 0;
+  std::uint32_t readback_h = 0;
+
+  WGPUTexture make_target(std::uint32_t w, std::uint32_t h, WGPUTextureFormat fmt, WGPUTextureUsage usage,
+                          std::uint32_t layers, std::uint32_t mips, const char* label) {
+    WGPUTextureDescriptor td{};
+    td.label = sv(label);
+    td.usage = usage;
+    td.dimension = WGPUTextureDimension_2D;
+    td.size = WGPUExtent3D{w, h, layers};
+    td.format = fmt;
+    td.mipLevelCount = mips;
+    td.sampleCount = 1;
+    return wgpuDeviceCreateTexture(device, &td);
+  }
+
+  // Resources every pipeline binds (the terrain pipeline's group 3
+  // included), created before any pipeline.
+  void ensure_city_resources() {
+    if (city_resources_ready) {
+      return;
+    }
+    city_resources_ready = true;
+    // Layouts.
+    {
+      WGPUBindGroupLayoutEntry e[12] = {};
+      e[0].binding = 0;
+      e[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+      e[0].buffer.type = WGPUBufferBindingType_Uniform;
+      e[0].buffer.minBindingSize = kCityFrameSize;
+      e[1].binding = 1;
+      e[1].visibility = WGPUShaderStage_Fragment;
+      e[1].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+      e[2].binding = 2;
+      e[2].visibility = WGPUShaderStage_Fragment;
+      e[2].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+      e[3].binding = 3;
+      e[3].visibility = WGPUShaderStage_Fragment;
+      e[3].texture.sampleType = WGPUTextureSampleType_Float;
+      e[3].texture.viewDimension = WGPUTextureViewDimension_2D;
+      e[4].binding = 4;
+      e[4].visibility = WGPUShaderStage_Fragment;
+      e[4].sampler.type = WGPUSamplerBindingType_Filtering;
+      e[5].binding = 5;
+      e[5].visibility = WGPUShaderStage_Fragment;
+      e[5].texture.sampleType = WGPUTextureSampleType_Depth;
+      e[5].texture.viewDimension = WGPUTextureViewDimension_2DArray;
+      e[6].binding = 6;
+      e[6].visibility = WGPUShaderStage_Fragment;
+      e[6].sampler.type = WGPUSamplerBindingType_Comparison;
+      e[7].binding = 7;
+      e[7].visibility = WGPUShaderStage_Fragment;
+      e[7].texture.sampleType = WGPUTextureSampleType_Float;
+      e[7].texture.viewDimension = WGPUTextureViewDimension_2D;
+      e[8].binding = 8;
+      e[8].visibility = WGPUShaderStage_Fragment;
+      e[8].sampler.type = WGPUSamplerBindingType_Filtering;
+      e[9].binding = 9;
+      e[9].visibility = WGPUShaderStage_Fragment;
+      e[9].texture.sampleType = WGPUTextureSampleType_Float;
+      e[9].texture.viewDimension = WGPUTextureViewDimension_Cube;
+      e[10].binding = 10;
+      e[10].visibility = WGPUShaderStage_Fragment;
+      e[10].sampler.type = WGPUSamplerBindingType_Filtering;
+      e[11].binding = 11;
+      e[11].visibility = WGPUShaderStage_Vertex;
+      e[11].buffer.type = WGPUBufferBindingType_Uniform;
+      e[11].buffer.hasDynamicOffset = 1U;
+      e[11].buffer.minBindingSize = 64;
+      WGPUBindGroupLayoutDescriptor ld{};
+      ld.entryCount = 12;
+      ld.entries = e;
+      city_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+      // Terrain receive (group 3): frame block, shadow maps, ao.
+      WGPUBindGroupLayoutEntry r[6] = {};
+      r[0].binding = 0;
+      r[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+      r[0].buffer.type = WGPUBufferBindingType_Uniform;
+      r[0].buffer.minBindingSize = kCityFrameSize;
+      r[1] = e[5]; r[1].binding = 1;
+      r[2] = e[6]; r[2].binding = 2;
+      r[3] = e[7]; r[3].binding = 3;
+      r[4] = e[8]; r[4].binding = 4;
+      r[5].binding = 5;
+      r[5].visibility = WGPUShaderStage_Fragment;
+      r[5].texture.sampleType = WGPUTextureSampleType_Depth;
+      r[5].texture.viewDimension = WGPUTextureViewDimension_2D;
+      ld.entryCount = 6;
+      ld.entries = r;
+      receive_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+      // Terrain shadow/prepass (group 1): cascade (dynamic) + frame block.
+      WGPUBindGroupLayoutEntry t[2] = {};
+      t[0].binding = 0;
+      t[0].visibility = WGPUShaderStage_Vertex;
+      t[0].buffer.type = WGPUBufferBindingType_Uniform;
+      t[0].buffer.hasDynamicOffset = 1U;
+      t[0].buffer.minBindingSize = 64;
+      t[1].binding = 1;
+      t[1].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+      t[1].buffer.type = WGPUBufferBindingType_Uniform;
+      t[1].buffer.minBindingSize = kCityFrameSize;
+      ld.entryCount = 2;
+      ld.entries = t;
+      terrain_pass_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+      // SSAO / blur (group 0): frame block, depth, normal, sampler, ao.
+      WGPUBindGroupLayoutEntry a[5] = {};
+      a[0].binding = 0;
+      a[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+      a[0].buffer.type = WGPUBufferBindingType_Uniform;
+      a[0].buffer.minBindingSize = kCityFrameSize;
+      a[1].binding = 1;
+      a[1].visibility = WGPUShaderStage_Fragment;
+      a[1].texture.sampleType = WGPUTextureSampleType_Depth;
+      a[1].texture.viewDimension = WGPUTextureViewDimension_2D;
+      a[2].binding = 2;
+      a[2].visibility = WGPUShaderStage_Fragment;
+      a[2].texture.sampleType = WGPUTextureSampleType_Float;
+      a[2].texture.viewDimension = WGPUTextureViewDimension_2D;
+      a[3].binding = 3;
+      a[3].visibility = WGPUShaderStage_Fragment;
+      a[3].sampler.type = WGPUSamplerBindingType_Filtering;
+      a[4].binding = 4;
+      a[4].visibility = WGPUShaderStage_Fragment;
+      a[4].texture.sampleType = WGPUTextureSampleType_Float;
+      a[4].texture.viewDimension = WGPUTextureViewDimension_2D;
+      ld.entryCount = 5;
+      ld.entries = a;
+      ao_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+      // TAA (group 1): params, current, history.
+      WGPUBindGroupLayoutEntry q[3] = {};
+      q[0].binding = 0;
+      q[0].visibility = WGPUShaderStage_Fragment;
+      q[0].buffer.type = WGPUBufferBindingType_Uniform;
+      q[0].buffer.minBindingSize = 160;
+      q[1].binding = 1;
+      q[1].visibility = WGPUShaderStage_Fragment;
+      q[1].texture.sampleType = WGPUTextureSampleType_Float;
+      q[1].texture.viewDimension = WGPUTextureViewDimension_2D;
+      q[2] = q[1]; q[2].binding = 2;
+      ld.entryCount = 3;
+      ld.entries = q;
+      taa_layout = wgpuDeviceCreateBindGroupLayout(device, &ld);
+    }
+    // Samplers.
+    {
+      WGPUSamplerDescriptor sd{};
+      sd.label = sv("city-leaf");
+      sd.addressModeU = sd.addressModeV = sd.addressModeW = WGPUAddressMode_ClampToEdge;
+      sd.magFilter = sd.minFilter = WGPUFilterMode_Linear;
+      sd.mipmapFilter = WGPUMipmapFilterMode_Linear;
+      sd.lodMaxClamp = 32.0f;
+      sd.maxAnisotropy = 4;
+      city_leaf_samp = wgpuDeviceCreateSampler(device, &sd);
+      sd.label = sv("city-clamp");
+      sd.maxAnisotropy = 1;
+      sd.mipmapFilter = WGPUMipmapFilterMode_Nearest;
+      city_clamp_samp = wgpuDeviceCreateSampler(device, &sd);
+      sd.label = sv("city-cube");
+      sd.mipmapFilter = WGPUMipmapFilterMode_Linear;
+      city_cube_samp = wgpuDeviceCreateSampler(device, &sd);
+      sd.label = sv("city-shadow");
+      sd.compare = WGPUCompareFunction_LessEqual;
+      sd.mipmapFilter = WGPUMipmapFilterMode_Nearest;
+      city_shadow_samp = wgpuDeviceCreateSampler(device, &sd);
+    }
+    // Leaf texture: procedural leaf clusters (alpha = coverage), sRGB.
+    {
+      const std::uint32_t ls = 256;
+      std::vector<std::uint8_t> rgba(static_cast<std::size_t>(ls) * ls * 4, 0);
+      struct Leaf { float cx, cy, rx, ry, rot, shade; };
+      std::vector<Leaf> leaves;
+      const auto h01 = [](std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+        std::uint32_t h = x * 0x8da6b343u ^ y * 0xd8163841u ^ z * 0xcb1ab31fu;
+        h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+        return static_cast<float>(h & 0xffffffu) / 16777216.0f;
+      };
+      for (std::uint32_t i = 0; i < 60; ++i) {
+        const float a = h01(i, 1, 7) * 6.2831853f;
+        const float r = std::sqrt(h01(i, 2, 7)) * 0.42f;
+        leaves.push_back(Leaf{0.5f + std::cos(a) * r, 0.5f + std::sin(a) * r, 0.05f + 0.06f * h01(i, 3, 7),
+                              0.025f + 0.03f * h01(i, 4, 7), h01(i, 5, 7) * 3.14159f, 0.6f + 0.5f * h01(i, 6, 7)});
+      }
+      for (std::uint32_t y = 0; y < ls; ++y) {
+        for (std::uint32_t x = 0; x < ls; ++x) {
+          const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(ls);
+          const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(ls);
+          float cover = 0.0f, shade = 0.0f;
+          for (const Leaf& l : leaves) {
+            const float dx = u - l.cx, dy = v - l.cy;
+            const float c = std::cos(l.rot), sn = std::sin(l.rot);
+            const float lx = (dx * c + dy * sn) / l.rx, ly = (-dx * sn + dy * c) / l.ry;
+            const float d = lx * lx + ly * ly;
+            if (d < 1.0f) {
+              const float a = std::min(1.0f, (1.0f - d) * 6.0f);
+              if (a > cover) { cover = a; shade = l.shade * (0.85f + 0.3f * std::fabs(lx)); }
+            }
+          }
+          const std::size_t i = (static_cast<std::size_t>(y) * ls + x) * 4;
+          const float g = 0.26f * shade, r = 0.10f * shade + 0.04f * (1.0f - shade), b = 0.05f * shade;
+          rgba[i + 0] = static_cast<std::uint8_t>(std::pow(std::min(std::max(r, 0.0f), 1.0f), 1.0f / 2.2f) * 255.0f);
+          rgba[i + 1] = static_cast<std::uint8_t>(std::pow(std::min(std::max(g, 0.0f), 1.0f), 1.0f / 2.2f) * 255.0f);
+          rgba[i + 2] = static_cast<std::uint8_t>(std::pow(std::min(std::max(b, 0.0f), 1.0f), 1.0f / 2.2f) * 255.0f);
+          rgba[i + 3] = static_cast<std::uint8_t>(cover * 255.0f);
+        }
+      }
+      city_leaf = make_target(ls, ls, WGPUTextureFormat_RGBA8UnormSrgb,
+                              WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst, 1, 1, "city-leaf");
+      city_leaf_view = wgpuTextureCreateView(city_leaf, nullptr);
+      WGPUTexelCopyTextureInfo dst{};
+      dst.texture = city_leaf;
+      WGPUTexelCopyBufferLayout layout{};
+      layout.bytesPerRow = ls * 4;
+      layout.rowsPerImage = ls;
+      const WGPUExtent3D extent{ls, ls, 1};
+      wgpuQueueWriteTexture(queue, &dst, rgba.data(), rgba.size(), &layout, &extent);
+    }
+    // Shadow cascades: a depth array with one view per layer.
+    {
+      city_shadow = make_target(kShadowSize, kShadowSize, WGPUTextureFormat_Depth32Float,
+                                WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment, kCityCascades, 1,
+                                "city-shadow");
+      WGPUTextureViewDescriptor vd{};
+      vd.format = WGPUTextureFormat_Depth32Float;
+      vd.dimension = WGPUTextureViewDimension_2DArray;
+      vd.baseMipLevel = 0;
+      vd.mipLevelCount = 1;
+      vd.baseArrayLayer = 0;
+      vd.arrayLayerCount = kCityCascades;
+      vd.aspect = WGPUTextureAspect_DepthOnly;
+      city_shadow_view = wgpuTextureCreateView(city_shadow, &vd);
+      // The shadow pass binds the same layout while writing the cascades;
+      // its group carries a 1x1 stand-in for the shadow array instead.
+      city_shadow_dummy = make_target(1, 1, WGPUTextureFormat_Depth32Float, WGPUTextureUsage_TextureBinding, 1, 1,
+                                      "city-shadow-dummy");
+      vd.arrayLayerCount = 1;
+      city_shadow_dummy_view = wgpuTextureCreateView(city_shadow_dummy, &vd);
+      for (std::uint32_t i = 0; i < kCityCascades; ++i) {
+        vd.dimension = WGPUTextureViewDimension_2D;
+        vd.baseArrayLayer = i;
+        vd.arrayLayerCount = 1;
+        city_shadow_layer[i] = wgpuTextureCreateView(city_shadow, &vd);
+      }
+    }
+    // The sky cube: a small RGBA16F cube with a mip chain, refilled from
+    // the analytic sky each frame (mip = roughness).
+    {
+      city_sky = make_target(kCitySkySize, kCitySkySize, WGPUTextureFormat_RGBA16Float,
+                             WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst, 6, kCitySkyMips, "city-sky");
+      WGPUTextureViewDescriptor vd{};
+      vd.format = WGPUTextureFormat_RGBA16Float;
+      vd.dimension = WGPUTextureViewDimension_Cube;
+      vd.baseMipLevel = 0;
+      vd.mipLevelCount = kCitySkyMips;
+      vd.baseArrayLayer = 0;
+      vd.arrayLayerCount = 6;
+      vd.aspect = WGPUTextureAspect_All;
+      city_sky_view = wgpuTextureCreateView(city_sky, &vd);
+    }
+    // Buffers.
+    {
+      WGPUBufferDescriptor bd{};
+      bd.label = sv("city-frame");
+      bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+      bd.size = kCityFrameSize;
+      city_frame_buf = wgpuDeviceCreateBuffer(device, &bd);
+      bd.label = sv("city-cascades");
+      bd.size = kUniformStride * kCityCascades;
+      city_cascade_buf = wgpuDeviceCreateBuffer(device, &bd);
+      bd.label = sv("taa");
+      bd.size = 160;
+      taa_buf = wgpuDeviceCreateBuffer(device, &bd);
+    }
+    if (city_material_buf == nullptr) {
+      const CityMaterial one{};
+      set_city_materials_impl(&one, 1);
+    }
+    if (city_light_buf == nullptr) {
+      const CityLight none{};
+      set_city_lights_impl(&none, 0);
+    }
+    // A 1x1 white AO placeholder until the size-dependent targets exist.
+    ensure_city_targets(1, 1);
+  }
+
+  // Orthographic light frustum around a camera-frustum slice (camera at
+  // the origin, basis and half-tangents from the frame), texel-snapped.
+  void fit_cascade(const FrameParams& f, float zn, float zf, float* out_vp, float* out_extent) const {
+    const float* r = f.cam_right;
+    const float* up = f.cam_up;
+    const float* fw = f.cam_fwd;
+    float corners[8][3];
+    int k = 0;
+    for (const float z : {zn, zf}) {
+      const float hh = f.tan_half_y * z;
+      const float hw = f.tan_half_x * z;
+      for (int i = 0; i < 4; ++i) {
+        const float sx = (i & 1) ? 1.0f : -1.0f;
+        const float sy = (i & 2) ? 1.0f : -1.0f;
+        for (int c = 0; c < 3; ++c) corners[k][c] = fw[c] * z + r[c] * (sx * hw) + up[c] * (sy * hh);
+        ++k;
+      }
+    }
+    float centre[3] = {0.0f, 0.0f, 0.0f};
+    for (auto& c : corners) for (int i = 0; i < 3; ++i) centre[i] += c[i] * 0.125f;
+    float radius = 0.0f;
+    for (auto& c : corners) {
+      const float d[3] = {c[0] - centre[0], c[1] - centre[1], c[2] - centre[2]};
+      radius = std::max(radius, std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+    }
+    radius = std::ceil(radius * 4.0f) / 4.0f;
+    float L[3] = {f.sun_dir[0], f.sun_dir[1], f.sun_dir[2]};
+    const float ll = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+    for (float& v : L) v /= ll > 0.0f ? ll : 1.0f;
+    const float depth_pad = 600.0f;
+    // View: from centre + L * (radius + pad/2) toward the centre.
+    const float eye[3] = {centre[0] + L[0] * (radius + depth_pad * 0.5f), centre[1] + L[1] * (radius + depth_pad * 0.5f),
+                          centre[2] + L[2] * (radius + depth_pad * 0.5f)};
+    const float fwd[3] = {-L[0], -L[1], -L[2]};
+    float upv[3] = {0.0f, 1.0f, 0.0f};
+    if (std::fabs(L[1]) > 0.95f) { upv[0] = 0.0f; upv[1] = 0.0f; upv[2] = 1.0f; }
+    float s[3] = {fwd[1] * upv[2] - fwd[2] * upv[1], fwd[2] * upv[0] - fwd[0] * upv[2], fwd[0] * upv[1] - fwd[1] * upv[0]};
+    const float sl = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+    for (float& v : s) v /= sl > 0.0f ? sl : 1.0f;
+    const float u[3] = {s[1] * fwd[2] - s[2] * fwd[1], s[2] * fwd[0] - s[0] * fwd[2], s[0] * fwd[1] - s[1] * fwd[0]};
+    float view[16] = {};
+    view[0] = s[0]; view[4] = s[1]; view[8] = s[2];
+    view[1] = u[0]; view[5] = u[1]; view[9] = u[2];
+    view[2] = -fwd[0]; view[6] = -fwd[1]; view[10] = -fwd[2];
+    view[12] = -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2]);
+    view[13] = -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2]);
+    view[14] = fwd[0] * eye[0] + fwd[1] * eye[1] + fwd[2] * eye[2];
+    view[15] = 1.0f;
+    // Texel snapping of the centre in light space.
+    const float texel = 2.0f * radius / static_cast<float>(kShadowSize);
+    const float cx = view[0] * centre[0] + view[4] * centre[1] + view[8] * centre[2] + view[12];
+    const float cy = view[1] * centre[0] + view[5] * centre[1] + view[9] * centre[2] + view[13];
+    view[12] += std::floor(cx / texel) * texel - cx;
+    view[13] += std::floor(cy / texel) * texel - cy;
+    const float depth_range = 2.0f * radius + depth_pad;
+    // Orthographic, z in [0, 1] (near = 0).
+    float proj[16] = {};
+    proj[0] = 1.0f / radius;
+    proj[5] = 1.0f / radius;
+    proj[10] = 1.0f / (0.0f - depth_range);
+    proj[14] = 0.0f;
+    proj[15] = 1.0f;
+    mat_mul(proj, view, out_vp);
+    *out_extent = radius;
+  }
+
+  void release_city_targets() {
+    for (WGPUBindGroup* g : {&ssao_group, &blur_group, &taa_group[0], &taa_group[1], &post_taa_only[0], &post_taa_only[1],
+                             &post_taa[0], &post_taa[1], &receive_group}) {
+      if (*g != nullptr) wgpuBindGroupRelease(*g);
+      *g = nullptr;
+    }
+    for (WGPUTextureView* v : {&depth_pre_view, &normal_pre_view, &ao_a_view, &ao_b_view, &taa_hist_view[0], &taa_hist_view[1]}) {
+      if (*v != nullptr) wgpuTextureViewRelease(*v);
+      *v = nullptr;
+    }
+    for (WGPUTexture* t : {&depth_pre, &normal_pre, &ao_a, &ao_b, &taa_hist[0], &taa_hist[1]}) {
+      if (*t != nullptr) wgpuTextureRelease(*t);
+      *t = nullptr;
+    }
+    taa_valid = false;
+    city_group_dirty = true;
+  }
+
+  // Size-dependent targets: the prepass depth/normal, the two AO
+  // buffers, the two TAA history buffers, and every bind group that
+  // references them.
+  void ensure_city_targets(std::uint32_t w, std::uint32_t h) {
+    if (depth_pre != nullptr && city_w == w && city_h == h) {
+      return;
+    }
+    release_city_targets();
+    city_w = w;
+    city_h = h;
+    const WGPUTextureUsage rt = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
+    depth_pre = make_target(w, h, WGPUTextureFormat_Depth32Float, rt, 1, 1, "city-depth-pre");
+    depth_pre_view = wgpuTextureCreateView(depth_pre, nullptr);
+    normal_pre = make_target(w, h, WGPUTextureFormat_RGBA16Float, rt, 1, 1, "city-normal-pre");
+    normal_pre_view = wgpuTextureCreateView(normal_pre, nullptr);
+    // Occlusion at half resolution (the demo's option; the blur and the
+    // bilinear read in the shading hide the step).
+    const std::uint32_t aw = std::max(1u, w / 2);
+    const std::uint32_t ah = std::max(1u, h / 2);
+    ao_a = make_target(aw, ah, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-a");
+    ao_a_view = wgpuTextureCreateView(ao_a, nullptr);
+    ao_b = make_target(aw, ah, WGPUTextureFormat_R8Unorm, rt | WGPUTextureUsage_CopyDst, 1, 1, "city-ao-b");
+    ao_b_view = wgpuTextureCreateView(ao_b, nullptr);
+    for (int i = 0; i < 2; ++i) {
+      taa_hist[i] = make_target(w, h, kHdrFormat, rt, 1, 1, "city-taa");
+      taa_hist_view[i] = wgpuTextureCreateView(taa_hist[i], nullptr);
+    }
+    // AO starts white (the passes fill it when they run).
+    {
+      std::vector<std::uint8_t> white(static_cast<std::size_t>(((aw + 255) / 256) * 256) * ah, 255);
+      for (WGPUTexture t : {ao_a, ao_b}) {
+        WGPUTexelCopyTextureInfo dst{};
+        dst.texture = t;
+        WGPUTexelCopyBufferLayout layout{};
+        layout.bytesPerRow = ((aw + 255) / 256) * 256;
+        layout.rowsPerImage = ah;
+        const WGPUExtent3D extent{aw, ah, 1};
+        wgpuQueueWriteTexture(queue, &dst, white.data(), white.size(), &layout, &extent);
+      }
+    }
+    // Bind groups over the targets.
+    {
+      WGPUBindGroupEntry e[5] = {};
+      e[0].binding = 0; e[0].buffer = city_frame_buf; e[0].size = kCityFrameSize;
+      e[1].binding = 1; e[1].textureView = depth_pre_view;
+      e[2].binding = 2; e[2].textureView = normal_pre_view;
+      e[3].binding = 3; e[3].sampler = city_clamp_samp;
+      e[4].binding = 4; e[4].textureView = ao_b_view;
+      WGPUBindGroupDescriptor bd{};
+      bd.layout = ao_layout;
+      bd.entryCount = 5;
+      bd.entries = e;
+      ssao_group = wgpuDeviceCreateBindGroup(device, &bd);
+      e[4].textureView = ao_a_view;
+      blur_group = wgpuDeviceCreateBindGroup(device, &bd);
+      WGPUBindGroupEntry r[6] = {};
+      r[0].binding = 0; r[0].buffer = city_frame_buf; r[0].size = kCityFrameSize;
+      r[1].binding = 1; r[1].textureView = city_shadow_view;
+      r[2].binding = 2; r[2].sampler = city_shadow_samp;
+      r[3].binding = 3; r[3].textureView = ao_b_view;
+      r[4].binding = 4; r[4].sampler = city_clamp_samp;
+      r[5].binding = 5; r[5].textureView = depth_pre_view;
+      bd.layout = receive_layout;
+      bd.entryCount = 6;
+      bd.entries = r;
+      receive_group = wgpuDeviceCreateBindGroup(device, &bd);
+      if (terrain_pass_group == nullptr) {
+        WGPUBindGroupEntry t[2] = {};
+        t[0].binding = 0; t[0].buffer = city_cascade_buf; t[0].size = 64;
+        t[1].binding = 1; t[1].buffer = city_frame_buf; t[1].size = kCityFrameSize;
+        bd.layout = terrain_pass_layout;
+        bd.entryCount = 2;
+        bd.entries = t;
+        terrain_pass_group = wgpuDeviceCreateBindGroup(device, &bd);
+      }
+    }
+  }
+
+  // TAA bind groups depend on the main post set (its HDR target and
+  // bloom); rebuilt whenever either side changes size.
+  void ensure_taa_groups() {
+    if (post_taa[0] != nullptr || post_main.hdr_view == nullptr || depth_pre == nullptr) {
+      return;
+    }
+    for (int p = 0; p < 2; ++p) {
+      WGPUBindGroupEntry e[3] = {};
+      e[0].binding = 0; e[0].buffer = taa_buf; e[0].size = 160;
+      e[1].binding = 1; e[1].textureView = post_main.hdr_view;
+      e[2].binding = 2; e[2].textureView = taa_hist_view[1 - p];
+      WGPUBindGroupDescriptor bd{};
+      bd.layout = taa_layout;
+      bd.entryCount = 3;
+      bd.entries = e;
+      taa_group[p] = wgpuDeviceCreateBindGroup(device, &bd);
+      post_taa_only[p] = make_post_group(taa_hist_view[p], taa_hist_view[p]);
+      post_taa[p] = make_post_group(taa_hist_view[p], post_main.bloom_view[0]);
+    }
+  }
+
+  void ensure_city_pipeline() {
+    if (city_pipeline != nullptr) {
+      return;
+    }
+    ensure_city_resources();
+    WGPUShaderSourceWGSL wgsl{};
+    wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+    wgsl.code = sv(kCityShader);
+    WGPUShaderModuleDescriptor module_desc{};
+    module_desc.nextInChain = &wgsl.chain;
+    WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &module_desc);
+    wgsl.code = sv(kTerrainPassShader);
+    WGPUShaderModule terrain_module = wgpuDeviceCreateShaderModule(device, &module_desc);
+    wgsl.code = sv(kCityPostShader);
+    WGPUShaderModule post_module = wgpuDeviceCreateShaderModule(device, &module_desc);
+
+    WGPUVertexAttribute attrs[6] = {};
+    const WGPUVertexFormat fmts[6] = {WGPUVertexFormat_Float32x3, WGPUVertexFormat_Float32x3, WGPUVertexFormat_Float32x4,
+                                      WGPUVertexFormat_Float32x2, WGPUVertexFormat_Uint32, WGPUVertexFormat_Float32x4};
+    const std::uint64_t offs[6] = {0, 12, 24, 40, 48, 52};
+    for (std::uint32_t i = 0; i < 6; ++i) {
+      attrs[i].format = fmts[i];
+      attrs[i].offset = offs[i];
+      attrs[i].shaderLocation = i;
+    }
+    WGPUVertexBufferLayout vl{};
+    vl.arrayStride = sizeof(CityVertex);
+    vl.stepMode = WGPUVertexStepMode_Vertex;
+    vl.attributeCount = 6;
+    vl.attributes = attrs;
+    WGPUVertexAttribute tattrs[3] = {};
+    tattrs[0].format = WGPUVertexFormat_Float32x3; tattrs[0].offset = 0; tattrs[0].shaderLocation = 0;
+    tattrs[1].format = WGPUVertexFormat_Float32x3; tattrs[1].offset = 12; tattrs[1].shaderLocation = 1;
+    tattrs[2].format = WGPUVertexFormat_Float32x4; tattrs[2].offset = 24; tattrs[2].shaderLocation = 2;
+    WGPUVertexBufferLayout tvl{};
+    tvl.arrayStride = 40;
+    tvl.stepMode = WGPUVertexStepMode_Vertex;
+    tvl.attributeCount = 3;
+    tvl.attributes = tattrs;
+
+    const auto depth_state = [](WGPUCompareFunction cmp, bool write) {
+      WGPUDepthStencilState ds{};
+      ds.format = WGPUTextureFormat_Depth32Float;
+      ds.depthWriteEnabled = write ? WGPUOptionalBool_True : WGPUOptionalBool_False;
+      ds.depthCompare = cmp;
+      ds.stencilFront.compare = WGPUCompareFunction_Always;
+      ds.stencilFront.failOp = ds.stencilFront.depthFailOp = ds.stencilFront.passOp = WGPUStencilOperation_Keep;
+      ds.stencilBack = ds.stencilFront;
+      ds.stencilReadMask = 0xFFFFFFFF;
+      ds.stencilWriteMask = 0xFFFFFFFF;
+      return ds;
+    };
+    const auto make = [&](const char* label, WGPUPipelineLayout layout, WGPUShaderModule mod, const char* vs,
+                          const char* fs, WGPUVertexBufferLayout* vbl, WGPUTextureFormat color,
+                          const WGPUDepthStencilState* ds) {
+      WGPUColorTargetState ct{};
+      ct.format = color;
+      ct.writeMask = WGPUColorWriteMask_All;
+      WGPUFragmentState fst{};
+      fst.module = mod;
+      fst.entryPoint = sv(fs);
+      fst.targetCount = color == WGPUTextureFormat_Undefined ? 0 : 1;
+      fst.targets = color == WGPUTextureFormat_Undefined ? nullptr : &ct;
+      WGPURenderPipelineDescriptor pd{};
+      pd.label = sv(label);
+      pd.layout = layout;
+      pd.vertex.module = mod;
+      pd.vertex.entryPoint = sv(vs);
+      pd.vertex.bufferCount = vbl != nullptr ? 1 : 0;
+      pd.vertex.buffers = vbl;
+      pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+      pd.primitive.frontFace = WGPUFrontFace_CCW;
+      pd.primitive.cullMode = WGPUCullMode_None;
+      pd.depthStencil = ds;
+      pd.multisample.count = 1;
+      pd.multisample.mask = 0xFFFFFFFF;
+      pd.fragment = fs != nullptr ? &fst : nullptr;
+      return wgpuDeviceCreateRenderPipeline(device, &pd);
+    };
+    WGPUPipelineLayoutDescriptor pld{};
+    WGPUBindGroupLayout city_groups[3] = {bind_layout, city_layout, mat_layout};
+    pld.bindGroupLayoutCount = 3;
+    pld.bindGroupLayouts = city_groups;
+    WGPUPipelineLayout city_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+    WGPUBindGroupLayout terrain_groups[2] = {bind_layout, terrain_pass_layout};
+    pld.bindGroupLayoutCount = 2;
+    pld.bindGroupLayouts = terrain_groups;
+    WGPUPipelineLayout terrain_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+    WGPUBindGroupLayout ao_groups[1] = {ao_layout};
+    pld.bindGroupLayoutCount = 1;
+    pld.bindGroupLayouts = ao_groups;
+    WGPUPipelineLayout ao_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+    WGPUBindGroupLayout taa_groups[2] = {ao_layout, taa_layout};
+    pld.bindGroupLayoutCount = 2;
+    pld.bindGroupLayouts = taa_groups;
+    WGPUPipelineLayout taa_pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+
+    const WGPUDepthStencilState ds_scene = depth_state(WGPUCompareFunction_Greater, true);   // reversed-Z
+    const WGPUDepthStencilState ds_shadow = depth_state(WGPUCompareFunction_Less, true);     // ortho, cleared to 1
+    city_pipeline = make("city", city_pl, module, "vs_main", "fs_main", &vl, kHdrFormat, &ds_scene);
+    city_shadow_pipeline = make("city-shadow", city_pl, module, "vs_shadow", nullptr, &vl, WGPUTextureFormat_Undefined, &ds_shadow);
+    city_prepass_pipeline = make("city-prepass", city_pl, module, "vs_prepass", "fs_prepass", &vl, WGPUTextureFormat_RGBA16Float, &ds_scene);
+    terrain_shadow_pipeline = make("terrain-shadow", terrain_pl, terrain_module, "vs_shadow", nullptr, &tvl, WGPUTextureFormat_Undefined, &ds_shadow);
+    terrain_prepass_pipeline = make("terrain-prepass", terrain_pl, terrain_module, "vs_prepass", "fs_prepass", &tvl, WGPUTextureFormat_RGBA16Float, &ds_scene);
+    ssao_pipeline = make("city-ssao", ao_pl, post_module, "vs_fullscreen", "fs_ssao", nullptr, WGPUTextureFormat_R8Unorm, nullptr);
+    blur_pipeline_ao = make("city-ao-blur", ao_pl, post_module, "vs_fullscreen", "fs_blur", nullptr, WGPUTextureFormat_R8Unorm, nullptr);
+    taa_pipeline = make("city-taa", taa_pl, post_module, "vs_fullscreen", "fs_taa", nullptr, kHdrFormat, nullptr);
+    wgpuPipelineLayoutRelease(city_pl);
+    wgpuPipelineLayoutRelease(terrain_pl);
+    wgpuPipelineLayoutRelease(ao_pl);
+    wgpuPipelineLayoutRelease(taa_pl);
+    wgpuShaderModuleRelease(module);
+    wgpuShaderModuleRelease(terrain_module);
+    wgpuShaderModuleRelease(post_module);
+    city_group_dirty = true;
+  }
+
+  void set_city_materials_impl(const CityMaterial* materials, std::size_t count) {
+    if (count == 0) {
+      const CityMaterial one{};
+      set_city_materials_impl(&one, 1);
+      return;
+    }
+    const std::uint64_t size = count * sizeof(CityMaterial);
+    if (city_material_buf == nullptr || city_material_size < size) {
+      if (city_material_buf != nullptr) wgpuBufferRelease(city_material_buf);
+      WGPUBufferDescriptor bd{};
+      bd.label = sv("city-materials");
+      bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+      bd.size = size;
+      city_material_buf = wgpuDeviceCreateBuffer(device, &bd);
+      city_material_size = size;
+      city_group_dirty = true;
+    }
+    wgpuQueueWriteBuffer(queue, city_material_buf, 0, materials, size);
+  }
+
+  void set_city_lights_impl(const CityLight* lights, std::size_t count) {
+    static constexpr std::size_t kMax = 64;
+    if (count > kMax) count = kMax;
+    CityLight block[kMax];
+    for (std::size_t i = 0; i < count; ++i) block[i] = lights[i];
+    const std::uint64_t size = kMax * sizeof(CityLight);
+    if (city_light_buf == nullptr) {
+      WGPUBufferDescriptor bd{};
+      bd.label = sv("city-lights");
+      bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+      bd.size = size;
+      city_light_buf = wgpuDeviceCreateBuffer(device, &bd);
+      city_light_size = size;
+      city_group_dirty = true;
+    }
+    wgpuQueueWriteBuffer(queue, city_light_buf, 0, block, size);
+    city_light_count = static_cast<std::uint32_t>(count);
+  }
+
+  void ensure_city_group() {
+    if (!city_group_dirty && city_group != nullptr) {
+      return;
+    }
+    if (city_group != nullptr) wgpuBindGroupRelease(city_group);
+    WGPUBindGroupEntry e[12] = {};
+    e[0].binding = 0; e[0].buffer = city_frame_buf; e[0].size = kCityFrameSize;
+    e[1].binding = 1; e[1].buffer = city_material_buf; e[1].size = city_material_size;
+    e[2].binding = 2; e[2].buffer = city_light_buf; e[2].size = city_light_size;
+    e[3].binding = 3; e[3].textureView = city_leaf_view;
+    e[4].binding = 4; e[4].sampler = city_leaf_samp;
+    e[5].binding = 5; e[5].textureView = city_shadow_view;
+    e[6].binding = 6; e[6].sampler = city_shadow_samp;
+    e[7].binding = 7; e[7].textureView = ao_b_view;
+    e[8].binding = 8; e[8].sampler = city_clamp_samp;
+    e[9].binding = 9; e[9].textureView = city_sky_view;
+    e[10].binding = 10; e[10].sampler = city_cube_samp;
+    e[11].binding = 11; e[11].buffer = city_cascade_buf; e[11].size = 64;
+    WGPUBindGroupDescriptor bd{};
+    bd.layout = city_layout;
+    bd.entryCount = 12;
+    bd.entries = e;
+    city_group = wgpuDeviceCreateBindGroup(device, &bd);
+    if (city_caster_group != nullptr) wgpuBindGroupRelease(city_caster_group);
+    e[5].textureView = city_shadow_dummy_view;
+    city_caster_group = wgpuDeviceCreateBindGroup(device, &bd);
+    city_group_dirty = false;
+  }
+
+  // The analytic sky as the city's environment: radiance by direction
+  // (camera frame), from the frame's clear colour, palette, planet up
+  // and sun. Feeds the SH9 irradiance and the small prefiltered cube.
+  static void sky_radiance(const FrameParams& f, const float* d, float* out) {
+    // The mode-4 sky dome, evaluated on the CPU: tint from the planet
+    // palette, day factor from the sun's height, zenith/horizon blend,
+    // sunset band, Mie lobe, night airglow, density by altitude; below
+    // the horizon a ground bounce of the horizon colour.
+    const float* up = f.planet_up;
+    const float* sun = f.sun_dir;
+    const float sun_h = sun[0] * up[0] + sun[1] * up[1] + sun[2] * up[2];
+    const float view_h = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+    const float cos_vs = d[0] * sun[0] + d[1] * sun[1] + d[2] * sun[2];
+    const auto smoothstep = [](float a, float b, float x) {
+      const float t = std::min(1.0f, std::max(0.0f, (x - a) / (b - a)));
+      return t * t * (3.0f - 2.0f * t);
+    };
+    const float day = smoothstep(-0.10f, 0.30f, sun_h);
+    const float density = std::pow(std::min(1.0f, std::max(0.0f, 1.0f - f.altitude_frac)), 0.45f);
+    const float zenith_k[3] = {0.40f, 0.52f, 0.75f};
+    const float warm[3] = {1.0f, 0.88f, 0.72f};
+    const float sunset[3] = {1.0f, 0.42f, 0.18f};
+    const float low_sun = std::pow(std::min(1.0f, std::max(0.0f, 1.0f - std::fabs(sun_h) * 2.6f)), 1.4f);
+    const float toward = std::pow(std::max(0.0f, cos_vs), 2.6f);
+    const float mie = std::pow(std::max(0.0f, cos_vs), 24.0f) * 0.55f;
+    const float vh = std::pow(std::min(1.0f, std::max(0.0f, view_h)), 0.55f);
+    for (int c = 0; c < 3; ++c) {
+      const float tint = f.atmo_tint[c];
+      const float zenith = tint * zenith_k[c];
+      const float horizon = (tint + (warm[c] - tint) * 0.45f) * 1.06f;
+      float sky = horizon + (zenith - horizon) * vh;
+      sky += (sunset[c] - sky) * low_sun * toward * 0.75f;
+      float v = sky * day + f.sun_color[c] * mie * (0.25f + 0.75f * day);
+      v += tint * 0.004f * (1.0f - day);
+      v *= density;
+      if (view_h < 0.0f) {
+        // Ground: the horizon colour bounced off a mid-grey surface.
+        const float ground = (horizon * day + tint * 0.004f * (1.0f - day)) * density * 0.30f;
+        v = ground * (0.7f + 0.3f * (1.0f + view_h));
+      }
+      out[c] = v;
+    }
+  }
+
+  void update_city_environment(const FrameParams& f, float* sh_out /* 9 x 4 */) {
+    // SH9 projection of the sky over 192 Fibonacci directions, then the
+    // cosine convolution (A0 = pi, A1 = 2pi/3, A2 = pi/4).
+    float sh[9][3] = {};
+    const int n = 192;
+    for (int i = 0; i < n; ++i) {
+      const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(n);
+      const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+      const float phi = 2.399963f * static_cast<float>(i);
+      const float d[3] = {r * std::cos(phi), r * std::sin(phi), z};
+      float L[3];
+      sky_radiance(f, d, L);
+      const float basis[9] = {0.282095f, 0.488603f * d[1], 0.488603f * d[2], 0.488603f * d[0],
+                              1.092548f * d[0] * d[1], 1.092548f * d[1] * d[2],
+                              0.315392f * (3.0f * d[2] * d[2] - 1.0f), 1.092548f * d[0] * d[2],
+                              0.546274f * (d[0] * d[0] - d[1] * d[1])};
+      for (int k = 0; k < 9; ++k) {
+        for (int c = 0; c < 3; ++c) sh[k][c] += L[c] * basis[k];
+      }
+    }
+    const float w = 4.0f * 3.14159265f / static_cast<float>(n);
+    const float conv[9] = {3.14159265f, 2.0943951f, 2.0943951f, 2.0943951f, 0.78539816f, 0.78539816f, 0.78539816f, 0.78539816f, 0.78539816f};
+    for (int k = 0; k < 9; ++k) {
+      for (int c = 0; c < 3; ++c) sh_out[k * 4 + c] = sh[k][c] * w * conv[k];
+      sh_out[k * 4 + 3] = 0.0f;
+    }
+    // The sky cube: mip 0 from the model, coarser mips by averaging (a
+    // roughness chain good enough for a 16-texel face).
+    const std::uint32_t s0 = kCitySkySize;
+    std::vector<float> level(static_cast<std::size_t>(s0) * s0 * 6 * 3);
+    for (std::uint32_t face = 0; face < 6; ++face) {
+      for (std::uint32_t y = 0; y < s0; ++y) {
+        for (std::uint32_t x = 0; x < s0; ++x) {
+          const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(s0) * 2.0f - 1.0f;
+          const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(s0) * 2.0f - 1.0f;
+          float d[3];
+          switch (face) {
+            case 0: d[0] = 1.0f; d[1] = -v; d[2] = -u; break;
+            case 1: d[0] = -1.0f; d[1] = -v; d[2] = u; break;
+            case 2: d[0] = u; d[1] = 1.0f; d[2] = v; break;
+            case 3: d[0] = u; d[1] = -1.0f; d[2] = -v; break;
+            case 4: d[0] = u; d[1] = -v; d[2] = 1.0f; break;
+            default: d[0] = -u; d[1] = -v; d[2] = -1.0f; break;
+          }
+          const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+          d[0] /= len; d[1] /= len; d[2] /= len;
+          float L[3];
+          sky_radiance(f, d, L);
+          float* o = level.data() + ((static_cast<std::size_t>(face) * s0 + y) * s0 + x) * 3;
+          o[0] = L[0]; o[1] = L[1]; o[2] = L[2];
+        }
+      }
+    }
+    std::uint32_t size = s0;
+    for (std::uint32_t mip = 0; mip < kCitySkyMips; ++mip) {
+      std::vector<std::uint16_t> half(static_cast<std::size_t>(size) * size * 4);
+      for (std::uint32_t face = 0; face < 6; ++face) {
+        for (std::uint32_t i = 0; i < size * size; ++i) {
+          const float* o = level.data() + (static_cast<std::size_t>(face) * size * size + i) * 3;
+          half[i * 4 + 0] = float_to_half(o[0]);
+          half[i * 4 + 1] = float_to_half(o[1]);
+          half[i * 4 + 2] = float_to_half(o[2]);
+          half[i * 4 + 3] = float_to_half(1.0f);
+        }
+        WGPUTexelCopyTextureInfo dst{};
+        dst.texture = city_sky;
+        dst.mipLevel = mip;
+        dst.origin = WGPUOrigin3D{0, 0, face};
+        WGPUTexelCopyBufferLayout layout{};
+        layout.bytesPerRow = size * 8;
+        layout.rowsPerImage = size;
+        const WGPUExtent3D extent{size, size, 1};
+        wgpuQueueWriteTexture(queue, &dst, half.data(), static_cast<std::size_t>(size) * size * 8, &layout, &extent);
+      }
+      if (size == 1) break;
+      const std::uint32_t half_size = size / 2;
+      std::vector<float> next(static_cast<std::size_t>(half_size) * half_size * 6 * 3);
+      for (std::uint32_t face = 0; face < 6; ++face) {
+        for (std::uint32_t y = 0; y < half_size; ++y) {
+          for (std::uint32_t x = 0; x < half_size; ++x) {
+            float* o = next.data() + ((static_cast<std::size_t>(face) * half_size + y) * half_size + x) * 3;
+            for (int c = 0; c < 3; ++c) {
+              const auto at = [&](std::uint32_t sx, std::uint32_t sy) {
+                return level[((static_cast<std::size_t>(face) * size + sy) * size + sx) * 3 + c];
+              };
+              o[c] = 0.25f * (at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1));
+            }
+          }
+        }
+      }
+      level.swap(next);
+      size = half_size;
+    }
+  }
+
+  void release_city() {
+    release_city_targets();
+    for (WGPUTextureView* v : {&city_leaf_view, &city_shadow_view, &city_shadow_dummy_view, &city_sky_view, &city_shadow_layer[0],
+                               &city_shadow_layer[1], &city_shadow_layer[2]}) {
+      if (*v != nullptr) wgpuTextureViewRelease(*v);
+      *v = nullptr;
+    }
+    for (WGPUTexture* t : {&city_leaf, &city_shadow, &city_shadow_dummy, &city_sky}) {
+      if (*t != nullptr) wgpuTextureRelease(*t);
+      *t = nullptr;
+    }
+    for (WGPUSampler* sp : {&city_leaf_samp, &city_shadow_samp, &city_clamp_samp, &city_cube_samp}) {
+      if (*sp != nullptr) wgpuSamplerRelease(*sp);
+      *sp = nullptr;
+    }
+    for (WGPUBuffer* b : {&city_frame_buf, &city_material_buf, &city_light_buf, &city_cascade_buf, &taa_buf}) {
+      if (*b != nullptr) wgpuBufferRelease(*b);
+      *b = nullptr;
+    }
+    for (WGPUBindGroup* g : {&city_group, &city_caster_group, &terrain_pass_group}) {
+      if (*g != nullptr) wgpuBindGroupRelease(*g);
+      *g = nullptr;
+    }
+    for (WGPURenderPipeline* pp : {&city_pipeline, &city_shadow_pipeline, &city_prepass_pipeline, &terrain_shadow_pipeline,
+                                   &terrain_prepass_pipeline, &ssao_pipeline, &blur_pipeline_ao, &taa_pipeline}) {
+      if (*pp != nullptr) wgpuRenderPipelineRelease(*pp);
+      *pp = nullptr;
+    }
+    for (WGPUBindGroupLayout* l : {&city_layout, &receive_layout, &terrain_pass_layout, &ao_layout, &taa_layout}) {
+      if (*l != nullptr) wgpuBindGroupLayoutRelease(*l);
+      *l = nullptr;
+    }
+  }
+
   ~Impl() {
+    release_city();
     for (auto& [id, mesh] : meshes) {
       wgpuBufferRelease(mesh.buffer);
+      if (mesh.index_buffer != nullptr) wgpuBufferRelease(mesh.index_buffer);
     }
     for (auto& [id, entry] : planet_textures) {
       release_planet_tex(entry);
     }
     release_planet_tex(default_tex);
+    release_material_lib(material_lib);
+    if (material_table != nullptr) wgpuBufferRelease(material_table);
+    if (material_sampler != nullptr) wgpuSamplerRelease(material_sampler);
+    if (mat_layout != nullptr) wgpuBindGroupLayoutRelease(mat_layout);
     release_post_set(post_main);
     release_post_set(post_rec);
     if (lum_readback != nullptr) wgpuBufferRelease(lum_readback);
@@ -1404,6 +2937,8 @@ struct Rhi::Impl {
     if (instance != nullptr) wgpuInstanceRelease(instance);
   }
 };
+
+void Rhi::Impl::ensure_city_resources_early() { ensure_city_resources(); }
 
 Rhi::Rhi(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Rhi::~Rhi() = default;
@@ -1528,19 +3063,29 @@ void Rhi::resize(std::uint32_t width, std::uint32_t height) {
 }
 
 std::uint32_t Rhi::create_mesh(const float* vertices, std::size_t float_count) {
-  // Legacy 6-float soup: expand to the 8-float terrain layout with
-  // mat_pack = 0 (the shader's flat base-albedo path).
+  // Legacy 6-float soup: expand to the 10-float terrain layout with zero
+  // weights (the shader's flat base-albedo path).
   const std::size_t count = float_count / 6;
-  std::vector<float> expanded(count * 8);
+  std::vector<float> expanded(count * 10);
   for (std::size_t v = 0; v < count; ++v) {
-    std::memcpy(expanded.data() + v * 8, vertices + v * 6, 6 * sizeof(float));
-    expanded[v * 8 + 6] = 0.0f;
-    expanded[v * 8 + 7] = 0.0f;
+    std::memcpy(expanded.data() + v * 10, vertices + v * 6, 6 * sizeof(float));
+    for (int w = 0; w < 4; ++w) {
+      expanded[v * 10 + 6 + static_cast<std::size_t>(w)] = 0.0f;
+    }
   }
   return create_mesh_mat(expanded.data(), expanded.size());
 }
 
 std::uint32_t Rhi::create_mesh_mat(const float* vertices, std::size_t float_count) {
+  // A buffer past the device limit is a validation error that wgpu
+  // escalates to a fatal panic on the next submit; refuse it here (the
+  // caller draws nothing for this mesh) and say so once.
+  constexpr std::size_t kMaxMeshBytes = 200u * 1024u * 1024u;
+  if (float_count * sizeof(float) > kMaxMeshBytes) {
+    std::fprintf(stderr, "rhi: refusing a %.0f MB mesh (limit %zu MB)\n",
+                 static_cast<double>(float_count * sizeof(float)) / 1048576.0, kMaxMeshBytes / 1048576u);
+    return 0;
+  }
   WGPUBufferDescriptor desc{};
   desc.label = sv("chunk-mesh");
   desc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
@@ -1548,7 +3093,7 @@ std::uint32_t Rhi::create_mesh_mat(const float* vertices, std::size_t float_coun
   WGPUBuffer buffer = wgpuDeviceCreateBuffer(impl_->device, &desc);
   wgpuQueueWriteBuffer(impl_->queue, buffer, 0, vertices, desc.size);
   const std::uint32_t id = impl_->next_mesh_id++;
-  impl_->meshes.emplace(id, MeshEntry{buffer, static_cast<std::uint32_t>(float_count / 8)});
+  impl_->meshes.emplace(id, MeshEntry{buffer, static_cast<std::uint32_t>(float_count / 10)});
   return id;
 }
 
@@ -1556,9 +3101,54 @@ void Rhi::destroy_mesh(std::uint32_t mesh) {
   auto it = impl_->meshes.find(mesh);
   if (it != impl_->meshes.end()) {
     wgpuBufferRelease(it->second.buffer);
+    if (it->second.index_buffer != nullptr) wgpuBufferRelease(it->second.index_buffer);
     impl_->meshes.erase(it);
   }
 }
+
+std::uint32_t Rhi::create_city_mesh(const CityVertex* vertices, std::size_t vertex_count,
+                                    const std::uint32_t* indices, std::size_t index_count) {
+  constexpr std::size_t kMaxMeshBytes = 200u * 1024u * 1024u;
+  if (vertex_count == 0 || index_count == 0) return 0;
+  if (vertex_count * sizeof(CityVertex) > kMaxMeshBytes) {
+    std::fprintf(stderr, "rhi: refusing a %.0f MB city mesh (limit %zu MB)\n",
+                 static_cast<double>(vertex_count * sizeof(CityVertex)) / 1048576.0, kMaxMeshBytes / 1048576u);
+    return 0;
+  }
+  impl_->ensure_mesh_pipeline();
+  WGPUBufferDescriptor vd{};
+  vd.label = sv("city-mesh");
+  vd.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
+  vd.size = vertex_count * sizeof(CityVertex);
+  WGPUBuffer vb = wgpuDeviceCreateBuffer(impl_->device, &vd);
+  wgpuQueueWriteBuffer(impl_->queue, vb, 0, vertices, vd.size);
+  WGPUBufferDescriptor id{};
+  id.label = sv("city-indices");
+  id.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
+  id.size = index_count * sizeof(std::uint32_t);
+  WGPUBuffer ib = wgpuDeviceCreateBuffer(impl_->device, &id);
+  wgpuQueueWriteBuffer(impl_->queue, ib, 0, indices, id.size);
+  const std::uint32_t handle = impl_->next_mesh_id++;
+  MeshEntry entry;
+  entry.buffer = vb;
+  entry.vertex_count = static_cast<std::uint32_t>(vertex_count);
+  entry.index_buffer = ib;
+  entry.index_count = static_cast<std::uint32_t>(index_count);
+  impl_->meshes.emplace(handle, entry);
+  return handle;
+}
+
+void Rhi::set_city_materials(const CityMaterial* materials, std::size_t count) {
+  impl_->ensure_mesh_pipeline();
+  impl_->set_city_materials_impl(materials, count);
+}
+
+void Rhi::set_city_lights(const CityLight* lights, std::size_t count) {
+  impl_->ensure_mesh_pipeline();
+  impl_->set_city_lights_impl(lights, count);
+}
+
+void Rhi::set_city_settings(const CitySettings& settings) { impl_->city_settings = settings; }
 
 std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size) {
   impl_->ensure_mesh_pipeline();  // layouts + sampler exist from here on
@@ -1584,12 +3174,72 @@ void Rhi::destroy_planet_texture(std::uint32_t handle) {
   }
 }
 
+void Rhi::create_material_library(std::uint32_t size, std::uint32_t layers) {
+  impl_->ensure_mesh_pipeline();
+  if (size == 0 || layers == 0) {
+    return;
+  }
+  impl_->release_material_lib(impl_->material_lib);
+  impl_->material_lib = impl_->make_material_lib(size, layers);
+  for (std::uint32_t i = 0; i < Impl::kMaterialSlots; ++i) {
+    impl_->material_ready[i] = false;
+    impl_->material_cpu[i * 12 + 7] = 0.0f;
+  }
+  impl_->material_dirty = true;
+}
+
+void Rhi::upload_material_layer(std::uint32_t layer, const std::uint8_t* albedo_rgba,
+                                const std::uint8_t* normal_rgba) {
+  Impl::MaterialLib& lib = impl_->material_lib;
+  if (lib.albedo == nullptr || layer >= lib.layers || layer >= Impl::kMaterialSlots) {
+    return;
+  }
+  impl_->write_material_layer(lib.albedo, layer, albedo_rgba);
+  impl_->write_material_layer(lib.normal, layer, normal_rgba);
+  impl_->material_ready[layer] = true;
+  impl_->material_cpu[layer * 12 + 7] = 1.0f;
+  impl_->material_dirty = true;
+}
+
+void Rhi::set_material_params(std::uint32_t layer, const MaterialParams& params) {
+  if (layer >= Impl::kMaterialSlots) {
+    return;
+  }
+  float* row = impl_->material_cpu + layer * 12;
+  row[0] = params.tint[0];
+  row[1] = params.tint[1];
+  row[2] = params.tint[2];
+  row[3] = params.tile_m;
+  row[4] = params.roughness;
+  row[5] = params.emissive;
+  row[6] = params.normal_strength;
+  row[7] = impl_->material_ready[layer] ? 1.0f : 0.0f;
+  row[8] = params.mean[0];
+  row[9] = params.mean[1];
+  row[10] = params.mean[2];
+  row[11] = 0.0f;
+  impl_->material_dirty = true;
+}
+
 bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                        std::size_t item_count) {
   impl_->ensure_mesh_pipeline();
+  if (impl_->material_dirty) {
+    // Table layout: three arrays of 64 vec4 (a: tint+tile, b: rough/
+    // emissive/strength/ready, c: mean) — repack from the row layout.
+    float table[Impl::kMaterialSlots * 12];
+    for (std::uint32_t i = 0; i < Impl::kMaterialSlots; ++i) {
+      const float* row = impl_->material_cpu + i * 12;
+      std::memcpy(table + i * 4, row, 4 * sizeof(float));
+      std::memcpy(table + Impl::kMaterialSlots * 4 + i * 4, row + 4, 4 * sizeof(float));
+      std::memcpy(table + Impl::kMaterialSlots * 8 + i * 4, row + 8, 4 * sizeof(float));
+    }
+    wgpuQueueWriteBuffer(impl_->queue, impl_->material_table, 0, table, sizeof(table));
+    impl_->material_dirty = false;
+  }
 
   {
-    float frame_block[36] = {
+    float frame_block[40] = {
         frame.sun_dir[0],    frame.sun_dir[1],    frame.sun_dir[2],    0.0f,
         frame.sun_color[0],  frame.sun_color[1],  frame.sun_color[2],  frame.time_s,
         frame.cam_right[0],  frame.cam_right[1],  frame.cam_right[2],  frame.tan_half_x,
@@ -1600,6 +3250,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         frame.planet_center[0], frame.planet_center[1], frame.planet_center[2],
         frame.normal_blend,
         frame.palette_shift, 0.0f, 0.0f, 0.0f,
+        impl_->frame_jitter[0], impl_->frame_jitter[1], 0.0f, 0.0f,
     };
     wgpuQueueWriteBuffer(impl_->queue, impl_->frame_buffer, 0, frame_block,
                          sizeof(frame_block));
@@ -1608,12 +3259,15 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // Upload all uniforms before the command buffer executes.
   const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
   for (std::size_t i = 0; i < count; ++i) {
-    float block[28];
+    float block[32];
     std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
     std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
     std::memcpy(block + 20, items[i].aux, sizeof(items[i].aux));
     std::memcpy(block + 24, items[i].extra, sizeof(items[i].extra));
     block[27] = static_cast<float>(items[i].mode);
+    for (int k = 0; k < 4; ++k) {
+      block[28 + k] = static_cast<float>(items[i].material_palette[k]);
+    }
     wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, i * kUniformStride, block,
                          sizeof(block));
   }
@@ -1722,14 +3376,172 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   write_post_slots(0, impl_->post_main);
   write_post_slots(4, impl_->post_rec);
 
+  // --- T0021: the city frame block, jitter, cascades ---------------------
+  // Written every frame: lit terrain reads the cascades and the AO of the
+  // passes through group 3 whether or not city meshes are on screen.
+  bool has_city = false;
+  bool has_casters = false;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (items[i].overlay) continue;
+    if (items[i].mode == 8) has_city = true;
+    if ((items[i].shadow_caster || items[i].prepass) && (items[i].mode == 8 || items[i].mode == 0)) has_casters = true;
+  }
+  impl_->ensure_city_pipeline();
+  impl_->ensure_city_group();
+  impl_->ensure_city_targets(impl_->width, impl_->height);
+  const CitySettings& cs = impl_->city_settings;
+  const bool passes_on = frame.have_view_proj && has_casters;
+  const bool taa_on = cs.taa && frame.have_view_proj;
+  {
+    // Halton(2,3) jitter, 8 samples, centred, in pixels; the frame block
+    // carries it in NDC units for every vertex stage.
+    float jx = 0.0f, jy = 0.0f;
+    if (taa_on) {
+      const auto halton = [](std::uint32_t i, std::uint32_t b) {
+        float f = 1.0f, r = 0.0f;
+        while (i > 0) { f /= static_cast<float>(b); r += f * static_cast<float>(i % b); i /= b; }
+        return r;
+      };
+      const std::uint32_t k = static_cast<std::uint32_t>(impl_->frame_counter % 8) + 1;
+      jx = halton(k, 2) - 0.5f;
+      jy = halton(k, 3) - 0.5f;
+    }
+    impl_->frame_jitter_px[0] = jx;
+    impl_->frame_jitter_px[1] = jy;
+    impl_->frame_jitter[0] = 2.0f * jx / static_cast<float>(impl_->width);
+    impl_->frame_jitter[1] = 2.0f * jy / static_cast<float>(impl_->height);
+    // Re-upload the frame block with the jitter (it was written above).
+    float jit[4] = {impl_->frame_jitter[0], impl_->frame_jitter[1], 0.0f, 0.0f};
+    wgpuQueueWriteBuffer(impl_->queue, impl_->frame_buffer, 36 * sizeof(float), jit, sizeof(jit));
+  }
+  {
+    float block[Impl::kCityFrameSize / 4] = {};
+    float* view = block + 0;
+    float* proj = block + 16;
+    float* view_proj = block + 32;
+    float* inv_view_proj = block + 48;
+    float* inv_proj = block + 64;
+    float* shadow_m = block + 80;  // shadow0..2 at 80, 96, 112
+    float* sh = block + 128;
+    float* cascade = block + 164;
+    float* cascade_extent = block + 168;
+    float* screen = block + 172;
+    float* params = block + 176;
+    float* params2 = block + 180;
+    float* jitter = block + 184;
+    // View from the camera basis (camera-relative world -> view): rows
+    // right, up, -forward; column-major storage.
+    const float* r = frame.cam_right;
+    const float* up = frame.cam_up;
+    const float* fw = frame.cam_fwd;
+    for (int k = 0; k < 16; ++k) view[k] = 0.0f;
+    view[0] = r[0]; view[4] = r[1]; view[8] = r[2];
+    view[1] = up[0]; view[5] = up[1]; view[9] = up[2];
+    view[2] = -fw[0]; view[6] = -fw[1]; view[10] = -fw[2];
+    view[15] = 1.0f;
+    if (frame.have_view_proj) {
+      std::memcpy(view_proj, frame.view_proj, sizeof(float) * 16);
+      float view_t[16];  // inverse of a rotation = transpose
+      for (int c = 0; c < 4; ++c) for (int rr = 0; rr < 4; ++rr) view_t[c * 4 + rr] = view[rr * 4 + c];
+      mat_mul(view_proj, view_t, proj);
+      mat_inverse(view_proj, inv_view_proj);
+      mat_inverse(proj, inv_proj);
+    } else {
+      for (int k = 0; k < 16; ++k) {
+        view_proj[k] = proj[k] = inv_view_proj[k] = inv_proj[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+      }
+    }
+    impl_->update_city_environment(frame, sh);
+    // Cascaded shadow maps: three camera-frustum slices fitted with an
+    // orthographic light frustum each, texel-snapped (the demo's fit).
+    const float splits[Impl::kCityCascades + 1] = {0.5f, 28.0f, 110.0f, 520.0f};
+    const bool shadows = cs.shadows && passes_on;
+    for (std::uint32_t c = 0; c < Impl::kCityCascades; ++c) {
+      float extent = 1.0f;
+      float* out = shadow_m + c * 16;
+      if (shadows) {
+        impl_->fit_cascade(frame, splits[c], splits[c + 1], out, &extent);
+      } else {
+        for (int k = 0; k < 16; ++k) out[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+      }
+      wgpuQueueWriteBuffer(impl_->queue, impl_->city_cascade_buf, c * kUniformStride, out, 16 * sizeof(float));
+      std::memcpy(impl_->cascade_vp[c], out, sizeof(float) * 16);
+      impl_->cascade_radius[c] = extent;
+      cascade_extent[c] = extent;
+    }
+    cascade[0] = splits[1];
+    cascade[1] = splits[2];
+    cascade[2] = splits[3];
+    cascade[3] = 1.0f / static_cast<float>(Impl::kShadowSize);
+    screen[0] = static_cast<float>(impl_->width);
+    screen[1] = static_cast<float>(impl_->height);
+    screen[2] = 1.0f / static_cast<float>(impl_->width);
+    screen[3] = 1.0f / static_cast<float>(impl_->height);
+    params[0] = 0.3f;  // emissive scale in scene HDR units (sunlit ground ~0.3)
+    params[1] = cs.ao_strength;
+    params[2] = cs.night;
+    params[3] = cs.night > 0.05f ? static_cast<float>(impl_->city_light_count) : 0.0f;
+    // Units: the terrain path shades albedo * ndl * sun_color (no 1/pi),
+    // so the city's Lambert/GGX terms take the sun as pi * sun_color;
+    // the dome's radiance is display-scaled, so the sky ambient is
+    // scaled down to a plausible sky/sun ratio.
+    params2[0] = cs.ibl_intensity;
+    params2[1] = 3.14159265f;
+    params2[2] = (cs.ssao && passes_on) ? 1.0f : 0.0f;
+    params2[3] = shadows ? 1.0f : 0.0f;
+    jitter[0] = impl_->frame_jitter[0];
+    jitter[1] = impl_->frame_jitter[1];
+    jitter[2] = static_cast<float>(cs.debug_view);
+    jitter[3] = 0.0f;
+    wgpuQueueWriteBuffer(impl_->queue, impl_->city_frame_buf, 0, block, sizeof(block));
+    std::memcpy(impl_->city_view_proj_clean, view_proj, sizeof(float) * 16);
+    impl_->passes_ran = passes_on;
+    // TAA parameters: this frame's clean inverse and the previous frame's
+    // view-projection in this frame's camera-relative space.
+    float taa_block[40] = {};
+    std::memcpy(taa_block, inv_view_proj, sizeof(float) * 16);
+    std::memcpy(taa_block + 16, frame.prev_view_proj, sizeof(float) * 16);
+    taa_block[32] = 0.92f;
+    taa_block[33] = impl_->taa_valid ? 1.0f : 0.0f;
+    taa_block[34] = static_cast<float>(impl_->width);
+    taa_block[35] = static_cast<float>(impl_->height);
+    taa_block[36] = impl_->frame_jitter_px[0];
+    taa_block[37] = -impl_->frame_jitter_px[1];
+    wgpuQueueWriteBuffer(impl_->queue, impl_->taa_buf, 0, taa_block, sizeof(taa_block));
+  }
+
   enum class Pass { Opaque, Blend, Additive };
+  const auto draw_city = [&](WGPURenderPassEncoder pass) {
+    if (!has_city) return;
+    wgpuRenderPassEncoderSetPipeline(pass, impl_->city_pipeline);
+    const std::uint32_t zero = 0;
+    wgpuRenderPassEncoderSetBindGroup(pass, 1, impl_->city_group, 1, &zero);
+    wgpuRenderPassEncoderSetBindGroup(pass, 2, impl_->material_lib.group, 0, nullptr);
+    for (std::size_t i = 0; i < count; ++i) {
+      if (items[i].mode != 8 || items[i].shadow_only || items[i].overlay) continue;
+      const auto it = impl_->meshes.find(items[i].mesh);
+      if (it == impl_->meshes.end() || it->second.index_count == 0) continue;
+      const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+      wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+      wgpuRenderPassEncoderSetIndexBuffer(pass, it->second.index_buffer, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+      const std::uint32_t first = items[i].first_index;
+      std::uint32_t n = items[i].index_count == 0 ? it->second.index_count : items[i].index_count;
+      if (first >= it->second.index_count) continue;
+      if (first + n > it->second.index_count) n = it->second.index_count - first;
+      wgpuRenderPassEncoderDrawIndexed(pass, n, 1, first, 0, 0);
+    }
+  };
   const auto draw_bucket = [&](WGPURenderPassEncoder pass, Pass which, bool overlay) {
     for (std::size_t i = 0; i < count; ++i) {
       if (items[i].overlay != overlay) {
         continue;
       }
+      if (items[i].mode == 8) {
+        continue;  // city meshes: their own pipeline (draw_city)
+      }
       const Pass item_pass = items[i].mode == 2 || items[i].mode == 3 ||
-                                     items[i].mode == 7
+                                     items[i].mode == 7 || items[i].mode == 9
                                  ? Pass::Additive
                              : items[i].translucent ? Pass::Blend
                                                     : Pass::Opaque;
@@ -1750,6 +3562,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         }
       }
       wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_group, 0, nullptr);
+      wgpuRenderPassEncoderSetBindGroup(pass, 2, impl_->material_lib.group, 0, nullptr);
+      wgpuRenderPassEncoderSetBindGroup(pass, 3, impl_->receive_group, 0, nullptr);
       wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
       wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
     }
@@ -1757,6 +3571,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   const auto record_scene = [&](WGPURenderPassEncoder pass) {
     wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline);
     draw_bucket(pass, Pass::Opaque, false);
+    draw_city(pass);
     wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_blend);
     draw_bucket(pass, Pass::Blend, false);
     wgpuRenderPassEncoderSetPipeline(pass, impl_->mesh_pipeline_add);
@@ -1774,10 +3589,136 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // One full frame: scene -> HDR, bloom, composite+tonemap -> out, then
   // the LDR overlay pass sharing the scene depth. slot_base picks the
   // uniform block set; do_lum additionally reduces luminance (main only).
+  // Shadow casters (city meshes and terrain chunks) into a depth target
+  // with the given pipelines; `cascade` selects the light matrix.
+  // Culling of casters by their bounding sphere: against the cascade's
+  // light box, or the prepass reach (the occlusion fades out by 1.2 km).
+  const auto caster_visible = [&](const DrawItem& it_, int cascade) {
+    if (it_.bounds[3] <= 0.0f) return true;
+    if (cascade < 0) {
+      const float d = std::sqrt(it_.bounds[0] * it_.bounds[0] + it_.bounds[1] * it_.bounds[1] + it_.bounds[2] * it_.bounds[2]);
+      return d - it_.bounds[3] < 1600.0f;
+    }
+    const float* m = impl_->cascade_vp[cascade];
+    const float x = m[0] * it_.bounds[0] + m[4] * it_.bounds[1] + m[8] * it_.bounds[2] + m[12];
+    const float y = m[1] * it_.bounds[0] + m[5] * it_.bounds[1] + m[9] * it_.bounds[2] + m[13];
+    const float r = it_.bounds[3] / std::max(impl_->cascade_radius[cascade], 1e-3f);
+    return std::fabs(x) <= 1.0f + r && std::fabs(y) <= 1.0f + r;
+  };
+  const auto draw_casters = [&](WGPURenderPassEncoder pass, WGPURenderPipeline city_p, WGPURenderPipeline terrain_p,
+                                std::uint32_t cascade_offset, bool prepass, int cascade) {
+    bool city_bound = false;
+    bool terrain_bound = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      const DrawItem& it_ = items[i];
+      if (it_.overlay || (it_.mode != 8 && it_.mode != 0)) continue;
+      if (!(it_.shadow_caster || (prepass && it_.prepass))) continue;
+      if (!caster_visible(it_, cascade)) continue;
+      const auto it = impl_->meshes.find(it_.mesh);
+      if (it == impl_->meshes.end() || it->second.vertex_count == 0) continue;
+      const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+      if (it_.mode == 8) {
+        if (!city_bound) {
+          wgpuRenderPassEncoderSetPipeline(pass, city_p);
+          wgpuRenderPassEncoderSetBindGroup(pass, 1, city_p == impl_->city_shadow_pipeline ? impl_->city_caster_group : impl_->city_group,
+                                            1, &cascade_offset);
+          wgpuRenderPassEncoderSetBindGroup(pass, 2, impl_->material_lib.group, 0, nullptr);
+          city_bound = true;
+          terrain_bound = false;
+        }
+        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetIndexBuffer(pass, it->second.index_buffer, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+        const std::uint32_t first = it_.first_index;
+        std::uint32_t n = it_.index_count == 0 ? it->second.index_count : it_.index_count;
+        if (first >= it->second.index_count) continue;
+        if (first + n > it->second.index_count) n = it->second.index_count - first;
+        wgpuRenderPassEncoderDrawIndexed(pass, n, 1, first, 0, 0);
+      } else {
+        if (!terrain_bound) {
+          wgpuRenderPassEncoderSetPipeline(pass, terrain_p);
+          wgpuRenderPassEncoderSetBindGroup(pass, 1, impl_->terrain_pass_group, 1, &cascade_offset);
+          terrain_bound = true;
+          city_bound = false;
+        }
+        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderDraw(pass, it->second.vertex_count, 1, 0, 0);
+      }
+    }
+  };
+  const auto fullscreen_pass = [&](WGPUCommandEncoder encoder, WGPURenderPipeline pipeline, WGPUBindGroup g0,
+                                   WGPUBindGroup g1, WGPUTextureView target) {
+    WGPURenderPassColorAttachment color{};
+    color.view = target;
+    color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+    color.loadOp = WGPULoadOp_Clear;
+    color.storeOp = WGPUStoreOp_Store;
+    color.clearValue = WGPUColor{1.0, 1.0, 1.0, 1.0};
+    WGPURenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color;
+    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+    wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+    wgpuRenderPassEncoderSetBindGroup(pass, 0, g0, 0, nullptr);
+    if (g1 != nullptr) wgpuRenderPassEncoderSetBindGroup(pass, 1, g1, 0, nullptr);
+    wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    wgpuRenderPassEncoderEnd(pass);
+    wgpuRenderPassEncoderRelease(pass);
+  };
+  // The city passes: shadow cascades, depth/normal prepass, SSAO + blur.
+  // Main-resolution only; the recorder draws its frames with the AO and
+  // shadows the main frame produced.
+  const auto city_passes = [&](WGPUCommandEncoder encoder) {
+    if (!passes_on) return;
+    if (cs.shadows) {
+      for (std::uint32_t c = 0; c < Impl::kCityCascades; ++c) {
+        WGPURenderPassDepthStencilAttachment da{};
+        da.view = impl_->city_shadow_layer[c];
+        da.depthLoadOp = WGPULoadOp_Clear;
+        da.depthStoreOp = WGPUStoreOp_Store;
+        da.depthClearValue = 1.0f;
+        WGPURenderPassDescriptor desc{};
+        desc.depthStencilAttachment = &da;
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+        draw_casters(pass, impl_->city_shadow_pipeline, impl_->terrain_shadow_pipeline,
+                     static_cast<std::uint32_t>(c * kUniformStride), false, static_cast<int>(c));
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+      }
+    }
+    if (cs.ssao) {
+      WGPURenderPassColorAttachment ca{};
+      ca.view = impl_->normal_pre_view;
+      ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+      ca.loadOp = WGPULoadOp_Clear;
+      ca.storeOp = WGPUStoreOp_Store;
+      ca.clearValue = WGPUColor{0.0, 0.0, 1.0, 1.0};
+      WGPURenderPassDepthStencilAttachment da{};
+      da.view = impl_->depth_pre_view;
+      da.depthLoadOp = WGPULoadOp_Clear;
+      da.depthStoreOp = WGPUStoreOp_Store;
+      da.depthClearValue = 0.0f;  // reversed-Z
+      WGPURenderPassDescriptor desc{};
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &ca;
+      desc.depthStencilAttachment = &da;
+      WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &desc);
+      draw_casters(pass, impl_->city_prepass_pipeline, impl_->terrain_prepass_pipeline, 0, true, -1);
+      wgpuRenderPassEncoderEnd(pass);
+      wgpuRenderPassEncoderRelease(pass);
+      fullscreen_pass(encoder, impl_->ssao_pipeline, impl_->ssao_group, nullptr, impl_->ao_a_view);
+      fullscreen_pass(encoder, impl_->blur_pipeline_ao, impl_->blur_group, nullptr, impl_->ao_b_view);
+    }
+  };
+
   const auto render_full = [&](Impl::PostSet& set, WGPUTextureView depth,
                                WGPUTextureView out_view, std::uint32_t slot_base,
                                bool do_lum) {
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
+    const bool main_set = &set == &impl_->post_main;
+    if (main_set && do_lum) {
+      city_passes(encoder);
+    }
     // Scene into HDR.
     {
       WGPURenderPassColorAttachment color = attachment;
@@ -1812,14 +3753,30 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       wgpuRenderPassEncoderEnd(pass);
       wgpuRenderPassEncoderRelease(pass);
     };
-    fullscreen(impl_->bright_pipeline, set.grp_hdr_only, slot_base + 0,
-               set.bloom_view[0]);
+    // Temporal anti-aliasing on the main set: the jittered HDR frame is
+    // blended with the reprojected history; the post chain then reads the
+    // resolved image. The capture re-render reuses this frame's result.
+    WGPUBindGroup grp_only = set.grp_hdr_only;
+    WGPUBindGroup grp_comp = set.grp_hdr;
+    if (main_set && taa_on) {
+      impl_->ensure_taa_groups();
+      const int par = impl_->taa_parity;
+      if (do_lum && impl_->taa_group[par] != nullptr) {
+        fullscreen_pass(encoder, impl_->taa_pipeline, impl_->ssao_group, impl_->taa_group[par],
+                        impl_->taa_hist_view[par]);
+      }
+      if (impl_->post_taa[par] != nullptr) {
+        grp_only = impl_->post_taa_only[par];
+        grp_comp = impl_->post_taa[par];
+      }
+    }
+    fullscreen(impl_->bright_pipeline, grp_only, slot_base + 0, set.bloom_view[0]);
     fullscreen(impl_->blur_pipeline, set.grp_b0, slot_base + 1, set.bloom_view[1]);
     fullscreen(impl_->blur_pipeline, set.grp_b1, slot_base + 2, set.bloom_view[0]);
     if (do_lum) {
-      fullscreen(impl_->lum_pipeline, set.grp_hdr_only, slot_base + 3, impl_->lum_view);
+      fullscreen(impl_->lum_pipeline, grp_only, slot_base + 3, impl_->lum_view);
     }
-    fullscreen(impl_->composite_pipeline, set.grp_hdr, slot_base + 0, out_view);
+    fullscreen(impl_->composite_pipeline, grp_comp, slot_base + 0, out_view);
     // Overlay (UI) after the tonemap, depth-tested against the scene.
     {
       WGPURenderPassColorAttachment color{};
@@ -1881,6 +3838,12 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     wgpuTextureViewRelease(view);
     wgpuSurfacePresent(impl_->surface);
     wgpuTextureRelease(surface_texture.texture);
+    if (taa_on) {
+      impl_->taa_valid = true;
+      impl_->taa_parity = 1 - impl_->taa_parity;
+    } else {
+      impl_->taa_valid = false;
+    }
   } else {
     // Headless (hidden window): the eye still adapts — render the scene
     // into the HDR target and run the luminance reduction, skipping the
@@ -1953,9 +3916,11 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   }
 
   // --- one-shot capture: identical frame into an offscreen target -------
-  if (!impl_->capture_path.empty()) {
+  if (!impl_->capture_path.empty() || impl_->readback_requested) {
     const std::string path = impl_->capture_path;
     impl_->capture_path.clear();
+    const bool want_readback = impl_->readback_requested;
+    impl_->readback_requested = false;
     const std::uint32_t width = impl_->width;
     const std::uint32_t height = impl_->height;
     const std::uint32_t bytes_per_row = ((width * 4 + 255) / 256) * 256;
@@ -1977,8 +3942,21 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     read_desc.size = static_cast<std::uint64_t>(bytes_per_row) * height;
     WGPUBuffer read_buffer = wgpuDeviceCreateBuffer(impl_->device, &read_desc);
 
+    // The readback wants the parity the presented frame wrote, so the
+    // re-render composes from the same history (the TAA pass already ran).
+    if (taa_on) impl_->taa_parity = 1 - impl_->taa_parity;
     render_full(impl_->post_main, impl_->depth_view, color_view, 0, false);
+    if (taa_on) impl_->taa_parity = 1 - impl_->taa_parity;
 
+    const std::uint32_t depth_bpr = ((width * 4 + 255) / 256) * 256;
+    WGPUBuffer depth_buffer = nullptr;
+    if (want_readback) {
+      WGPUBufferDescriptor dd{};
+      dd.label = sv("readback-depth");
+      dd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+      dd.size = static_cast<std::uint64_t>(depth_bpr) * height;
+      depth_buffer = wgpuDeviceCreateBuffer(impl_->device, &dd);
+    }
     WGPUCommandEncoder cap_encoder = wgpuDeviceCreateCommandEncoder(impl_->device, nullptr);
     WGPUTexelCopyTextureInfo src{};
     src.texture = color_tex;
@@ -1988,6 +3966,16 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     dst.layout.rowsPerImage = height;
     const WGPUExtent3D extent{width, height, 1};
     wgpuCommandEncoderCopyTextureToBuffer(cap_encoder, &src, &dst, &extent);
+    if (want_readback) {
+      WGPUTexelCopyTextureInfo dsrc{};
+      dsrc.texture = impl_->depth_texture;
+      dsrc.aspect = WGPUTextureAspect_DepthOnly;
+      WGPUTexelCopyBufferInfo ddst{};
+      ddst.buffer = depth_buffer;
+      ddst.layout.bytesPerRow = depth_bpr;
+      ddst.layout.rowsPerImage = height;
+      wgpuCommandEncoderCopyTextureToBuffer(cap_encoder, &dsrc, &ddst, &extent);
+    }
     WGPUCommandBuffer cap_commands = wgpuCommandEncoderFinish(cap_encoder, nullptr);
     wgpuCommandEncoderRelease(cap_encoder);
     wgpuQueueSubmit(impl_->queue, 1, &cap_commands);
@@ -2012,9 +4000,25 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
           wgpuBufferGetConstMappedRange(read_buffer, 0, read_desc.size));
       const bool bgra = impl_->format == WGPUTextureFormat_BGRA8Unorm ||
                         impl_->format == WGPUTextureFormat_BGRA8UnormSrgb;
-      std::FILE* file = std::fopen(path.c_str(), "wb");
+      if (want_readback && data != nullptr) {
+        impl_->readback_rgba.resize(static_cast<std::size_t>(width) * height * 4);
+        for (std::uint32_t y = 0; y < height; ++y) {
+          const std::uint8_t* src_row = data + static_cast<std::size_t>(y) * bytes_per_row;
+          std::uint8_t* out = impl_->readback_rgba.data() + static_cast<std::size_t>(y) * width * 4;
+          for (std::uint32_t x = 0; x < width; ++x) {
+            out[x * 4 + 0] = src_row[x * 4 + (bgra ? 2 : 0)];
+            out[x * 4 + 1] = src_row[x * 4 + 1];
+            out[x * 4 + 2] = src_row[x * 4 + (bgra ? 0 : 2)];
+            out[x * 4 + 3] = 255;
+          }
+        }
+        impl_->readback_w = width;
+        impl_->readback_h = height;
+      }
+      const std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(
+          path.empty() ? nullptr : std::fopen(path.c_str(), "wb"), &std::fclose);
       if (file != nullptr && data != nullptr) {
-        std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+        std::fprintf(file.get(), "P6\n%u %u\n255\n", width, height);
         std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3);
         for (std::uint32_t y = 0; y < height; ++y) {
           const std::uint8_t* src_row = data + static_cast<std::size_t>(y) * bytes_per_row;
@@ -2023,21 +4027,45 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
             row[x * 3 + 1] = src_row[x * 4 + 1];
             row[x * 3 + 2] = src_row[x * 4 + (bgra ? 0 : 2)];
           }
-          std::fwrite(row.data(), 1, row.size(), file);
+          std::fwrite(row.data(), 1, row.size(), file.get());
         }
-        std::fclose(file);
         std::printf("capture: wrote %ux%u to %s (avg_lum %.5f exposure %.2f scotopic %.2f)\n",
                     width, height, path.c_str(), impl_->avg_luminance, impl_->exposure,
                     impl_->scotopic);
-      } else {
+      } else if (!path.empty()) {
         std::fprintf(stderr, "capture: FAILED to open %s\n", path.c_str());
-        if (file != nullptr) {
-          std::fclose(file);
-        }
       }
       wgpuBufferUnmap(read_buffer);
     } else {
       std::fprintf(stderr, "capture: readback map failed\n");
+    }
+    if (want_readback && depth_buffer != nullptr) {
+      bool d_done = false;
+      bool d_ok = false;
+      WGPUBufferMapCallbackInfo dinfo{};
+      dinfo.mode = WGPUCallbackMode_AllowProcessEvents;
+      dinfo.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void* u2) {
+        *static_cast<bool*>(u1) = true;
+        *static_cast<bool*>(u2) = status == WGPUMapAsyncStatus_Success;
+      };
+      dinfo.userdata1 = &d_done;
+      dinfo.userdata2 = &d_ok;
+      wgpuBufferMapAsync(depth_buffer, WGPUMapMode_Read, 0, static_cast<std::uint64_t>(depth_bpr) * height, dinfo);
+      while (!d_done) {
+        wgpuDevicePoll(impl_->device, 1U, nullptr);
+      }
+      if (d_ok) {
+        const auto* dd = static_cast<const std::uint8_t*>(
+            wgpuBufferGetConstMappedRange(depth_buffer, 0, static_cast<std::uint64_t>(depth_bpr) * height));
+        impl_->readback_depth.resize(static_cast<std::size_t>(width) * height);
+        for (std::uint32_t y = 0; y < height; ++y) {
+          std::memcpy(impl_->readback_depth.data() + static_cast<std::size_t>(y) * width,
+                      dd + static_cast<std::size_t>(y) * depth_bpr, static_cast<std::size_t>(width) * 4);
+        }
+        wgpuBufferUnmap(depth_buffer);
+        impl_->readback_ready = true;
+      }
+      wgpuBufferRelease(depth_buffer);
     }
     wgpuBufferRelease(read_buffer);
     wgpuTextureViewRelease(color_view);
@@ -2118,6 +4146,19 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
 }
 
 void Rhi::request_capture(const std::string& path) { impl_->capture_path = path; }
+
+void Rhi::request_readback() { impl_->readback_requested = true; }
+
+bool Rhi::take_readback(std::vector<std::uint8_t>* rgba, std::vector<float>* depth,
+                        std::uint32_t* width, std::uint32_t* height) {
+  if (!impl_->readback_ready) return false;
+  impl_->readback_ready = false;
+  rgba->swap(impl_->readback_rgba);
+  depth->swap(impl_->readback_depth);
+  *width = impl_->readback_w;
+  *height = impl_->readback_h;
+  return true;
+}
 
 void Rhi::set_ring_enabled(bool enabled) { impl_->ring_enabled = enabled; }
 

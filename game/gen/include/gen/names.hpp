@@ -30,6 +30,7 @@ inline constexpr core::NameId BeltsV1{0x067c9da641973dd1ULL};         // "belts/
 inline constexpr core::NameId MultistarV1{0x505708ce7508c26bULL};     // "multistar/v1"
 inline constexpr core::NameId MacroV1{0x44fd8a3c80c8f6b1ULL};         // "macro/v1"
 inline constexpr core::NameId TerrainV2{0x48d3cb3103db7f17ULL};       // "terrain/v2"
+inline constexpr core::NameId TerrainV3{0x033b3f39bf206fb7ULL};       // "terrain/v3"
 inline constexpr core::NameId FeaturesV1{0x3dbb2eed252570fbULL};      // "features/v1"
 inline constexpr core::NameId CavesV1{0x637ade26b9efa0daULL};         // "caves/v1"
 inline constexpr core::NameId DrainageV1{0x6bdc9ecba8d08bebULL};      // "drainage/v1"
@@ -40,6 +41,26 @@ inline constexpr core::NameId StarClustersV1{0xb59ee6f1f35abb5eULL};  // "star-c
 inline constexpr core::NameId GalaxyLayoutV1{0xaa91de0c98bdfc07ULL};  // "galaxy-layout/v1"
 inline constexpr core::NameId SatellitesV1{0xf47f9c80f8ae1d0dULL};    // "satellites/v1"
 inline constexpr core::NameId GasBandsV1{0x1425be2bc6e9de2bULL};      // "gas-bands/v1"
+// Surface texturing layers (T0019, design/surface-texturing.md).
+inline constexpr core::NameId ClimateV1{0x0245292d47427e3dULL};       // "climate/v1"
+inline constexpr core::NameId LifeV1{0x319503b0591a5e87ULL};          // "life/v1"
+inline constexpr core::NameId BiomeV1{0xfb5bca62da72cb4fULL};         // "biome/v1"
+inline constexpr core::NameId MaterialV2{0xbe8c258868132a27ULL};      // "material/v2"
+// Civilization layers (T0020, design/civilization-and-settlements.md).
+inline constexpr core::NameId CivilizationV1{0x7871c23f990ccec0ULL};  // "civilization/v1"
+inline constexpr core::NameId RacesV1{0x2225e8e183611a86ULL};         // "races/v1"
+inline constexpr core::NameId RaceFactionsV1{0xe8571f6e9f26c0fbULL};  // "race-factions/v1"
+inline constexpr core::NameId RaceClaimsV1{0x4b541dccdf7a659eULL};    // "race-claims/v1"
+inline constexpr core::NameId HumanV1{0xa1c58061b7d1f297ULL};         // "human/v1"
+inline constexpr core::NameId HumanEnclavesV1{0x88478f57b3d8cc8aULL}; // "human-enclaves/v1"
+inline constexpr core::NameId ColonyV1{0xe9195d0159017f12ULL};        // "colony/v1"
+inline constexpr core::NameId MaxLevelV1{0x2a980f00369a77d7ULL};      // "max-level/v1"
+inline constexpr core::NameId SettlementsV1{0x5234ece204a9ca43ULL};   // "settlements/v1"
+inline constexpr core::NameId SitesV1{0x4789c8219043429dULL};         // "sites/v1"
+inline constexpr core::NameId CivilV1{0xb2b88c5e2f3618cdULL};         // "civil/v1"
+inline constexpr core::NameId BuildingsV1{0xa11bb8a793d0df20ULL};     // "buildings/v1"
+inline constexpr core::NameId EcumenopolisV1{0x7fcdd973ffbdabe1ULL};  // "ecumenopolis/v1"
+inline constexpr core::NameId CivNamesV1{0xd5aea597f5cfddf7ULL};      // "civ-names/v1"
 // InfinityTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
@@ -48,6 +69,7 @@ inline constexpr core::NameId PlanetsAxis{0xbe9efd4e11872704ULL};     // "planet
 inline constexpr core::NameId MoonsAxis{0xb228c7ac1177455aULL};       // "moons/v1" (axis)
 inline constexpr core::NameId StarsAxis{0x2d0c04caf746a81bULL};       // "stars/v1"
 inline constexpr core::NameId BeltsAxis{0x067c9da641973dd1ULL};       // "belts/v1" (axis)
+inline constexpr core::NameId DeepSpaceAxis{0x9cf1f63b672ee33aULL};  // "deepspace/v1" (axis)
 }  // namespace name
 
 namespace kind {
@@ -64,12 +86,24 @@ inline constexpr core::KindId Feature{15};
 inline constexpr core::KindId Cave{16};
 inline constexpr core::KindId Nebula{17};
 inline constexpr core::KindId StarCluster{18};
+// Civilization kinds (T0020).
+inline constexpr core::KindId Race{19};
+inline constexpr core::KindId Faction{20};
+inline constexpr core::KindId Site{21};
+inline constexpr core::KindId Lot{22};
+inline constexpr core::KindId Wormhole{23};
+inline constexpr core::KindId MacroCell{24};
 }  // namespace kind
 
 namespace channel {
 inline constexpr core::ChannelId Params{1};
 inline constexpr core::ChannelId Archetype{2};
 inline constexpr core::ChannelId Lattice{3};
+// Civilization draw purposes (T0020): the wave/infill claim uniforms,
+// the colony draws, and the layout solve.
+inline constexpr core::ChannelId Claim{4};
+inline constexpr core::ChannelId Colony{5};
+inline constexpr core::ChannelId Layout{6};
 inline constexpr core::ChannelId Test{0xFFFFFF};
 }  // namespace channel
 
@@ -98,6 +132,7 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"multistar/v1", name::MultistarV1},
     {"macro/v1", name::MacroV1},
     {"terrain/v2", name::TerrainV2},
+    {"terrain/v3", name::TerrainV3},
     {"features/v1", name::FeaturesV1},
     {"caves/v1", name::CavesV1},
     {"drainage/v1", name::DrainageV1},
@@ -108,6 +143,25 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"galaxy-layout/v1", name::GalaxyLayoutV1},
     {"satellites/v1", name::SatellitesV1},
     {"gas-bands/v1", name::GasBandsV1},
+    {"climate/v1", name::ClimateV1},
+    {"life/v1", name::LifeV1},
+    {"biome/v1", name::BiomeV1},
+    {"material/v2", name::MaterialV2},
+    {"civilization/v1", name::CivilizationV1},
+    {"races/v1", name::RacesV1},
+    {"race-factions/v1", name::RaceFactionsV1},
+    {"race-claims/v1", name::RaceClaimsV1},
+    {"human/v1", name::HumanV1},
+    {"human-enclaves/v1", name::HumanEnclavesV1},
+    {"colony/v1", name::ColonyV1},
+    {"max-level/v1", name::MaxLevelV1},
+    {"settlements/v1", name::SettlementsV1},
+    {"sites/v1", name::SitesV1},
+    {"civil/v1", name::CivilV1},
+    {"buildings/v1", name::BuildingsV1},
+    {"ecumenopolis/v1", name::EcumenopolisV1},
+    {"civ-names/v1", name::CivNamesV1},
+    {"deepspace/v1", name::DeepSpaceAxis},
     {"clusters/v1", name::ClustersAxis},
     {"galaxies/v1", name::GalaxiesAxis},
     {"systems/v1", name::SystemsAxis},

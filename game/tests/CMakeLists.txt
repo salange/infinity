@@ -10,10 +10,13 @@ add_executable(game_tests
   test_system.cpp
   test_player.cpp
   test_edits.cpp
-  test_map.cpp)
+  test_map.cpp
+  test_surface.cpp
+  test_civ.cpp
+  test_city.cpp)
 target_include_directories(game_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(game_tests
-  PRIVATE game::gen game::sim doctest::doctest game_warnings)
+  PRIVATE game::gen game::sim game::tex game::city doctest::doctest game_warnings)
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(game_tests)

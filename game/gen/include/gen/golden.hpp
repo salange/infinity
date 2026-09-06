@@ -21,6 +21,7 @@ std::uint64_t hash_planet_script(const core::Seed128& seed, std::uint32_t forced
 
 // Multi-seed x all-types report compared by ci/check.sh
 // (tests/goldens/hash-planet.txt).
+std::uint64_t hash_surface_script(const core::Seed128& seed, std::uint32_t forced_type);
 std::string hash_planet_report();
 
 // M3: density-grid fingerprints for a fixed chunk set (surface, elevated
@@ -32,5 +33,10 @@ std::string hash_density_report();
 // (dig, overlapping dig, refill, deep carve) — locks the CSG fold order,
 // the fixed64 edit encoding, and the edit-aware ground query.
 std::string hash_edits_report();
+
+// T0020: civilization fingerprints (race registry, later owners, states,
+// plans, lots) at fixed ManualClock offsets from the launch reference.
+// Append-only sections so earlier lines stay byte-identical.
+std::string hash_civ_report();
 
 }  // namespace inf::gen

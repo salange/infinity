@@ -5,10 +5,14 @@
 #include <vector>
 
 #include "core/key.hpp"
+#include "gen/biome.hpp"
 #include "gen/caves.hpp"
+#include "gen/climate.hpp"
 #include "gen/drainage.hpp"
 #include "gen/features.hpp"
 #include "gen/geo.hpp"
+#include "gen/height_modifier.hpp"
+#include "gen/life.hpp"
 #include "gen/names.hpp"
 #include "gen/material.hpp"
 #include "gen/planet.hpp"
@@ -75,6 +79,9 @@ class TerrainField {
     det::Real dune_amount;
     // Canonical macro/v1 value (dimensionless, own lod-7 lattice).
     det::Real macro_rel;
+    // Dominant province archetype at the nearest lattice corner (T0019:
+    // material/v2 reads it; discrete, so it rides along un-blended).
+    Archetype dominant_archetype{Archetype::Flats};
   };
 
   // The province-parameter view of a canonical sample (macro_rel rides
@@ -156,15 +163,43 @@ class TerrainField {
   // meters. Positive = solid.
   det::Real density(const Dir3& position_m) const;
 
+  // T0020: a post-terrain height modifier (civil/v1) applied after every
+  // terrain operator. Null = none (byte-identical output). The terrain
+  // never knows what the modifier is; the owner sets it once before the
+  // field is shared with worker threads.
+  void set_height_modifier(const HeightModifier* modifier) { modifier_ = modifier; }
+  const HeightModifier* height_modifier() const { return modifier_; }
+  // The UNMODIFIED elevation (what the modifier reads as its base).
+  det::Real base_elevation_m(const Dir3& unit_dir) const;
+
   const PlanetParams& planet() const { return planet_; }
   const ProvinceField& provinces() const { return provinces_; }
+  const ClimateField& climate() const { return climate_; }
+  const LifeParams& life() const { return life_; }
   const MaterialField& material() const { return material_; }
   const FeatureField& features() const { return features_; }
+
+  // material/v2 (T0019): the surface material pair for a mesh vertex
+  // given in planet-local metres with its unit normal. Gathers every
+  // classifier input from the layers (canonical params, procedural
+  // surface elevation, climate, biome) — one place, so chunks, the
+  // far-view baker and the CLI maps agree by construction. The cache
+  // memoizes the lattice corners exactly like canonical_params.
+  VertexMaterial classify_vertex(double px, double py, double pz, double nx, double ny,
+                                 double nz, ParamCache* cache = nullptr) const;
+  // Per-material weights at a vertex (mesh classification, far view).
+  void material_weights(double px, double py, double pz, double nx, double ny, double nz,
+                        ParamCache* cache, double out[kMaterialCount]) const;
+  // The gathered inputs themselves (CLI maps, tests).
+  MaterialInputs material_inputs(double px, double py, double pz, double nx, double ny,
+                                 double nz, ParamCache* cache = nullptr) const;
 
  private:
   PlanetParams planet_;
   ProvinceField provinces_;
   MacroField macro_;
+  ClimateField climate_;
+  LifeParams life_;
   MaterialField material_;
   FeatureField features_;
   CaveField caves_;
@@ -174,10 +209,12 @@ class TerrainField {
                                          CaveField::System* storage) const;
   det::Real evaluate_elevation(const Dir3& unit_dir, const BlendedParams& params,
                                det::Real macro_rel, Dir3* slope_out,
-                               ParamCache* cache = nullptr) const;
+                               ParamCache* cache = nullptr, bool apply_modifier = true) const;
+  const HeightModifier* modifier_{nullptr};
 
   std::uint64_t elevation_lattice_;
   std::uint64_t detail_lattice_;
+  std::uint64_t meso_lattice_{0};
   Dir3 detail_axis_{det::Real(0.0), det::Real(0.0), det::Real(1.0)};
 };
 

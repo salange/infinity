@@ -11,7 +11,7 @@
 
 namespace cb {
 
-enum class CitySize : std::uint8_t { Small, Medium, Large, Metropolis };
+enum class CitySize : std::uint8_t { Outpost, Village, Small, Medium, Large, Metropolis };
 const char* to_string(CitySize s);
 CitySize city_size_for(Rng& rng);
 bool parse_city_size(const std::string& text, CitySize* out);
@@ -24,6 +24,6 @@ struct CityStats {
 CityStats generate_city(Scene& sc, Rng root, CitySize size);
 // The asset catalog: all tower families, the five standard types, plazas and
 // the ground kit arranged for one camera.
-void generate_showcase(Scene& sc, Rng root);
+void generate_showcase(Scene& sc, Rng root, int tower_detail = 2);
 
 }  // namespace cb

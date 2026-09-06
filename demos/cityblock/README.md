@@ -23,12 +23,14 @@ build/demos/cityblock/cityblock
 Without the assets the demo still runs: every material has a procedural
 fallback and the sky falls back to an analytic gradient.
 
-Controls: click to capture the mouse (Esc releases), mouse look, `W A S D`
-move, `Q`/`E` down/up, Shift fast, Ctrl slow, scroll changes speed, `N`
+Controls: click to capture the mouse (Esc releases), mouse look (yaw is
+unbounded), `W A S D` move, `Q`/`E` down/up, Shift 5× fast, Ctrl slow,
+scroll changes the cruise speed (72 m/s default; movement accelerates and
+brakes over ~0.25 s), `N`
 day/night, `F1` cycles debug views (albedo, normals, ambient occlusion,
 shadow cascades, roughness, direct sun, IBL diffuse, IBL specular, sun
 specular), `F2`–`F5` toggle SSAO / shadows / bloom / FXAA, `+`/`-`
-exposure, `R` next seed, `P` prints the camera as `--cam/--target`
+exposure, `R` next seed, `,` / `.` size class down / up for the same seed, `P` prints the camera as `--cam/--target`
 arguments, `F12` screenshot.
 
 Flags: `--seed S`, `--width W --height H`, `--sky day|night|sunset|file.hdr`,
@@ -38,7 +40,18 @@ Flags: `--seed S`, `--width W --height H`, `--sky day|night|sunset|file.hdr`,
 
 ## The city
 
-`--size small|medium|large|metropolis` (default: from the seed). The city
+`--size outpost|village|small|medium|large|metropolis` (default: from the
+seed). Sizes grow non-linearly, each step roughly doubling the radius:
+outpost 40 m (one settler couple's glass house beside the wreck of their
+landing pod, nothing else), village 150 m (the house gains a deck and a
+colonnade ring, the pod becomes a memorial where the unification ring will
+stand, a few sparse buildings and gardens), small 320 m (a two-storey civic
+hall on a plinth, one modest tower at most), medium 620 m (hall with a
+dome, towers in the core), large 1.25 km (the full capitol, lattice
+families unlocked), metropolis 2.5 km (taller dome and flag court, a dense
+downtown of towers, standard buildings to the horizon). Building density
+scales with size: small settlements leave lots unbuilt as lawns and voids
+and use larger lots; the metropolis fills every lot. The city
 (`src/city.cpp`) is a jittered street grid: every third line is an artery
 (26 m, raised median with hedges and sparse trees), the rest secondary
 roads (14 m); blocks are split into lots along alleys; one or two diagonal
@@ -77,8 +90,11 @@ the blocks carry standard buildings; some blocks become plazas.
 - Trees are budgeted per city size and used sparsely (medians, plazas,
   gardens); point lights are capped at the 64 nearest the centre.
 
-Triangle counts: small ≈ 80 k, medium ≈ 250 k, large ≈ 700 k,
-metropolis ≈ 1.4 M.
+Geometry budget: full tower detail exists only for the core towers (at
+most 10–14), mid detail out to the tower zone, the rest at the coarse
+level; outer standard buildings drop trims and balconies. Triangle counts:
+outpost 1 k, village 5 k, small 50 k, medium 0.4 M, large ≈ 3 M,
+metropolis ≈ 5–6 M.
 
 ## What is generated (the original hero block, kept as families)
 
@@ -158,17 +174,84 @@ Materials are three RGBA8 texture arrays (albedo sRGB, tangent normal,
 AO/roughness/height) with CPU mip chains; the sets are CC0 from ambientCG
 listed in `assets/manifest.json`, fetched by `tools/fetch-assets.py`.
 
+### Depth precision
+
+The camera passes use reversed Z (near = 1, far = 0) on a float depth buffer.
+With standard Z and a 0.3 m near plane the depth resolution at 500 m is about
+5 cm, so the ground kit — paths and lawns 1–2 cm above plaza floors and
+sidewalk plates — z-fought a few hundred metres out and flickered between
+materials as the camera moved (visible as the ground changing tint). Reversed
+Z keeps the resolution near 0.1 mm at that distance. The shadow cascades are
+orthographic and stay standard Z. The depth pyramid for occlusion culling
+therefore keeps the *minimum* per 2×2 block, and sky is depth 0.
+
+### Far facade patterns
+
+Beyond the near detail levels the lattice members, fins and louvre blades
+would be thinner than a pixel; as geometry they alias into moiré whenever the
+camera moves. From level 2 on (lattices, 500 m) and from level 1 on (fins and
+blades, 200 m) they are not emitted; instead the glass panels carry a pattern
+code (aux.w: 1 diagrid, 2 x-frame, 3 hex lattice, 4 ribbon fins, 5 fin weave,
+6 louvres, +8 for dark members) and the pattern's module and cell height in
+their uv, and `main.wgsl` draws the pattern analytically: box-filtered line
+coverage from each line family's own screen derivative, falling back to the
+family's mean coverage once a period spans under ~4 px. Nothing is left to
+alias, the far towers keep their look (compare `--showcase-detail 2` with
+`--showcase-detail 0` from 700 m), and the metropolis drops from 8.7 M to
+7.3 M resident triangles. `--no-pattern` restores the member geometry for
+comparison.
+
+## Performance options
+
+Every option below is a runtime toggle (key) and a flag, so the game can
+expose them to the player later. Measured on the Radeon 780M at 1600×900,
+metropolis, all effects on unless noted:
+
+| Option | Key / flag | Effect |
+|---|---|---|
+| GPU occlusion culling | `F7` / `--no-occlusion` | depth pyramid from the prepass, compute cull of every draw range (one per building, tower level, block plate), one multi-draw-indirect; wins where buildings hide buildings (street level in dense districts), ~0.1 ms overhead elsewhere |
+| Half-resolution SSAO | `F8` / `--ssao-half` | ambient occlusion at half resolution, bilateral upsample; about −0.3 ms |
+| MSAA 4× ↔ off | `F9` / `--msaa 1` | with TAA on, MSAA can be dropped: −1.8 ms |
+| Half-rate far shadows | `F10` / `--shadow-half-rate` | the two far cascades refit on alternating frames: −0.7 to −1.2 ms |
+| Far-cascade shadow LOD | `F11` / `--shadow-far-lod` | the far cascade casts tower shells only and skips buildings beyond 350 m: −1.0 ms |
+
+Shadows are the largest single cost (4.5 ms of 16.5 at street level in a
+metropolis); SSAO 1.5 ms, MSAA 1.8 ms, TAA 0.5 ms. With every option on
+the same view renders in 12.2 ms; with shadows, SSAO, MSAA and TAA off it
+takes 6.4 ms, which is the fixed cost of sky, shading and post at 1600×900
+on this GPU.
+
+Always on: 32-byte packed vertices (octahedral normals and tangents,
+half-float UVs, 1 cm facade coordinates; 2.1× less vertex bandwidth,
+metropolis 35 → 22 ms), per-object LOD with a far shell level beyond
+1.2 km (2.1 M of 8.6 M resident triangles drawn from the air), frustum
+culling per block, per-cascade shadow culling in light space, shadows from
+the coarsest real level. The title bar shows triangles drawn vs resident,
+ranges drawn vs total and the GPU-occluded count.
+
 ## Measuring temporal artifacts
 
-`--sweep N [--sweep-step m] [--sweep-out name]` renders N frames while the
-camera slides sideways by `step` per frame, reads back each final frame
-and the depth buffer, reprojects every pixel into the previous frame
-(exact for a static world) and subtracts the change a band-limited image
-would show (local gradient × screen motion). What remains is temporal
-aliasing — shimmer, moiré, crawling edges. It prints the mean residual,
-the ten materials that contribute most (via the material-id debug view),
-and writes `name-heat.png` (amplified residual, dark = stable) and
-`name-frame.png`. `--no-taa` measures the MSAA-only path for comparison.
+`--sweep N [--sweep-step m] [--sweep-dir right|forward|down] [--sweep-blur R]
+[--sweep-out name]` renders N frames while the camera moves by `sweep-step`
+per frame (1.2 m is flying at 72 m/s and 60 Hz). Every pixel of a frame is
+reprojected into the previous frame through the depth buffer and the two
+view-projections (exact for a static world), the previous frame is sampled
+there and differenced; half a pixel of local gradient is tolerated as
+resampling blur. What remains is temporal aliasing — shimmer, moiré,
+crawling edges, popping — reported as a luminance and a *chroma* residual
+(colour-only flicker such as z-fighting between materials), attributed per
+material, and written as `name-heat.png`. `--sweep-blur 2` box-blurs both
+frames first so that a well-filtered 1 px line sliding across pixels does not
+count and only low-frequency shimmer does. `--sweep-step 0` measures a
+static camera (TAA convergence). Debug views (`--debug N`, F1) isolate
+albedo, normals, AO, sun, IBL and specular so a residual can be attributed to
+one term.
+
+`--stress N` recreates the render targets N times headless (as resizes and
+option toggles do) as a leak and lifetime check. `--showcase-detail L` builds
+the showcase towers at detail level L (-1 far shell … 2 full) so the levels
+can be compared from one camera.
+
 `--bench N` renders N offscreen frames and prints ms/frame. `--showcase`
 replaces the city with the asset catalog: all tower families, the five
 standard types and the ground kit arranged for one camera. A metropolis

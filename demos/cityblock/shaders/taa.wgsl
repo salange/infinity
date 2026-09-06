@@ -63,7 +63,7 @@ fn tonemap_inv(c: vec3<f32>) -> vec3<f32> { return c / max(1.0 - luma(c), 1e-3);
     hist_t = select(h, centre + d / t, t > 1.0);
     weight = taa.params.x;
     // sky (far depth) can keep full history
-    if (depth >= 0.99999) { weight = min(taa.params.x, 0.9); }
+    if (depth <= 1e-7) { weight = min(taa.params.x, 0.9); }  // sky (reversed Z)
   }
   let out_t = mix(cur_t, hist_t, weight);
   return vec4<f32>(tonemap_inv(out_t), 1.0);

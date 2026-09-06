@@ -16,6 +16,8 @@ struct SceneParams {
   int context_detail{-1};  // -1 = by ring (1 near, 0 far); 0..2 forces one level
   int size{-1};  // -1 = from the seed; 0 small, 1 medium, 2 large, 3 metropolis
   bool showcase{false};  // asset-catalog scene: every tower family and the ground kit side by side
+  int showcase_detail{2};
+  bool far_patterns{true};  // analytic facade patterns at the far detail levels  // detail level the showcase towers are built at (-1 far shell .. 2 full)
   int detail{2};  // 0 coarse … 2 full
 };
 

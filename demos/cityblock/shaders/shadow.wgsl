@@ -10,7 +10,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @lo
   var o: VOut;
   o.pos = cascade.light_vp * vec4<f32>(in.position, 1.0);
   o.uv = in.uv;
-  o.material = in.material;
+  o.material = in.packed.x | (in.packed.y << 8u);
   return o;
 }
 // Opaque: depth only (no fragment stage). Foliage: alpha test.

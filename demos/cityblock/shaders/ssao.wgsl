@@ -23,7 +23,7 @@ const KERNEL: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
 
 @fragment fn fs_ssao(in: FSOut) -> @location(0) vec4<f32> {
   let depth = textureSample(depth_tex, samp, in.uv);
-  if (depth >= 0.99999) { return vec4<f32>(1.0); }
+  if (depth <= 1e-7) { return vec4<f32>(1.0); }  // sky (reversed Z clears to 0)
   let p = view_pos(in.uv, depth);
   let n = normalize(textureSample(normal_tex, samp, in.uv).xyz);
   // Interleaved gradient noise for the rotation.

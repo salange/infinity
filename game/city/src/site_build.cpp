@@ -488,8 +488,9 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
       }
     }
   }
-  // Arterials: asphalt, lane paint, medians with hedges and trees.
-  {
+  // Arterials: asphalt, lane paint, medians with hedges and trees (none
+  // at stage 0: the outpost is the founding scene alone).
+  if (rules.stage > 0) {
     Rng ar(core::derive_child(buildings_key, gen::kind::Lot, 0x200000000LL));
     int seg_index = 0;
     for (const gen::Arterial& a : site.arterials) {

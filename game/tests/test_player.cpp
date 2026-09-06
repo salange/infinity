@@ -97,6 +97,18 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
     CHECK(sim::length(player.position()) == doctest::Approx(expected).epsilon(1e-6));
   }
 
+  // A/D remain left/right strafe after entering walking mode.
+  for (bool left : {true, false}) {
+    Player walker = player;
+    const Vec3 start = walker.position();
+    const Vec3 right = walker.right();
+    InputFrame step = tick(0.016);
+    step.left = left;
+    step.right = !left;
+    walker.update(step);
+    CHECK(sim::dot(walker.position() - start, right) * (left ? -1.0 : 1.0) > 0.0);
+  }
+
   // Walk (with run) for 3 seconds across the terrain: always exactly eye
   // height above the local ground — cannot fall through.
   for (int i = 0; i < 180; ++i) {
@@ -119,6 +131,12 @@ TEST_CASE("player: E lands to eye height, walking stays glued, E takes off") {
   }
   REQUIRE(player.mode() == PlayerMode::Flight);
   CHECK(player.altitude() > 30.0);
+  // Returning to flight restores the same reversed A roll mapping.
+  player.set_attitude({0.0, 0.0, 1.0}, {1.0, 0.0, 0.0});
+  InputFrame roll = tick(0.016);
+  roll.left = true;
+  player.update(roll);
+  CHECK(player.up().y < 0.0);
 }
 
 TEST_CASE("player: beams fire toward the crosshair and expire by distance") {
@@ -203,4 +221,29 @@ TEST_CASE("player: flight cannot dive below the water surface") {
   }
   // And landing over open water is refused.
   CHECK(!player.can_land());
+}
+
+TEST_CASE("player: flight A and D use opposite roll directions at the original rate") {
+  const auto body = body_for(0xBEEF);
+  const auto planet = gen::derive_planet_params(body, gen::PlanetType::Barren);
+  const gen::TerrainField field(body.entity, planet);
+  const gen::EffectiveField eff(field);
+  for (int direction : {-1, 0, 1}) {
+    Player player(eff, {planet.radius_m.to_double() + 100000.0, 0.0, 0.0});
+    player.set_attitude({0.0, 0.0, 1.0}, {1.0, 0.0, 0.0});
+    InputFrame input = tick(0.05);
+    input.left = direction <= 0;
+    input.right = direction >= 0;
+    player.update(input);
+    CHECK(player.up().x == doctest::Approx(std::cos(direction * 1.7 * input.dt)));
+    CHECK(player.up().y == doctest::Approx(std::sin(direction * 1.7 * input.dt)));
+    CHECK(player.forward().z == doctest::Approx(1.0));
+    CHECK(player.speed() == doctest::Approx(0.0));
+    player.enter_map();
+    const Vec3 up = player.up();
+    player.update(input);
+    CHECK(sim::length(player.up() - up) == doctest::Approx(0.0));
+    player.exit_map();
+    REQUIRE(player.mode() == PlayerMode::Flight);
+  }
 }

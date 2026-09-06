@@ -336,11 +336,14 @@ StarSystemParams generate_system(const core::Key& system_entity_key,
       planet.spin.spin_rate_rad_s = Real(det::sqrt(Real(mu_star / a3)).to_double());
     }
 
-    // Surface mapping for the surface generator. EVERY planet is landable
-    // and carries a full terrain field (uniform-planet rule, 2026-08-31):
-    // giants get a Barren surface at their nominal radius — approach,
-    // speed limits, landing, and digging work the same on every body.
-    planet.landable = true;
+    // Surface mapping for the surface generator. Rocky worlds are
+    // landable with a full terrain field; giants are NOT (2026-09-01,
+    // supersedes the uniform-planet rule of 2026-08-31): a gas or ice
+    // giant has no surface, only cloud tops — the client renders a
+    // banded gas ball and keeps ships out. Their surface_type stays
+    // Barren as the inert fallback for the rare all-giant system.
+    planet.landable = planet.phys.cls == core::PlanetClass::Rocky ||
+                      planet.phys.cls == core::PlanetClass::SuperEarth;
     planet.surface_type = surface_type_for(planet.phys.cls, flux,
                                            planet.phys.radius_m.to_double(), d0[2]);
     planet.phys.surface_type = static_cast<std::uint32_t>(planet.surface_type);
@@ -370,6 +373,9 @@ StarSystemParams generate_system(const core::Key& system_entity_key,
         planet.phys.cls = PlanetClass::Rocky;
         planet.phys.radius_m = Real(0.9 * kEarthRadiusGame);
       }
+      // A forced home world is rocky by now, so it is landable even when
+      // the slot was drawn as a giant (giants are not, 2026-09-01).
+      planet.landable = true;
       if (home_override->habitat == PlanetType::EarthLike &&
           planet.phys.radius_m.to_double() < kAtmosphereMinRadiusM) {
         planet.phys.radius_m = Real(kAtmosphereMinRadiusM * 1.05);
@@ -511,10 +517,19 @@ StarSystemParams generate_system(const core::Key& system_entity_key,
 
 int default_landable_slot(const StarSystemParams& system) {
   // Spawn preference: the first EarthLike world if the system has one,
-  // otherwise the first occupied slot (every planet is landable now).
+  // otherwise the first LANDABLE slot; an all-giant system falls back to
+  // the first occupied slot as an inert anchor (approach stays gated by
+  // the client's keep-out).
   for (int slot = 0; slot < kMaxPlanetSlots; ++slot) {
     const SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
-    if (planet.occupied && planet.surface_type == PlanetType::EarthLike) {
+    if (planet.occupied && planet.landable &&
+        planet.surface_type == PlanetType::EarthLike) {
+      return slot;
+    }
+  }
+  for (int slot = 0; slot < kMaxPlanetSlots; ++slot) {
+    const SystemPlanet& planet = system.planets[static_cast<std::size_t>(slot)];
+    if (planet.occupied && planet.landable) {
       return slot;
     }
   }

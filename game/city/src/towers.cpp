@@ -1,9 +1,9 @@
-#include "towers.hpp"
+#include "city/towers.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace cb {
+namespace inf::city {
 
 Vec3 P3(Vec2 xz, float y) { return Vec3{xz.x, y, xz.y}; }
 
@@ -17,13 +17,14 @@ void wall_quad(Emit& e, Vec3 A, Vec3 B, Vec3 C, Vec3 D, Vec2 uvA, Vec2 uvB, Vec2
 
 int sides_for(int detail, int full) { return std::max(4, detail >= 2 ? full : (detail == 1 ? full * 2 / 3 : full / 2)); }
 
-// ---- analytic facade patterns -------------------------------------------------
-// At the far detail levels the lattice members, fins and louvre blades would
-// be thinner than a pixel and alias into moire whenever the camera moves.
-// They are not emitted as geometry there; instead the glass panels carry a
-// pattern code in aux.w (1 diagrid, 2 x-frame, 3 hex lattice, 4 ribbon fins,
-// 5 fin weave, 6 louvres; +8 for dark members) and the pattern's module and
-// cell height in uv, and the shader draws the pattern band-limited.
+// ---- analytic facade patterns (T0022 C.2) ---------------------------------
+// At the far detail levels the lattice members, fins and louvre blades
+// would be thinner than a pixel and alias into moire whenever the camera
+// moves. They are not emitted as geometry there; instead the glass panels
+// carry a pattern code in aux.w (1 diagrid, 2 x-frame, 3 hex lattice, 4
+// ribbon fins, 5 fin weave, 6 louvres; +8 for dark members) and the
+// pattern's module and cell height in uv, and the shader draws the
+// pattern band-limited. Never draw members thinner than a pixel.
 bool g_far_patterns = true;
 
 int pattern_kind(FacadeKind f) {
@@ -45,9 +46,9 @@ float lattice_module(const TowerSpec& s, float perimeter) {
   const int M = std::max(6, static_cast<int>(std::round(perimeter / module)));
   return perimeter / static_cast<float>(M);
 }
-// Pattern instead of geometry at this detail level? Lattice members (~0.8 m)
-// fall below 1.5 px beyond 500 m (level 2), fins and blades (0.1-0.2 m)
-// below a pixel beyond 200 m (level 1).
+// Pattern instead of geometry at this detail level? Lattice members
+// (~0.8 m) fall below 1.5 px beyond 500 m (level 2), fins and blades
+// (0.1-0.2 m) below a pixel beyond 200 m (level 1).
 bool pattern_at(const TowerSpec& s, int detail) {
   if (!g_far_patterns) return false;
   if (is_lattice(s.facade)) return detail <= 0;
@@ -297,8 +298,8 @@ void lattice(Ctx& c, int first_row, int rows_total, float offset, bool crown_row
     if (s.facade == FacadeKind::HexLattice) {
       // A hexagon with vertical sides is one cell tall; the next row is
       // shifted half a cell sideways and 0.75 of a cell up, so the top
-      // zigzag of one row IS the bottom zigzag of the next. Pitching rows a
-      // full cell apart (the earlier bug) left a 0.25-cell gap between rows.
+      // zigzag of one row IS the bottom zigzag of the next. Pitching rows
+      // a full cell apart left a 0.25-cell gap between rows.
       const float shift = (j % 2) ? 0.5f : 0.0f;
       const float base = static_cast<float>(j) * 0.75f;
       for (int i = 0; i < M; ++i) {
@@ -532,11 +533,12 @@ void build_crown(Ctx& c, float top) {
 
 void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rng rng, int detail) {
   if (detail < 0) {
-    // Far shell: the glass volume as one quad per plan segment over the full
-    // height (the shader's room grid still paints the floors), a roof cap and
-    // a plain base ring. ~100 triangles; used beyond ~1.2 km.
+    // Far shell (T0022 B.1): the glass volume as one quad per plan segment
+    // over the full height (the shader's room grid still paints the
+    // floors), a roof cap and nothing else — ~100 triangles, used beyond
+    // ~1.2 km.
     Profile prof{&spec, base_plan(spec, 0), centre};
-    std::vector<Vec2> p0 = prof.at(0);
+    const std::vector<Vec2> p0 = prof.at(0);
     const float bh = static_cast<float>(spec.base_floors) * spec.floor_h;
     const float y0 = base_y, y1 = base_y + bh + spec.floor_h * static_cast<float>(spec.floors);
     Emit g(&sc.opaque, spec.glass);
@@ -654,13 +656,6 @@ TowerSpec spec_hex(float half, int floors) {
   return s;
 }
 
-namespace {
-Mat pick_glass(Rng& r, float floor_h) {
-  (void)r;
-  return glass_for_floor_height(floor_h);
-}
-}  // namespace
-
 TowerSpec random_tower(Rng& rng, float half, int max_floors) {
   const float u = rng.next();
   TowerSpec s;
@@ -709,12 +704,11 @@ TowerSpec random_context_tower(Rng& rng, float half, int max_floors) {
   return s;
 }
 
-void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail) {
-  const int tower_detail = detail;  // -1 passes through to the shells
+void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, float base_y, int detail) {
   // Shared podium (2 floors) with 2–3 towers of one family.
   const float pod_hx = rng.range(38.0f, 48.0f), pod_hz = rng.range(26.0f, 34.0f);
   const std::vector<Vec2> podium = plan_transform(plan_rounded_rect(pod_hx, pod_hz, 8.0f, 6), centre, rot);
-  const float ph = 8.0f;
+  const float ph = base_y + 8.0f;
   Emit g(&sc.opaque, M_GLASS_CLEAR);
   g.element_random = rng.next();
   float u = 0.0f;
@@ -722,7 +716,7 @@ void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail) {
   for (std::size_t i = 0; i < inner.size(); ++i) {
     const std::size_t j = (i + 1) % inner.size();
     const float w = length(inner[j] - inner[i]);
-    g.quad(P3(inner[j], 0.0f), P3(inner[i], 0.0f), P3(inner[i], ph), P3(inner[j], ph), QuadUV{{u + w, 0}, {u, 0}, {u, ph}, {u + w, ph}});
+    g.quad(P3(inner[j], base_y), P3(inner[i], base_y), P3(inner[i], ph), P3(inner[j], ph), QuadUV{{u + w, base_y}, {u, base_y}, {u, ph}, {u + w, ph}});
     u += w;
   }
   slab(sc.opaque, podium, ph, 0.8f, M_CONCRETE_WHITE);
@@ -742,7 +736,7 @@ void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail) {
     else if (family < 0.65f) { s = spec_diagrid(half, floors); s.base = BaseKind::Lobby; s.base_floors = 1; s.crown = CrownKind::Parapet; }
     else { s = spec_finweave(half, floors); s.base = BaseKind::Lobby; s.base_floors = 1; }
     s.random = rng.next();
-    build_tower(sc, s, c, ph, rng.child(k), tower_detail);
+    build_tower(sc, s, c, ph, rng.child(k), detail);  // -1 passes through to the shells
   }
   if (detail >= 1) {
     Rng r2 = rng.child(99);
@@ -798,5 +792,6 @@ void roof_equipment(Mesh& mesh, Rng& rng, const std::vector<Vec2>& plan, float y
 }
 
 void set_far_patterns(bool on) { g_far_patterns = on; }
+bool far_patterns() { return g_far_patterns; }
 
-}  // namespace cb
+}  // namespace inf::city

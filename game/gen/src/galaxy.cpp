@@ -163,6 +163,88 @@ GalaxyParams derive_galaxy_params(const core::Key& galaxy_entity_key,
   return params;
 }
 
+std::uint32_t satellite_count(const core::Key& galaxy_entity_key) {
+  const core::Key key = core::derive_named(galaxy_entity_key, name::SatellitesV1);
+  const auto draw = core::draw_point(key, channel::Params, 0, 0, 0);
+  const std::uint32_t roll = static_cast<std::uint32_t>(draw[0] >> 40U) % 100U;
+  // None 20%, two 35%, one 45% — most galaxies keep company, a lone
+  // companion being the commonest arrangement (it is also the home
+  // galaxy's: one Magellanic showpiece over the default seed's sky).
+  if (roll < 20U) {
+    return 0U;
+  }
+  return roll < 55U ? 2U : 1U;
+}
+
+SatelliteGalaxy satellite_galaxy(const core::Key& galaxy_entity_key,
+                                 const GalaxyParams& parent, std::uint32_t index) {
+  const core::Key key = core::derive_named(galaxy_entity_key, name::SatellitesV1);
+  const auto draw0 =
+      core::draw_point(key, channel::Params, static_cast<std::int64_t>(index) + 1, 0, 0);
+  const auto draw1 =
+      core::draw_point(key, channel::Params, static_cast<std::int64_t>(index) + 1, 1, 0);
+
+  SatelliteGalaxy sat;
+  // Polar-biased direction (|z| pushed toward the parent's poles — real
+  // satellite systems favour polar orbits, and from inside the parent it
+  // hangs CLEAR of the band instead of drowning in it), orbit radius
+  // 1.5-2.6 parent radii: outside the disc but close enough to fill
+  // degrees of the parent's sky.
+  double dx = u01(draw0[0]).to_double() - 0.5;
+  double dy = u01(draw0[1]).to_double() - 0.5;
+  double dz = u01(draw0[2]).to_double() - 0.5;
+  dz = (dz < 0.0 ? -1.0 : 1.0) * (0.30 + 1.4 * (dz < 0.0 ? -dz : dz));
+  const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+  if (len > 1.0e-9) {
+    dx /= len;
+    dy /= len;
+    dz /= len;
+  } else {
+    dx = 0.0;
+    dy = 0.0;
+    dz = 1.0;
+  }
+  const double parent_radius_m = parent.diameter_ly.to_double() * 0.5 * kLightYearM;
+  const double orbit = parent_radius_m * uniform(draw0[3], 1.5, 2.6);
+  sat.offset_m = Dir3{Real(dx * orbit), Real(dy * orbit), Real(dz * orbit)};
+
+  // Dwarf morphology: mostly irregular (Magellanic), a dwarf-spheroidal
+  // minority; never larger than a quarter of the parent.
+  GalaxyParams p;
+  double diameter = uniform(draw1[0], 6000.0, 20000.0);
+  const double cap = parent.diameter_ly.to_double() * 0.25;
+  diameter = diameter > cap ? cap : diameter;
+  p.diameter_ly = Real(diameter);
+  p.disc_scale_length_ly = Real(diameter / 10.0);
+  p.thin_scale_height_ly = Real(diameter / 40.0);  // puffy, not razor-thin
+  p.thick_scale_height_ly = Real(p.thin_scale_height_ly.to_double() * 3.0);
+  p.bulge_radius_ly = Real(diameter / 20.0);
+  p.dust_scale_height_ly = Real(p.thin_scale_height_ly.to_double() * 0.35);
+  p.metallicity_gradient = Real(-0.15);
+  p.total_mass_suns = Real(2.0e9 * (diameter / 2.0e4) * (diameter / 2.0e4));
+  p.arm_count = 0;
+  p.pitch_deg = Real(0.0);
+  p.arm_amplitude = Real(0.0);
+  p.bar_fraction = Real(0.0);
+  if (static_cast<std::uint32_t>(draw1[1] >> 40U) % 10U < 7U) {
+    p.type = GalaxyType::Irregular;
+    p.bulge_frac = Real(0.06);
+    p.ellipticity = Real(1.0);
+    p.dust_opacity = Real(uniform(draw1[2], 0.25, 0.6));
+    p.clumpiness = Real(uniform(draw1[3], 0.9, 1.6));
+    p.age_gyr = Real(uniform(draw0[3], 1.0, 5.0));
+  } else {
+    p.type = GalaxyType::Elliptical;  // dwarf spheroidal
+    p.bulge_frac = Real(1.0);
+    p.ellipticity = Real(uniform(draw1[2], 0.55, 0.9));
+    p.dust_opacity = Real(0.02);
+    p.clumpiness = Real(0.0);
+    p.age_gyr = Real(uniform(draw1[3], 8.0, 13.0));
+  }
+  sat.params = p;
+  return sat;
+}
+
 GalaxyDensity::GalaxyDensity(const GalaxyParams& params) : params_(params) {
   const double ly = kLightYearM;
   const double radius = params.diameter_ly.to_double() * 0.5 * ly;

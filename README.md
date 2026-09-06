@@ -68,6 +68,13 @@ Targets:
 `ci/check.sh` runs the full local gauntlet: configure, build, lint gates,
 tests, smoke runs.
 
+`ci/package-mac.sh` (or `cmake --build build --target package-mac`) builds
+a standalone macOS distribution: a self-contained `Infinity.app` — binary,
+bundled wgpu-native library, icon — ad-hoc signed and wrapped in a
+drag-to-Applications DMG under `build-dist/`. Apple Silicon, macOS 12+;
+recipients install nothing else (first launch needs the usual
+right-click → Open, since the build is not notarized).
+
 Surface tiles: `tools/fetch-textures.py` downloads the CC0 material sets
 listed in `assets/manifest.json` (ambientCG, ~250 MB) into `assets/textures/`
 (git-ignored). Without them every material falls back to a procedural tile;

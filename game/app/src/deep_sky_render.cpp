@@ -419,26 +419,25 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
 
     // WP4: the home cluster's neighbour galaxies as impostor splats —
     // type-driven shape from galaxy-params/v1 macros only, no stars, no
-    // structure (the M31 deal: a small, faint, extended smudge, with a
-    // handful of close ones as showpieces). Surface brightness is
-    // distance-independent (extended sources), so intensity is constant
-    // per solid angle and distance only sets the apparent size.
+    // structure (the M31 deal: extended smudges up to the 3-degree
+    // scatter cap). Surface brightness is distance-independent (extended
+    // sources), so intensity is constant per solid angle and distance
+    // only sets the apparent size. Satellite galaxies ride the same
+    // splat: the HOME galaxy's dwarfs hang degrees wide in the sky (the
+    // showpiece companions); neighbours' dwarfs are usually sub-texel
+    // and fall to the size cutoff.
     {
-      const core::Key cluster_key = gen::home_cluster_key(seed);
-      const std::uint32_t n_gal = gen::galaxy_count_in_cluster(cluster_key);
       std::vector<Splat> gals;
-      for (std::uint32_t gi = 1; gi < n_gal; ++gi) {
-        const V3 rel = to_v3(gen::galaxy_position_in_cluster(cluster_key, gi)) - eye;
+      const auto push_galaxy = [&](const gen::GalaxyParams& gp, const V3& rel,
+                                   std::uint64_t hash_seed, double intensity) {
         const double d = length(rel);
         if (d <= 0.0) {
-          continue;
+          return;
         }
-        const gen::GalaxyParams gp =
-            gen::derive_galaxy_params(gen::galaxy_key_in_cluster(seed, 0, 0, 0, gi));
         const double radius_m = gp.diameter_ly.to_double() * 0.5 * gen::kLightYearM;
         const double ang = std::asin(std::min(radius_m / d, 0.85));
         if (ang < 0.005) {
-          continue;  // sub-texel smudge
+          return;  // sub-texel smudge
         }
         Splat s;
         s.dir = rel * (1.0 / d);
@@ -446,8 +445,8 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
         s.sub = static_cast<int>(gp.type);
         s.ang_radius = ang;
         s.cos_bound = std::cos(std::min(ang * 1.4 + 0.01, 1.5));
-        // Deterministic random orientation from the index.
-        std::uint64_t h = (static_cast<std::uint64_t>(gi) + 0x9e3779b97f4a7c15ULL);
+        // Deterministic random orientation from the hash seed.
+        std::uint64_t h = hash_seed + 0x9e3779b97f4a7c15ULL;
         h ^= h >> 30;
         h *= 0xbf58476d1ce4e5b9ULL;
         h ^= h >> 27;
@@ -484,12 +483,37 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
           s.color[0] = 0.70f; s.color[1] = 0.82f; s.color[2] = 1.0f;
         }
         s.color2[0] = 1.0f; s.color2[1] = 0.87f; s.color2[2] = 0.70f;
+        s.intensity = intensity;
+        s.noise_seed = static_cast<double>(h % 8192U);
+        gals.push_back(s);
+      };
+
+      const core::Key cluster_key = gen::home_cluster_key(seed);
+      const std::uint32_t n_gal = gen::galaxy_count_in_cluster(cluster_key);
+      for (std::uint32_t gi = 1; gi < n_gal; ++gi) {
+        const core::Key gal_key = gen::galaxy_key_in_cluster(seed, 0, 0, 0, gi);
+        const gen::GalaxyParams gp = gen::derive_galaxy_params(gal_key);
+        const V3 pos = to_v3(
+            gen::galaxy_position_in_cluster(cluster_key, gi, gp.diameter_ly));
         // Bright enough that the bulge survives the bake's contrast
         // curve as a naked-eye object — M31 is, and these are the sky's
         // long-haul landmarks.
-        s.intensity = 6.0e-3;
-        s.noise_seed = static_cast<double>(h % 8192U);
-        gals.push_back(s);
+        push_galaxy(gp, pos - eye, gi, 6.0e-3);
+        const std::uint32_t n_sat = gen::satellite_count(gal_key);
+        for (std::uint32_t si = 0; si < n_sat; ++si) {
+          const gen::SatelliteGalaxy sat = gen::satellite_galaxy(gal_key, gp, si);
+          push_galaxy(sat.params, pos + to_v3(sat.offset_m) - eye,
+                      gi * 8ULL + si + 4096ULL, 5.0e-3);
+        }
+      }
+      // The HOME galaxy's own satellites — we sit inside the parent, so
+      // these hang degrees wide over the band.
+      const core::Key home_key = gen::home_galaxy_key(seed);
+      const std::uint32_t n_home_sat = gen::satellite_count(home_key);
+      for (std::uint32_t si = 0; si < n_home_sat; ++si) {
+        const gen::SatelliteGalaxy sat =
+            gen::satellite_galaxy(home_key, density.params(), si);
+        push_galaxy(sat.params, to_v3(sat.offset_m) - eye, si + 60000ULL, 7.0e-3);
       }
       // Cap the impostor count on apparent size — the far tail is texel
       // noise that costs cone tests without reading as anything.
@@ -785,6 +809,8 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
       std::printf("  galaxy impostor %zu: dir (%.3f %.3f %.3f) radius %.1f deg\n", i,
                   s->dir.x, s->dir.y, s->dir.z, s->ang_radius * 57.2958);
     }
+    std::printf("  home satellites: %u\n",
+                gen::satellite_count(gen::home_galaxy_key(seed)));
   }
   return result;
 }

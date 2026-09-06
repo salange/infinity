@@ -407,6 +407,17 @@ constexpr Rgb kMaterialColors[] = {
     {30, 35, 45},       // WindowDark
     {140, 132, 120},    // FacadeWindows
     {95, 85, 70},       // ScrapMetal
+    {56, 56, 58},       // Asphalt
+    {158, 153, 145},    // PavementLight
+    {140, 140, 138},    // PavingSlabs
+    {184, 178, 168},    // Terrazzo
+    {199, 196, 189},    // ConcreteWhite
+    {158, 158, 156},    // ConcreteSmooth
+    {97, 97, 94},       // ConcretePanels
+    {204, 204, 209},    // MetalSilver
+    {20, 20, 23},       // MetalBlack
+    {77, 61, 46},       // Bark
+    {204, 204, 204},    // Marble
 };
 static_assert(sizeof(kMaterialColors) / sizeof(kMaterialColors[0]) == gen::kMaterialCount,
               "material colour table out of sync");

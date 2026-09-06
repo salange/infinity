@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstring>
 
+#include "gen/names.hpp"
+#include "world/noise.hpp"
+
 namespace inf::gen {
 
 namespace {
@@ -219,6 +222,113 @@ PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_
         // Alpha: the settlement night-light mask (T0020 civil/v1) — the
         // impostor adds it as warm emissive on the night side.
         face_out.rgba[index * 4 + 3] = to_byte(static_cast<float>(night));
+      }
+    }
+  }
+  return out;
+}
+
+PlanetTexture bake_gas_texture(const core::Key& body_entity_key,
+                               core::PlanetClass cls, std::uint32_t face_size) {
+  PlanetTexture out;
+  out.face_size = face_size;
+  out.height_amp_m = 1.0f;  // flat: a gas ball has no silhouette relief
+
+  const core::Key key = core::derive_named(body_entity_key, name::GasBandsV1);
+  const auto draw = core::draw_point(key, channel::Params, 0, 0, 0);
+  const int band_pairs = 5 + static_cast<int>((draw[0] >> 40U) % 6U);  // 5-10
+  const double phase = static_cast<double>(draw[1] >> 11U) * 0x1.0p-53;
+  const double warp_amp =
+      0.05 + 0.10 * static_cast<double>(draw[2] >> 11U) * 0x1.0p-53;
+  const std::uint64_t warp_lattice = draw[3];
+  const std::uint64_t detail_lattice = draw[3] ^ 0x9e3779b97f4a7c15ULL;
+
+  // Class palettes: Jupiter tans, Neptune blues, sub-Neptune haze.
+  struct Stop {
+    float r, g, b;
+  };
+  static constexpr Stop kGas[5] = {{0.83f, 0.74f, 0.60f},
+                                   {0.70f, 0.55f, 0.40f},
+                                   {0.88f, 0.82f, 0.72f},
+                                   {0.62f, 0.44f, 0.34f},
+                                   {0.78f, 0.66f, 0.52f}};
+  static constexpr Stop kIce[4] = {{0.42f, 0.60f, 0.82f},
+                                   {0.52f, 0.72f, 0.88f},
+                                   {0.36f, 0.52f, 0.76f},
+                                   {0.60f, 0.78f, 0.90f}};
+  static constexpr Stop kHaze[4] = {{0.55f, 0.62f, 0.72f},
+                                    {0.63f, 0.70f, 0.79f},
+                                    {0.48f, 0.55f, 0.66f},
+                                    {0.68f, 0.73f, 0.80f}};
+  const Stop* stops = cls == core::PlanetClass::IceGiant
+                          ? kIce
+                          : (cls == core::PlanetClass::GasGiant ? kGas : kHaze);
+  const int n_stops = cls == core::PlanetClass::GasGiant ? 5 : 4;
+
+  const auto band_stop = [&](std::int64_t band) -> const Stop& {
+    std::uint64_t h = static_cast<std::uint64_t>(band) * 0x9e3779b97f4a7c15ULL +
+                      draw[1];
+    h ^= h >> 31;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    return stops[(h >> 24) % static_cast<std::uint64_t>(n_stops)];
+  };
+
+  const std::uint16_t half_zero = to_half(0.0f);
+  for (std::uint8_t face = 0; face < 6; ++face) {
+    PlanetFaceTexture& face_out = out.faces[face];
+    const std::size_t texels = static_cast<std::size_t>(face_size) * face_size;
+    face_out.height_half.assign(texels, half_zero);
+    face_out.rgba.resize(texels * 4);
+    for (std::uint32_t y = 0; y < face_size; ++y) {
+      for (std::uint32_t x = 0; x < face_size; ++x) {
+        const double n = static_cast<double>(face_size);
+        const det::Real u((static_cast<double>(x) + 0.5) / n * 2.0 - 1.0);
+        const det::Real v((static_cast<double>(y) + 0.5) / n * 2.0 - 1.0);
+        const Dir3 dir = face_uv_to_dir(FaceUV{face, u, v});
+        const double dx = dir.x.to_double();
+        const double dy = dir.y.to_double();
+        const double dz = dir.z.to_double();
+        // Bands stack along latitude (+Z is the spin axis by the planet
+        // axis convention); turbulence bends them into flowing streaks.
+        const double warp =
+            0.6 * world::gradient_noise3(warp_lattice, det::Real(dx * 3.0),
+                                         det::Real(dy * 3.0), det::Real(dz * 3.0))
+                      .to_double() +
+            0.4 * world::gradient_noise3(warp_lattice, det::Real(dx * 7.0 + 11.0),
+                                         det::Real(dy * 7.0), det::Real(dz * 7.0))
+                      .to_double();
+        const double t =
+            (dz + warp * warp_amp) * static_cast<double>(band_pairs) + phase;
+        const double band_floor = std::floor(t);
+        const auto band = static_cast<std::int64_t>(band_floor);
+        const double frac = t - band_floor;
+        const Stop& c0 = band_stop(band);
+        const Stop& c1 = band_stop(band + 1);
+        // Soft edge over the last fifth of each band.
+        double edge = (frac - 0.8) * 5.0;
+        edge = edge < 0.0 ? 0.0 : (edge > 1.0 ? 1.0 : edge);
+        const double blend = edge * edge * (3.0 - 2.0 * edge);
+        // Fine flow mottling within the band.
+        const double mottle =
+            0.92 + 0.16 * world::gradient_noise3(detail_lattice,
+                                                 det::Real(dx * 16.0),
+                                                 det::Real(dy * 16.0),
+                                                 det::Real(dz * 16.0 + frac))
+                              .to_double();
+        const std::size_t index = static_cast<std::size_t>(y) * face_size + x;
+        const auto to_byte = [](double value) {
+          const double scaled = value * 255.0;
+          return static_cast<std::uint8_t>(scaled < 0.0 ? 0.0
+                                                        : (scaled > 255.0 ? 255.0
+                                                                          : scaled));
+        };
+        face_out.rgba[index * 4 + 0] =
+            to_byte((c0.r + (c1.r - c0.r) * blend) * mottle);
+        face_out.rgba[index * 4 + 1] =
+            to_byte((c0.g + (c1.g - c0.g) * blend) * mottle);
+        face_out.rgba[index * 4 + 2] =
+            to_byte((c0.b + (c1.b - c0.b) * blend) * mottle);
+        face_out.rgba[index * 4 + 3] = 255;
       }
     }
   }

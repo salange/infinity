@@ -161,8 +161,8 @@ void Player::update_flight(const InputFrame& input) {
   const double pitch_rate = turn_curve(reticle_y_, kReticleMax, kMaxPitchRate);
   const double yaw_rate = turn_curve(reticle_x_, kReticleMax, kMaxYawRate);
   double roll_rate = 0.0;
-  if (input.left) roll_rate += kRollRate;   // A: roll left
-  if (input.right) roll_rate -= kRollRate;  // D: roll right
+  if (input.left) roll_rate -= kRollRate;   // A: negative rotation about forward
+  if (input.right) roll_rate += kRollRate;  // D: positive rotation about forward
 
   // Apply body-frame angular velocities.
   const Vec3 right_axis = normalize(cross(forward_, up_));

@@ -218,6 +218,12 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
   // big sites the mid content itself is bounded by a wider radius, with
   // superblocks beyond.
   const double mid_radius = big ? (params.detail == 0 ? kMidFocusM : params.focus_radius_m) : 0.0;
+  if (params.context_only && big) {
+    superblocks(merge_mid, false, params.focus_radius_m);
+    return out;
+  }
+  // context_only on a smaller site: every lot outside the focus as a
+  // mass box (the city system builds the focus).
   if (big) {
     superblocks(merge_mid, false, mid_radius);  // beyond the mid radius (all of it without a focus)
   }
@@ -228,6 +234,7 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
       const double lcy = (by + 0.5) * site.block_m - focus_ly;
       const double fd2 = lcx * lcx + lcy * lcy;
       const bool in_focus = params.focus_radius_m > 0.0 && fd2 <= params.focus_radius_m * params.focus_radius_m;
+      if (params.context_only && in_focus) continue;
       if (big) {
         if (mid_radius <= 0.0) continue;          // superblocks carry it
         if (fd2 > mid_radius * mid_radius) continue;  // beyond the mid radius: superblocks
@@ -288,7 +295,7 @@ SiteMesh build_site_mesh(const SiteField& sites, const Site& site, const Terrain
         // grammar in the middle distance, masses beyond — a 3 km city
         // stays under a million triangles at the nearest LOD.
         BuildingParams bp;
-        if (is_block) {
+        if (is_block || params.context_only) {
           bp.method = BuildingMethod::Mass;
         } else if (!near_here) {
           bp.method = (big || h_full >= 1.5 * mean_h) ? BuildingMethod::Grammar : BuildingMethod::Mass;

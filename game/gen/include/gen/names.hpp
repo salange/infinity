@@ -39,6 +39,8 @@ inline constexpr core::NameId GalaxySystemsV1{0xe5c73a184da935a5ULL}; // "galaxy
 inline constexpr core::NameId NebulaeV1{0x077f97eae9e3adb4ULL};       // "nebulae/v1"
 inline constexpr core::NameId StarClustersV1{0xb59ee6f1f35abb5eULL};  // "star-clusters/v1"
 inline constexpr core::NameId GalaxyLayoutV1{0xaa91de0c98bdfc07ULL};  // "galaxy-layout/v1"
+inline constexpr core::NameId SatellitesV1{0xf47f9c80f8ae1d0dULL};    // "satellites/v1"
+inline constexpr core::NameId GasBandsV1{0x1425be2bc6e9de2bULL};      // "gas-bands/v1"
 // Surface texturing layers (T0019, design/surface-texturing.md).
 inline constexpr core::NameId ClimateV1{0x0245292d47427e3dULL};       // "climate/v1"
 inline constexpr core::NameId LifeV1{0x319503b0591a5e87ULL};          // "life/v1"
@@ -139,6 +141,8 @@ inline constexpr NameEntry kNameRegistry[] = {
     {"nebulae/v1", name::NebulaeV1},
     {"star-clusters/v1", name::StarClustersV1},
     {"galaxy-layout/v1", name::GalaxyLayoutV1},
+    {"satellites/v1", name::SatellitesV1},
+    {"gas-bands/v1", name::GasBandsV1},
     {"climate/v1", name::ClimateV1},
     {"life/v1", name::LifeV1},
     {"biome/v1", name::BiomeV1},

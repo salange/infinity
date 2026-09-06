@@ -302,17 +302,53 @@ TEST_CASE("cluster and universe levels are thin but real (WP5)") {
   CHECK(count >= 10);
   CHECK(count <= 1000);
   // Galaxy 0 anchors the cluster origin — the playable galaxy did not move.
-  const auto home = gen::galaxy_position_in_cluster(cluster_node->key(), 0);
+  const auto home =
+      gen::galaxy_position_in_cluster(cluster_node->key(), 0, det::Real(100000.0));
   CHECK(home.x.to_double() == 0.0);
   CHECK(home.z.to_double() == 0.0);
-  // Neighbours scatter within the cluster cube, deterministically.
+  // Neighbours scatter deterministically; the apparent span never
+  // exceeds 3 degrees (the per-galaxy distance floor) and never comes
+  // inside our own halo.
   for (std::uint32_t i = 1; i < count && i < 24; ++i) {
-    const auto pos = gen::galaxy_position_in_cluster(cluster_node->key(), i);
-    CHECK(std::abs(pos.x.to_double()) <= gen::kClusterSizeM * 0.5);
-    CHECK(std::abs(pos.y.to_double()) <= gen::kClusterSizeM * 0.5);
-    CHECK(std::abs(pos.z.to_double()) <= gen::kClusterSizeM * 0.5);
-    const auto again = gen::galaxy_position_in_cluster(cluster_node->key(), i);
+    const auto key = gen::galaxy_key_in_cluster(*seed, 0, 0, 0, i);
+    const auto gp = gen::derive_galaxy_params(key);
+    const auto pos =
+        gen::galaxy_position_in_cluster(cluster_node->key(), i, gp.diameter_ly);
+    const double px = pos.x.to_double();
+    const double py = pos.y.to_double();
+    const double pz = pos.z.to_double();
+    const double dist = std::sqrt(px * px + py * py + pz * pz);
+    CHECK(dist >= 2.0e21);
+    CHECK(dist <= 5.0e22);
+    const double span_rad = gp.diameter_ly.to_double() * gen::kLightYearM / dist;
+    CHECK(span_rad <= 0.0530);  // 3 degrees, small tolerance
+    const auto again =
+        gen::galaxy_position_in_cluster(cluster_node->key(), i, gp.diameter_ly);
     CHECK(pos.x.to_double() == again.x.to_double());
+  }
+  // Satellites: 0-2 dwarfs per galaxy, bound outside the parent disc,
+  // never a quarter of its size; the count is a pure key function.
+  {
+    const auto home_gal = gen::home_galaxy_key(*seed);
+    const auto parent = gen::home_galaxy_params(*seed);
+    const std::uint32_t sats = gen::satellite_count(home_gal);
+    CHECK(sats <= 2);
+    CHECK(sats == gen::satellite_count(home_gal));
+    for (std::uint32_t si = 0; si < sats; ++si) {
+      const auto sat = gen::satellite_galaxy(home_gal, parent, si);
+      const double ox = sat.offset_m.x.to_double();
+      const double oy = sat.offset_m.y.to_double();
+      const double oz = sat.offset_m.z.to_double();
+      const double orbit = std::sqrt(ox * ox + oy * oy + oz * oz);
+      const double parent_r =
+          parent.diameter_ly.to_double() * 0.5 * gen::kLightYearM;
+      CHECK(orbit >= parent_r * 1.5);
+      CHECK(orbit <= parent_r * 2.6);
+      CHECK(sat.params.diameter_ly.to_double() <=
+            parent.diameter_ly.to_double() * 0.25);
+      CHECK((sat.params.type == gen::GalaxyType::Irregular ||
+             sat.params.type == gen::GalaxyType::Elliptical));
+    }
   }
   // External galaxies render from params alone: any neighbour's key
   // yields a valid morphology draw (no systems ever generated).

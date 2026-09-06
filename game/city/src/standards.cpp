@@ -1,11 +1,11 @@
-#include "standards.hpp"
+#include "city/standards.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-#include "towers.hpp"
+#include "city/towers.hpp"
 
-namespace cb {
+namespace inf::city {
 
 StandardSpec random_standard(Rng& rng, float area, float city_t) {
   StandardSpec s;
@@ -144,4 +144,4 @@ void build_standard(Scene& sc, const StandardSpec& spec, const std::vector<Vec2>
   }
 }
 
-}  // namespace cb
+}  // namespace inf::city

@@ -37,4 +37,11 @@ struct PlanetTexture {
 PlanetTexture bake_planet_texture(const TerrainField& field, std::uint32_t face_size,
                                   const float* albedo_table = nullptr);
 
+// Gas and ice giants (2026-09-01): no terrain — a banded gas ball.
+// Latitudinal bands warped by turbulence, palette by class, all draws
+// from derive_named(K_body, "gas-bands/v1"). Height plane stays flat
+// (no displacement); purely cosmetic like every texture here.
+PlanetTexture bake_gas_texture(const core::Key& body_entity_key,
+                               core::PlanetClass cls, std::uint32_t face_size);
+
 }  // namespace inf::gen

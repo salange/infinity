@@ -26,6 +26,12 @@
 #include "gen/system.hpp"
 #include "gen/galaxy.hpp"
 #include "gen/deep_sky.hpp"
+#include <stb_image_write.h>
+
+#include "city/materials.hpp"
+#include "city/towers.hpp"
+#include "city/showcase.hpp"
+#include "city_render.hpp"
 #include "civ_view.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/civilization.hpp"
@@ -88,6 +94,8 @@ struct LoadedChunk {
   std::uint32_t mesh_id = 0;
   RVec3 origin;
   std::uint8_t palette[4]{0, 0, 0, 0};  // material ids for the vertex weights
+  float centre[3]{0.0f, 0.0f, 0.0f};    // bounding sphere, chunk-local
+  float radius{0.0f};
 };
 
 RVec3 to_render(const SVec3& v) { return RVec3{v.x, v.y, v.z}; }
@@ -306,10 +314,24 @@ std::unique_ptr<Anchor> make_anchor(const inf::core::Seed128& seed, const char* 
       cell.is_home() ? std::string()
                      : "-g" + std::to_string(cell.level) + "_" + std::to_string(cell.x) +
                            "_" + std::to_string(cell.y) + "_" + std::to_string(cell.z);
+  // Default edits location: a per-user data dir, not the CWD — an app
+  // bundle launched from the Finder runs with cwd "/" where writes fail
+  // silently. --diff still overrides with an explicit path.
+  std::string diff_dir;
+#if defined(__APPLE__)
+  if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+    diff_dir = std::string(home) + "/Library/Application Support/Infinity/";
+    std::error_code ec;
+    std::filesystem::create_directories(diff_dir, ec);
+    if (ec) {
+      diff_dir.clear();  // fall back to the CWD (dev shells)
+    }
+  }
+#endif
   anchor->diff_path =
       diff_override != nullptr
           ? std::string(diff_override)
-          : std::string("infinity-") + seed_text + cell_tag + "-s" + std::to_string(slot) +
+          : diff_dir + "infinity-" + seed_text + cell_tag + "-s" + std::to_string(slot) +
                 (moon >= 0 ? "m" + std::to_string(moon) : std::string()) + ".edits";
   anchor->edits = std::make_unique<inf::world::CsgEditStore>();
   if (anchor->edits->load(anchor->diff_path)) {
@@ -387,6 +409,17 @@ std::vector<float> unit_quad_vertices() {
                                      0.0f, 1.0f});
   }
   return vertices;
+}
+
+// Display label for a system body: giants show their CLASS (they have
+// no meaningful surface type), rocky worlds show the surface type.
+const char* body_type_label(const inf::gen::SystemPlanet& entry) {
+  switch (entry.phys.cls) {
+    case inf::core::PlanetClass::GasGiant: return "Gas Giant";
+    case inf::core::PlanetClass::IceGiant: return "Ice Giant";
+    case inf::core::PlanetClass::SubNeptune: return "Sub-Neptune";
+    default: return inf::gen::to_string(entry.surface_type);
+  }
 }
 
 // Blackbody-ish tint for a star's effective temperature: M dwarfs deep
@@ -472,6 +505,30 @@ int main(int argc, char** argv) {
   double civ_time_offset_years = 0.0; // --civ-time: civilization clock offset (T0020)
   long long clock_offset_s = 0;       // --clock-offset-s: world clock offset (captures)
   inf::gen::BuildingMethod building_method = inf::gen::BuildingMethod::GrammarParts;  // --buildings
+  bool city_showcase = false;  // --city-showcase: T0021 pipeline check (catalog scene at the first town)
+  int city_debug = 0;          // --city-debug N: city pipeline debug view
+  int bench_frames = 0;        // --bench N: after the script/warm-up, mean frame time over N frames, then exit
+  int window_w = 0;            // --window WxH: windowed at this size (measurements at a fixed resolution)
+  int window_h = 0;
+  bool no_city = false;        // --no-city: sites through the mass path only (baseline measurements)
+  bool beacons = true;         // --no-beacons: the light beams over every settlement (B toggles)
+  bool no_ssao = false;        // --no-ssao / --no-shadows / --no-taa: renderer feature toggles
+  bool no_shadows = false;
+  bool no_taa = false;
+  // T0022 B.2: the performance options (each a runtime toggle, see the
+  // F-keys below): GPU occlusion culling, AO at full instead of half
+  // resolution, the far cascades at half rate, the far-cascade LOD.
+  bool no_occlusion = false;
+  bool ssao_full = false;
+  bool shadow_half_rate = false;
+  bool shadow_far_lod = false;
+  int stress_frames = 0;       // --stress N: recreate the render targets every frame N times, then exit
+  bool no_far_patterns = false;  // --no-far-patterns: sub-pixel member geometry at the far levels (A/B)
+  int sweep_frames = 0;        // --sweep N: temporal-artifact analysis (the demo's tool)
+  double sweep_step = 0.03;    // --sweep-step m
+  std::string sweep_out = "sweep";  // --sweep-out name
+  int sweep_dir = 0;           // --sweep-dir right|forward|down (0/1/2): the flight direction
+  int sweep_blur = 0;          // --sweep-blur R: box-blur both frames so only low-frequency shimmer counts
   const char* assets_text = nullptr;  // --assets <dir>: tile library root
   std::uint32_t tex_size = 1024;      // --tex-size N: material tile resolution
   int spawn_slot = -1;                // --slot N: spawn on this system slot
@@ -514,6 +571,47 @@ int main(int argc, char** argv) {
       building_method = std::strcmp(m, "mass") == 0      ? inf::gen::BuildingMethod::Mass
                         : std::strcmp(m, "grammar") == 0 ? inf::gen::BuildingMethod::Grammar
                                                          : inf::gen::BuildingMethod::GrammarParts;
+    } else if (std::strcmp(argv[i], "--city-showcase") == 0) {
+      city_showcase = true;
+    } else if (std::strcmp(argv[i], "--city-debug") == 0 && i + 1 < argc) {
+      city_debug = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--sweep") == 0 && i + 1 < argc) {
+      sweep_frames = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--sweep-step") == 0 && i + 1 < argc) {
+      sweep_step = std::atof(argv[++i]);
+    } else if (std::strcmp(argv[i], "--sweep-out") == 0 && i + 1 < argc) {
+      sweep_out = argv[++i];
+    } else if (std::strcmp(argv[i], "--sweep-dir") == 0 && i + 1 < argc) {
+      const char* d = argv[++i];
+      sweep_dir = std::strcmp(d, "forward") == 0 ? 1 : (std::strcmp(d, "down") == 0 ? 2 : 0);
+    } else if (std::strcmp(argv[i], "--sweep-blur") == 0 && i + 1 < argc) {
+      sweep_blur = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
+      bench_frames = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
+      if (std::sscanf(argv[++i], "%dx%d", &window_w, &window_h) != 2) window_w = window_h = 0;
+    } else if (std::strcmp(argv[i], "--no-city") == 0) {
+      no_city = true;
+    } else if (std::strcmp(argv[i], "--no-beacons") == 0) {
+      beacons = false;
+    } else if (std::strcmp(argv[i], "--no-ssao") == 0) {
+      no_ssao = true;
+    } else if (std::strcmp(argv[i], "--no-shadows") == 0) {
+      no_shadows = true;
+    } else if (std::strcmp(argv[i], "--no-taa") == 0) {
+      no_taa = true;
+    } else if (std::strcmp(argv[i], "--no-occlusion") == 0) {
+      no_occlusion = true;
+    } else if (std::strcmp(argv[i], "--ssao-full") == 0) {
+      ssao_full = true;
+    } else if (std::strcmp(argv[i], "--shadow-half-rate") == 0) {
+      shadow_half_rate = true;
+    } else if (std::strcmp(argv[i], "--shadow-far-lod") == 0) {
+      shadow_far_lod = true;
+    } else if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
+      stress_frames = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--no-far-patterns") == 0) {
+      no_far_patterns = true;
     } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
       // Shift the world clock (planet rotation, orbits): capture aid to
       // put a site into daylight. A per-save constant offset is exactly
@@ -532,6 +630,7 @@ int main(int argc, char** argv) {
     }
   }
 
+  inf::city::set_far_patterns(!no_far_patterns);
   const auto seed = inf::core::parse_seed(seed_text);
   if (!seed.has_value()) {
     std::fprintf(stderr, "invalid seed: %s\n", seed_text);
@@ -689,6 +788,11 @@ int main(int argc, char** argv) {
   GLFWmonitor* monitor = nullptr;
   int win_w = 1280;
   int win_h = 720;
+  if (window_w > 0 && window_h > 0) {
+    windowed = true;
+    win_w = window_w;
+    win_h = window_h;
+  }
   if (!windowed) {
     monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = monitor != nullptr ? glfwGetVideoMode(monitor) : nullptr;
@@ -736,6 +840,30 @@ int main(int argc, char** argv) {
   const std::uint32_t impostor_mesh = rhi->create_mesh(fine_ball.data(), fine_ball.size());
   const std::vector<float> quad = unit_quad_vertices();
   const std::uint32_t glow_mesh = rhi->create_mesh(quad.data(), quad.size());
+  // Site beacon (mode 9): two crossed vertical quads, x/z in [-0.5, 0.5],
+  // y in [0, 1]; weights.x = 1 at the base .. 0 at the top, weights.y =
+  // 0 at the centre line .. 1 at the edge. Scaled per site per frame.
+  const std::uint32_t beacon_mesh = [&]() {
+    std::vector<float> v;
+    const auto vert = [&](float x, float y, float z, float edge) {
+      const float row[10] = {x, y, z, 0.0f, 1.0f, 0.0f, 1.0f - y, edge, 0.0f, 0.0f};
+      v.insert(v.end(), row, row + 10);
+    };
+    for (int q = 0; q < 2; ++q) {
+      const auto at = [&](float u, float y, float edge) {
+        if (q == 0) vert(u, y, 0.0f, edge);
+        else vert(0.0f, y, u, edge);
+      };
+      // Three strips across (edge 1, 0, 1) so the softness is per-vertex.
+      const float us[3] = {-0.5f, 0.0f, 0.5f};
+      const float edges[3] = {1.0f, 0.0f, 1.0f};
+      for (int k = 0; k < 2; ++k) {
+        at(us[k], 0.0f, edges[k]); at(us[k + 1], 0.0f, edges[k + 1]); at(us[k + 1], 1.0f, edges[k + 1]);
+        at(us[k], 0.0f, edges[k]); at(us[k + 1], 1.0f, edges[k + 1]); at(us[k], 1.0f, edges[k]);
+      }
+    }
+    return rhi->create_mesh_mat(v.data(), v.size());
+  }();
 
   // --- deep sky (T0018 WP2/WP3) ---------------------------------------
   // Static per system: the resolved-star field (one mesh of billboards
@@ -1010,6 +1138,8 @@ int main(int argc, char** argv) {
   bool m_was_down = false;
   bool esc_was_down = false;
   bool f9_was_down = false;
+  bool b_was_down = false;
+  double beacon_night = 0.0;  // the app's night factor, for the beacons' intensity
   double edit_cooldown = 0.0;
   double rec_flash = 0.0;          // REC icon flash after the F9 press
   std::string rec_dir_current;     // active recording dir (meta.csv sink)
@@ -1187,6 +1317,7 @@ int main(int argc, char** argv) {
                      AddrHash>
       pending_ready;
   std::vector<inf::render::Rhi::DrawItem> items;
+  std::vector<inf::render::Rhi::CityRange> city_ranges;  // T0022: the ranges the mode-8 items refer to
 
   // --- far-view planet textures (T0016) --------------------------------
   // A background worker bakes one (height, albedo) cube-map pair per
@@ -1213,6 +1344,86 @@ int main(int argc, char** argv) {
                 tex_size, tex_size);
     materials.start(assets_dir, tex_size);
   }
+  // T0021 --city-showcase: the catalog scene on the first town's plateau
+  // through the city pipeline (a renderer check, not gameplay).
+  inf::app::CityUpload city_upload;
+  Mat4 city_prev_view_proj = Mat4::identity();
+  RVec3 city_prev_camera{0.0, 0.0, 0.0};
+  // --sweep: temporal-artifact analysis (the demo's tool): after the
+  // script/warm-up the camera slides sideways per frame; each final frame
+  // and depth buffer are read back, every pixel is reprojected into the
+  // previous frame and the band-limited change (gradient x motion) is
+  // subtracted. What remains is temporal aliasing.
+  // T0022 C.4: every pixel of the current frame is reprojected into the
+  // previous frame through the depth buffer and the two view-projections
+  // (exact for a static world), the previous frame is sampled there and
+  // differenced; half a pixel of local gradient is tolerated. Luminance
+  // and chroma are kept apart (chroma is what exposed the z-fighting),
+  // the flight direction is a choice, and an optional blur of both
+  // frames leaves only the low-frequency shimmer the eye sees. A first
+  // frame in the material-id debug view attributes the residual per
+  // material.
+  struct Sweep {
+    int phase{0};   // 0 ask for the id frame, 1 take it, 2 settle, 3 measuring
+    int settle{0};
+    int step{0};
+    int saved_debug{0};
+    std::vector<std::uint8_t> ids, prev;
+    std::vector<float> resid, raw, chroma;
+    Mat4 prev_vp = Mat4::identity();
+    RVec3 prev_cam{0.0, 0.0, 0.0};
+    std::uint32_t w{0}, h{0};
+    int measured{0};
+  } sweep;
+  const long sweep_warmup = 40;
+  bool city_active = false;
+  long chunk_uploads = 0;  // chunk meshes uploaded (bench diagnostics)
+  const auto build_city_showcase = [&]() {
+    city_active = false;
+    if (!city_showcase || !anchor || !anchor->civ || !anchor->civ->sites) {
+      if (city_showcase) std::printf("city-showcase: no settled site on the anchor body\n");
+      return;
+    }
+    const inf::gen::Site* pick = nullptr;
+    for (const inf::gen::Site& site : anchor->civ->sites->sites()) {
+      if (site.tier >= static_cast<int>(inf::gen::SettlementTier::Town) &&
+          (pick == nullptr || site.tier < pick->tier)) {
+        pick = &site;
+      }
+    }
+    if (pick == nullptr && !anchor->civ->sites->sites().empty()) pick = &anchor->civ->sites->sites().front();
+    if (pick == nullptr) return;
+    inf::city::Scene scene;
+    scene.materials = inf::city::make_materials();
+    inf::city::generate_showcase_small(scene, inf::city::Rng(anchor->keys.entity).child(0x51));
+    inf::app::upload_city_materials(*rhi, scene.materials);
+    city_upload = inf::app::upload_city_scene(*rhi, scene, pick->frame, pick->datum_m);
+    city_active = city_upload.drawable();
+    const inf::gen::Dir3& up = pick->frame.up;
+    const double r = anchor->radius + pick->datum_m;
+    std::printf("city-showcase: %u triangles on site %u (%s) at planet-local (%.1f, %.1f, %.1f)\n",
+                city_upload.triangles, pick->province,
+                inf::gen::to_string(static_cast<inf::gen::SettlementTier>(pick->tier)),
+                up.x.to_double() * r, up.y.to_double() * r, up.z.to_double() * r);
+    // Capture lines: 220 m south-west of the centre, 90 m up, looking at it.
+    {
+      const inf::gen::Dir3& north = pick->frame.north;
+      const inf::gen::Dir3& east = pick->frame.east;
+      const double back = 200.0;
+      const double side = 90.0;
+      const double height = 80.0;
+      const double px = up.x.to_double() * (r + height) - north.x.to_double() * back - east.x.to_double() * side;
+      const double py = up.y.to_double() * (r + height) - north.y.to_double() * back - east.y.to_double() * side;
+      const double pz = up.z.to_double() * (r + height) - north.z.to_double() * back - east.z.to_double() * side;
+      const double tx = up.x.to_double() * (r + 30.0) - px;
+      const double ty = up.y.to_double() * (r + 30.0) - py;
+      const double tz = up.z.to_double() * (r + 30.0) - pz;
+      const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+      std::printf("city-showcase: pos %.1f %.1f %.1f\ncity-showcase: aim dir %.5f %.5f %.5f\n", px, py, pz, tx / len, ty / len, tz / len);
+      std::fflush(stdout);
+    }
+  };
+  build_city_showcase();
   const inf::gen::TerrainField* materials_anchor = nullptr;
 
   struct BakeResult {
@@ -1255,9 +1466,8 @@ int main(int argc, char** argv) {
       // per cell, so extra texels buy nothing yet (T0015 section 13).
       const bool giant = entry.phys.radius_m.to_double() > 2.0e6;
       jobs.push_back({slot, -1, giant ? 128U : 256U});
-    }
-    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
-      const auto& entry = system_copy.planets[static_cast<std::size_t>(slot)];
+      // Moons ride right behind their planet (was: all moons last) — an
+      // early moon visit found a flat untextured ball otherwise.
       for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
         jobs.push_back({slot, static_cast<int>(mi), 192U});
       }
@@ -1275,13 +1485,21 @@ int main(int argc, char** argv) {
       if (job.moon < 0) {
         const inf::gen::BodyHandle body =
             inf::gen::body_for_system_slot(seed_copy, cell_copy, job.slot);
-        const inf::gen::PlanetParams planet =
-            inf::gen::planet_params_for_slot(system_copy, job.slot, body);
-        inf::gen::TerrainField field(body.entity, planet);
-        std::unique_ptr<inf::app::CivModifier> modifier;
-        if (civ_inputs != nullptr) modifier = inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
-        result.radius_m = planet.radius_m.to_double();
-        result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
+        const auto& entry = system_copy.planets[static_cast<std::size_t>(job.slot)];
+        if (!entry.landable) {
+          // Giants: a banded gas ball, not rocky terrain (2026-09-01).
+          result.radius_m = entry.phys.radius_m.to_double();
+          result.texture =
+              inf::gen::bake_gas_texture(body.entity, entry.phys.cls, job.size);
+        } else {
+          const inf::gen::PlanetParams planet =
+              inf::gen::planet_params_for_slot(system_copy, job.slot, body);
+          inf::gen::TerrainField field(body.entity, planet);
+          std::unique_ptr<inf::app::CivModifier> modifier;
+          if (civ_inputs != nullptr) modifier = inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
+          result.radius_m = planet.radius_m.to_double();
+          result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
+        }
       } else {
         const inf::gen::BodyHandle body =
             inf::gen::body_for_system_moon(seed_copy, cell_copy, job.slot, job.moon);
@@ -1431,6 +1649,29 @@ int main(int argc, char** argv) {
       rec_flash = 0.7;
     }
     f9_was_down = f9_down;
+    const bool b_down = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+    if (b_down && !b_was_down) beacons = !beacons;
+    b_was_down = b_down;
+    // T0022 B.2: the city performance options (F7 occlusion culling, F8
+    // AO resolution, F10 far cascades at half rate, F11 far-cascade LOD).
+    {
+      static bool opt_was_down[4] = {false, false, false, false};
+      const int keys[4] = {GLFW_KEY_F7, GLFW_KEY_F8, GLFW_KEY_F10, GLFW_KEY_F11};
+      bool* flags[4] = {&no_occlusion, &ssao_full, &shadow_half_rate, &shadow_far_lod};
+      bool changed = false;
+      for (int k = 0; k < 4; ++k) {
+        const bool down = glfwGetKey(window, keys[k]) == GLFW_PRESS;
+        if (down && !opt_was_down[k]) {
+          *flags[k] = !*flags[k];
+          changed = true;
+        }
+        opt_was_down[k] = down;
+      }
+      if (changed) {
+        std::printf("city options: occlusion %s, ssao %s, far cascades %s, far-cascade lod %s\n", no_occlusion ? "off" : "on",
+                    ssao_full ? "full" : "half", shadow_half_rate ? "half rate" : "every frame", shadow_far_lod ? "on" : "off");
+      }
+    }
 
     player.update(input);
 
@@ -1540,7 +1781,12 @@ int main(int argc, char** argv) {
       const ClosestBody candidate = closest_body();
       const bool is_current =
           candidate.slot == anchor->slot && candidate.moon == anchor->moon;
-      if (!is_current && candidate.gap < anchor_gap * 0.5) {
+      // Giants stay in closest_body (the governor must brake for them)
+      // but never become the anchor: there is no surface to anchor to.
+      const bool candidate_landable =
+          candidate.moon >= 0 ||
+          system.planets[static_cast<std::size_t>(candidate.slot)].landable;
+      if (!is_current && candidate_landable && candidate.gap < anchor_gap * 0.5) {
         save_anchor_edits(*anchor);
         for (auto& [addr, chunk] : loaded) {
           rhi->destroy_mesh(chunk.mesh_id);
@@ -1564,7 +1810,10 @@ int main(int argc, char** argv) {
             candidate.moon >= 0 ? " moon " + std::to_string(candidate.moon) : std::string();
         std::printf("anchor: %s (slot %d%s, %s %s, radius %.0f km)\n", name.c_str(),
                     candidate.slot, moon_suffix.c_str(),
-                    inf::gen::to_string(anchor->planet.type),
+                    candidate.moon >= 0
+                        ? inf::gen::to_string(anchor->planet.type)
+                        : body_type_label(
+                              system.planets[static_cast<std::size_t>(candidate.slot)]),
                     candidate.moon >= 0 ? "moon" : "planet", anchor->radius / 1000.0);
       }
     }
@@ -1719,7 +1968,9 @@ int main(int argc, char** argv) {
         std::printf("jump: arrived at %s — %s (slot %d, %s, radius %.0f km)\n",
                     jump_sel_name.c_str(),
                     slot_names[static_cast<std::size_t>(arrival_slot)].c_str(),
-                    arrival_slot, inf::gen::to_string(anchor->planet.type),
+                    arrival_slot,
+                    body_type_label(
+                        system.planets[static_cast<std::size_t>(arrival_slot)]),
                     anchor->radius / 1000.0);
       }
     }
@@ -1777,8 +2028,12 @@ int main(int argc, char** argv) {
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
         const auto& entry = system.planets[static_cast<std::size_t>(slot)];
         if (entry.occupied && !(slot == anchor->slot && anchor->moon < 0)) {
+          // Giants get a fatter keep-out: there is no surface under the
+          // cloud tops, so the ship stops a little above them.
+          const double margin = entry.landable ? 1.02 : 1.03;
+          const double clearance = entry.landable ? 5.0 : 30.0;
           player.push_out(planet_local[static_cast<std::size_t>(slot)],
-                          entry.phys.radius_m.to_double() * 1.02 + 5.0);
+                          entry.phys.radius_m.to_double() * margin + clearance);
         }
       }
       for (const MoonInstance& moon : moons_local) {
@@ -1832,6 +2087,21 @@ int main(int argc, char** argv) {
             player.set_position(moon.pos + out * (moon.radius + arg_d(2)));
             aim_at(inf::sim::normalize(moon.pos - player.position()));
           }
+        }
+      } else if (cmd.op == "posplanet" && cmd.args.size() >= 2) {
+        // Place near planet <slot> at <alt> above its nominal radius.
+        const int slot = static_cast<int>(arg_d(0));
+        if (slot >= 0 && slot < inf::gen::kMaxPlanetSlots &&
+            system.planets[static_cast<std::size_t>(slot)].occupied) {
+          const SVec3 center = slot == anchor->slot && anchor->moon < 0
+                                   ? SVec3{0.0, 0.0, 0.0}
+                                   : planet_local[static_cast<std::size_t>(slot)];
+          const double radius =
+              system.planets[static_cast<std::size_t>(slot)].phys.radius_m.to_double();
+          const SVec3 out = inf::sim::normalize(
+              inf::sim::length(center) > 1.0 ? center : SVec3{1.0, 0.0, 0.0});
+          player.set_position(center + out * (radius + arg_d(1)));
+          aim_at(inf::sim::normalize(center - player.position()));
         }
       } else if (cmd.op == "posnight" && !cmd.args.empty()) {
         // True antisolar point at the given altitude (night-sky captures).
@@ -1994,6 +2264,25 @@ int main(int argc, char** argv) {
         LoadedChunk chunk;
         chunk.mesh_id =
             rhi->create_mesh_mat(data->mesh.vertices.data(), data->mesh.vertices.size());
+        {
+          // Bounding sphere from the vertex positions (10 floats each).
+          float lo[3] = {1e30f, 1e30f, 1e30f};
+          float hi[3] = {-1e30f, -1e30f, -1e30f};
+          const std::vector<float>& vv = data->mesh.vertices;
+          for (std::size_t v = 0; v + 9 < vv.size(); v += 10) {
+            for (int c = 0; c < 3; ++c) {
+              lo[c] = std::min(lo[c], vv[v + c]);
+              hi[c] = std::max(hi[c], vv[v + c]);
+            }
+          }
+          float r2 = 0.0f;
+          for (int c = 0; c < 3; ++c) {
+            chunk.centre[c] = 0.5f * (lo[c] + hi[c]);
+            r2 += 0.25f * (hi[c] - lo[c]) * (hi[c] - lo[c]);
+          }
+          chunk.radius = std::sqrt(r2);
+        }
+        ++chunk_uploads;
         std::memcpy(chunk.palette, data->mesh.palette, sizeof(chunk.palette));
         chunk.origin =
             RVec3{data->mesh.origin[0], data->mesh.origin[1], data->mesh.origin[2]};
@@ -2156,6 +2445,7 @@ int main(int argc, char** argv) {
     };
 
     items.clear();
+    city_ranges.clear();
     items.reserve(loaded.size() + player.beams().size() + 8);
 
     // --- sky dome (mode 4): analytic atmosphere while inside the band ---
@@ -2202,10 +2492,58 @@ int main(int argc, char** argv) {
         items.push_back(stars_item);
       }
     }
+    inf::app::CityDrawStats city_stats;
+    inf::app::CityDrawOptions city_options;
+    city_options.fine_ranges = !no_occlusion;
+    city_options.shadow_far_lod = shadow_far_lod;
     // T0020: settlement mass models of the anchor body.
-    if (show_surface && anchor->civ != nullptr) {
+    if (show_surface && anchor->civ != nullptr && !city_active) {
+      anchor->civ->city_enabled = !no_city;
       inf::app::draw_civ_sites(anchor->civ.get(), rhi.get(), *anchor->field, to_render(player.position()),
-                               camera_pos, view_projection, &items);
+                               camera_pos, view_projection, city_options, &items, &city_ranges, &city_stats);
+    }
+    // T0021: city scenes through the city pipeline.
+    if (show_surface && city_active) {
+      inf::app::draw_city_upload(city_upload, camera_pos, view_projection, city_options, &items, &city_ranges, &city_stats);
+    }
+    // Site beacons: a light beam over every settlement, its height and
+    // colour by tier, its width a few pixels at any distance so it reads
+    // from orbit as well as from the street. Additive, so it never hides
+    // anything; the planet occludes it.
+    if (beacons && show_surface && anchor->civ != nullptr && anchor->civ->sites != nullptr) {
+      const double px_world = 2.0 * std::tan(kFovY * 0.5) / state.height;
+      const double R = anchor->radius;
+      const double night = beacon_night;  // last frame's night factor
+      // Outpost, hamlet, village green; town cyan; city blue; metropolis
+      // orange; capital gold.
+      static const float kTierColour[8][3] = {{0.35f, 0.9f, 0.45f}, {0.35f, 0.9f, 0.45f}, {0.4f, 0.95f, 0.5f},
+                                              {0.3f, 0.95f, 0.75f}, {0.35f, 0.85f, 1.0f}, {0.25f, 0.55f, 1.0f},
+                                              {1.0f, 0.55f, 0.2f}, {1.0f, 0.8f, 0.25f}};
+      static const double kTierHeightM[8] = {600.0, 800.0, 1200.0, 1600.0, 2200.0, 3000.0, 4000.0, 5000.0};
+      for (const inf::gen::Site& site : anchor->civ->sites->sites()) {
+        const int tier = std::clamp(site.tier, 0, 7);
+        const RVec3 up{site.frame.up.x.to_double(), site.frame.up.y.to_double(), site.frame.up.z.to_double()};
+        const RVec3 east{site.frame.east.x.to_double(), site.frame.east.y.to_double(), site.frame.east.z.to_double()};
+        const RVec3 north{site.frame.north.x.to_double(), site.frame.north.y.to_double(), site.frame.north.z.to_double()};
+        const RVec3 base = up * (R + site.datum_m);
+        const RVec3 rel = base - camera_pos;
+        const double dist = inf::render::length(rel);
+        if (dist > 2.5e6) continue;
+        const double height = kTierHeightM[tier];
+        const double width = std::max(5.0, dist * px_world * 2.5);
+        const Mat4 model = inf::render::from_basis(east * width, up * height, north * width, rel);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = beacon_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.color[0] = kTierColour[tier][0];
+        item.color[1] = kTierColour[tier][1];
+        item.color[2] = kTierColour[tier][2];
+        item.color[3] = 1.0f;
+        item.extra[0] = static_cast<float>(0.2 * (1.0 - 0.985 * night) * (site.capital ? 1.6 : 1.0));
+        item.extra[3] = 9.0f;
+        items.push_back(item);
+      }
     }
     for (const auto& [addr, chunk] : loaded) {
       if (!show_surface) {
@@ -2213,7 +2551,12 @@ int main(int argc, char** argv) {
       }
       inf::render::Rhi::DrawItem item;
       item.mesh = chunk.mesh_id;
+      item.shadow_caster = true;  // T0021: terrain shadows the city and itself
       const RVec3 translation = chunk.origin - camera_pos;
+      item.bounds[0] = static_cast<float>(translation.x) + chunk.centre[0];
+      item.bounds[1] = static_cast<float>(translation.y) + chunk.centre[1];
+      item.bounds[2] = static_cast<float>(translation.z) + chunk.centre[2];
+      item.bounds[3] = chunk.radius;
       const Mat4 model = inf::render::translate(translation);
       const Mat4 mvp = inf::render::mul(view_projection, model);
       std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
@@ -2295,16 +2638,24 @@ int main(int argc, char** argv) {
                   entry.phys.radius_m.to_double(), 3.0, color[0], color[1], color[2],
                   body_tex_key(slot, -1));
       }
-      // The static land impostor is ALWAYS drawn (map off): from orbit it
-      // IS the planet (chunks hidden); nearer in it sits 300 m under the
-      // real terrain as the streaming backstop, so chunks arriving late
-      // refine the picture instead of flipping ocean into land.
-      if (land_mesh != 0) {
+      // The static land impostor: from orbit it IS the planet (chunks
+      // hidden above 0.35R); through the transition band it backstops
+      // late-arriving chunks. BELOW 0.22R it is hidden — its ~40 km
+      // lattice interpolates linearly across real km-scale relief, so
+      // near the ground its sheets poked ABOVE true terrain as phantom
+      // collision-less surfaces (the "fall through the top layer onto
+      // stacked panes" bug, 2026-09-01) — UNLESS the chunk set is still
+      // sparse: on a fresh anchor (a first moon landing) hiding it left
+      // the player descending through visible-nothing onto invisible
+      // ground under the dome. A briefly-poking sheet beats a void.
+      if (land_mesh != 0 &&
+          (altitude > 0.22 * anchor->radius || loaded.size() < 200)) {
         const RVec3 rel = to_render(SVec3{0.0, 0.0, 0.0}) - camera_pos;
         const Mat4 model = inf::render::translate(rel);
         const Mat4 mvp = inf::render::mul(view_projection, model);
         inf::render::Rhi::DrawItem item;
         item.mesh = land_mesh;
+        item.prepass = true;  // T0021: occluder for the screen-space passes
         std::memcpy(item.material_palette, land_palette, sizeof(item.material_palette));
         if (const auto tex_it = body_textures.find(body_tex_key(anchor->slot, anchor->moon));
             tex_it != body_textures.end()) {
@@ -3087,6 +3438,23 @@ int main(int argc, char** argv) {
       }
       frame_params.tan_half_x = static_cast<float>(tan_half * input.aspect);
       frame_params.tan_half_y = static_cast<float>(tan_half);
+      {
+        // Camera basis as the view matrix uses it (T0021: the city frame,
+        // cascade fitting and the screen-space passes rebuild the view
+        // from these).
+        const RVec3 f = inf::render::normalize(cam_forward);
+        const RVec3 s = inf::render::normalize(inf::render::cross(f, cam_up));
+        const RVec3 u = inf::render::cross(s, f);
+        frame_params.cam_right[0] = static_cast<float>(s.x);
+        frame_params.cam_right[1] = static_cast<float>(s.y);
+        frame_params.cam_right[2] = static_cast<float>(s.z);
+        frame_params.cam_up[0] = static_cast<float>(u.x);
+        frame_params.cam_up[1] = static_cast<float>(u.y);
+        frame_params.cam_up[2] = static_cast<float>(u.z);
+        frame_params.cam_fwd[0] = static_cast<float>(f.x);
+        frame_params.cam_fwd[1] = static_cast<float>(f.y);
+        frame_params.cam_fwd[2] = static_cast<float>(f.z);
+      }
       frame_params.altitude_frac = static_cast<float>(std::clamp(dome_alt_frac, 0.0, 9.0));
       set3(frame_params.planet_center, RVec3{0.0, 0.0, 0.0} - camera_pos);
       frame_params.sea_radius_m = static_cast<float>(sea_radius);
@@ -3096,6 +3464,64 @@ int main(int argc, char** argv) {
       // of altitude up (full sphere shading from one radius out).
       frame_params.normal_blend = static_cast<float>(
           std::clamp((altitude / anchor->radius - 0.25) / 0.75, 0.0, 1.0));
+      // T0021: the camera-relative view-projection of this and the last
+      // frame for the city pipeline (shadows, AO, temporal AA).
+      frame_params.have_view_proj = true;
+      std::memcpy(frame_params.view_proj, view_projection.m, sizeof(view_projection.m));
+      {
+        const RVec3 shift = camera_pos - city_prev_camera;
+        const Mat4 prev_rel = inf::render::mul(city_prev_view_proj, inf::render::translate(shift));
+        std::memcpy(frame_params.prev_view_proj, prev_rel.m, sizeof(prev_rel.m));
+        frame_params.camera_delta[0] = static_cast<float>(shift.x);
+        frame_params.camera_delta[1] = static_cast<float>(shift.y);
+        frame_params.camera_delta[2] = static_cast<float>(shift.z);
+        city_prev_view_proj = view_projection;
+        city_prev_camera = camera_pos;
+      }
+      // Night for lit rooms and lamps: the sun below the local horizon.
+      inf::render::Rhi::CitySettings city_settings;
+      const double sun_up = static_cast<double>(frame_params.sun_dir[0]) * frame_params.planet_up[0] +
+                            static_cast<double>(frame_params.sun_dir[1]) * frame_params.planet_up[1] +
+                            static_cast<double>(frame_params.sun_dir[2]) * frame_params.planet_up[2];
+      city_settings.night = static_cast<float>(std::clamp((0.03 - sun_up) / 0.12, 0.0, 1.0));
+      beacon_night = city_settings.night;
+      {
+        // Twilight: the sun's light through the long atmospheric path at
+        // the horizon — dim and warm as it sets, gone a few degrees under
+        // (until now a sun just below the horizon still lit tower tops and
+        // far hills at full strength, blowing out under night exposure).
+        // Cosmetic; the terrain, the city and the dome share the tint.
+        const double t = std::clamp((sun_up + 0.03) / 0.15, 0.0, 1.0);
+        const double tw = t * t * (3.0 - 2.0 * t);
+        const double warm[3] = {1.0, 0.55 + 0.45 * tw, 0.35 + 0.65 * tw};
+        for (int c = 0; c < 3; ++c) {
+          frame_params.sun_color[c] *= static_cast<float>((0.02 + 0.98 * tw) * warm[c]);
+        }
+      }
+      city_settings.debug_view = city_debug;
+      city_settings.ssao = !no_ssao;
+      city_settings.shadows = !no_shadows;
+      city_settings.taa = !no_taa;
+      city_settings.occlusion = !no_occlusion;
+      city_settings.ssao_half = !ssao_full;
+      city_settings.shadow_half_rate = shadow_half_rate;
+      city_settings.shadow_far_lod = shadow_far_lod;
+      if (stress_frames > 0) {
+        // --stress: flip the size-dependent options every frame so the
+        // targets are recreated N times (the leak regression of T0022 C.3).
+        city_settings.ssao_half = (frame & 1) != 0;
+        city_settings.occlusion = (frame & 2) != 0;
+      }
+      rhi->set_city_settings(city_settings);
+      {
+        std::vector<inf::render::Rhi::CityLight> lights;
+        if (city_active) {
+          inf::app::city_lights_for_frame(city_upload, camera_pos, city_settings.night > 0.05f, &lights);
+        } else if (anchor && anchor->civ) {
+          inf::app::civ_city_lights(anchor->civ.get(), camera_pos, city_settings.night > 0.05f, &lights);
+        }
+        rhi->set_city_lights(lights.data(), lights.size());
+      }
     }
     // Verification captures (--capture): grab the final rendered frame,
     // when the scene has had time to stream in.
@@ -3114,8 +3540,41 @@ int main(int argc, char** argv) {
                      static_cast<int>(player.mode()));
       }
     }
+    frame_params.city_ranges = city_ranges.data();
+    frame_params.city_range_count = city_ranges.size();
+    frame_params.lock_exposure = sweep_frames > 0 && frame >= sweep_warmup - 8;
     rhi->render_frame(frame_params, items.data(), items.size());
+    if (stress_frames > 0 && frame >= static_cast<long>(stress_frames)) {
+      std::printf("stress: %d target recreations survived\n", stress_frames);
+      std::fflush(stdout);
+      break;
+    }
 
+    if (bench_frames > 0 && frame >= sweep_warmup && script_pc >= script.size() && script_wait <= 0.0) {
+      // Frame time from the wall clock around whole frames (the GPU is
+      // synchronised by the swap chain).
+      static double bench_start = 0.0;
+      static int bench_count = 0;
+      static long bench_uploads_start = 0;
+      const inf::core::LocalClock bench_clock;
+      const double now_s = static_cast<double>(bench_clock.now().ns_since_epoch) * 1e-9;
+      if (bench_count == 0) {
+        bench_start = now_s;
+        bench_uploads_start = chunk_uploads;
+      }
+      if (++bench_count > bench_frames) {
+        const double ms = (now_s - bench_start) / bench_frames * 1000.0;
+        const inf::render::Rhi::CityPassStats& ps = rhi->city_pass_stats();
+        std::printf("bench: %d frames, %.2f ms/frame, %dx%d, city triangles %zu resident / %zu drawn / %zu shadow in %zu ranges (%u main, %u occluded, %u shadow) over %zu meshes, %zu chunks (%ld uploaded during), %zu items, ssao %d%s shadows %d%s%s taa %d occlusion %d\n",
+                    bench_frames, ms, state.width, state.height, city_stats.resident_triangles, city_stats.drawn_triangles,
+                    city_stats.shadow_triangles, city_stats.ranges, ps.ranges_main, ps.ranges_occluded, ps.ranges_shadow, city_stats.items,
+                    loaded.size(), chunk_uploads - bench_uploads_start, items.size(), no_ssao ? 0 : 1, ssao_full ? "" : " (half)",
+                    no_shadows ? 0 : 1, shadow_half_rate ? " (half rate)" : "", shadow_far_lod ? " (far lod)" : "", no_taa ? 0 : 1,
+                    no_occlusion ? 0 : 1);
+        std::fflush(stdout);
+        break;
+      }
+    }
     fps_accum += dt;
     ++fps_frames;
     if (fps_accum >= 1.0) {
@@ -3143,6 +3602,226 @@ int main(int argc, char** argv) {
     }
 
     ++frame;
+    if (sweep_frames > 0 && frame >= sweep_warmup) {
+      std::vector<std::uint8_t> cur;
+      std::vector<float> depth;
+      std::uint32_t w = 0, h = 0;
+      const auto lum = [](const std::vector<std::uint8_t>& img, std::size_t px) {
+        return (0.299f * img[px * 4] + 0.587f * img[px * 4 + 1] + 0.114f * img[px * 4 + 2]) / 255.0f;
+      };
+      // Box blur of radius sweep_blur, separable, on the three colour channels.
+      const auto blur = [&](std::vector<std::uint8_t>& img) {
+        const int R = sweep_blur;
+        if (R <= 0) return;
+        std::vector<std::uint8_t> tmp(img.size());
+        for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+          int sum = 0, n = 0;
+          for (int k = -R; k <= R; ++k) { const int xx = static_cast<int>(x) + k; if (xx < 0 || xx >= static_cast<int>(w)) continue; sum += img[(static_cast<std::size_t>(y) * w + xx) * 4 + c]; ++n; }
+          tmp[(static_cast<std::size_t>(y) * w + x) * 4 + c] = static_cast<std::uint8_t>(sum / std::max(n, 1));
+        }
+        for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+          int sum = 0, n = 0;
+          for (int k = -R; k <= R; ++k) { const int yy = static_cast<int>(y) + k; if (yy < 0 || yy >= static_cast<int>(h)) continue; sum += tmp[(static_cast<std::size_t>(yy) * w + x) * 4 + c]; ++n; }
+          img[(static_cast<std::size_t>(y) * w + x) * 4 + c] = static_cast<std::uint8_t>(sum / std::max(n, 1));
+        }
+      };
+      // Bilinear sample of one channel (0..2 rgb, 3 luminance) at a fractional pixel position.
+      const auto sample = [&](const std::vector<std::uint8_t>& img, float fx, float fy, int ch) {
+        fx = std::min(std::max(fx, 0.0f), static_cast<float>(w) - 1.001f);
+        fy = std::min(std::max(fy, 0.0f), static_cast<float>(h) - 1.001f);
+        const std::uint32_t x0 = static_cast<std::uint32_t>(fx), y0 = static_cast<std::uint32_t>(fy);
+        const float tx = fx - static_cast<float>(x0), ty = fy - static_cast<float>(y0);
+        const auto at = [&](std::uint32_t x, std::uint32_t y) {
+          const std::size_t px = static_cast<std::size_t>(y) * w + x;
+          return ch == 3 ? lum(img, px) : img[px * 4 + static_cast<std::size_t>(ch)] / 255.0f;
+        };
+        return (at(x0, y0) * (1.0f - tx) + at(x0 + 1, y0) * tx) * (1.0f - ty) + (at(x0, y0 + 1) * (1.0f - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+      };
+      const auto move = [&]() {
+        SVec3 dir = inf::sim::normalize(inf::sim::cross(player.forward(), player.up()));
+        if (sweep_dir == 1) dir = player.forward();
+        else if (sweep_dir == 2) dir = player.up() * -1.0;
+        player.set_position(player.position() + dir * sweep_step);
+      };
+      if (sweep.phase == 0) {
+        // The material-id frame: the city shader writes ids, the composite
+        // passes them raw.
+        sweep.saved_debug = city_debug;
+        city_debug = 12;
+        rhi->request_readback();
+        sweep.phase = 1;
+      } else if (sweep.phase == 1) {
+        if (rhi->take_readback(&cur, &depth, &w, &h)) {
+          sweep.ids.swap(cur);
+          sweep.w = w;
+          sweep.h = h;
+          city_debug = sweep.saved_debug;
+          sweep.phase = 2;
+          sweep.settle = 0;
+        }
+      } else if (sweep.phase == 2) {
+        // Let the TAA history forget the id frame, then take the first frame.
+        if (++sweep.settle == 16) rhi->request_readback();
+        if (sweep.settle >= 16 && rhi->take_readback(&cur, &depth, &w, &h)) {
+          if (w != sweep.w || h != sweep.h) { sweep.w = w; sweep.h = h; sweep.ids.clear(); }
+          blur(cur);
+          sweep.prev.swap(cur);
+          sweep.prev_vp = view_projection;
+          sweep.prev_cam = camera_pos;
+          sweep.resid.assign(static_cast<std::size_t>(w) * h, 0.0f);
+          sweep.raw.assign(sweep.resid.size(), 0.0f);
+          sweep.chroma.assign(sweep.resid.size(), 0.0f);
+          sweep.phase = 3;
+          move();
+          rhi->request_readback();
+          ++sweep.step;
+        }
+      } else if (rhi->take_readback(&cur, &depth, &w, &h) && w == sweep.w && h == sweep.h) {
+        blur(cur);
+        // Column-major 4x4 inverse (cofactors), doubles.
+        const auto inverse4 = [](const Mat4& a, double* out) {
+          double inv[16];
+          const float* m = a.m;
+          inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+          inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+          inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+          inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+          inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+          inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+          inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+          inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+          inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+          inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+          inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+          inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+          inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+          inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+          inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+          inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+          const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+          const double id = det != 0.0 ? 1.0 / det : 0.0;
+          for (int i = 0; i < 16; ++i) out[i] = inv[i] * id;
+        };
+        const auto xform = [](const double* m, const double* v, double* o) {
+          for (int r = 0; r < 4; ++r) o[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
+        };
+        double inv_cur[16];
+        inverse4(view_projection, inv_cur);
+        // Previous VP in this frame's camera-relative space.
+        const Mat4 prev_rel_f = inf::render::mul(sweep.prev_vp, inf::render::translate(camera_pos - sweep.prev_cam));
+        double prev_rel[16];
+        for (int i = 0; i < 16; ++i) prev_rel[i] = prev_rel_f.m[i];
+        for (std::uint32_t y = 1; y + 1 < h; ++y) {
+          for (std::uint32_t x = 1; x + 1 < w; ++x) {
+            const std::size_t px = static_cast<std::size_t>(y) * w + x;
+            const float lc = lum(cur, px);
+            sweep.raw[px] += std::fabs(lc - lum(sweep.prev, px));
+            float fx = static_cast<float>(x) + 0.5f, fy = static_cast<float>(y) + 0.5f;
+            if (depth[px] > 1e-7f) {  // not sky (reversed Z)
+              const double ndc[4] = {fx / w * 2.0 - 1.0, 1.0 - fy / h * 2.0, depth[px], 1.0};
+              double wp[4];
+              xform(inv_cur, ndc, wp);
+              const double world[4] = {wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3], 1.0};
+              double pc[4];
+              xform(prev_rel, world, pc);
+              if (pc[3] <= 1e-4) continue;
+              fx = static_cast<float>((pc[0] / pc[3] * 0.5 + 0.5) * w);
+              fy = static_cast<float>((0.5 - pc[1] / pc[3] * 0.5) * h);
+              if (fx < 1.0f || fy < 1.0f || fx > w - 2.0f || fy > h - 2.0f) continue;  // came from off-screen
+            }
+            const float lp = sample(sweep.prev, fx - 0.5f, fy - 0.5f, 3);
+            const float gx = 0.5f * std::fabs(lum(cur, px + 1) - lum(cur, px - 1));
+            const float gy = 0.5f * std::fabs(lum(cur, px + w) - lum(cur, px - w));
+            const float tol = 0.5f * (gx + gy) + 0.004f;
+            sweep.resid[px] += std::max(0.0f, std::fabs(lc - lp) - tol);
+            // Chroma: red and blue relative to green, the same tolerance rule.
+            const float rc = cur[px * 4] / 255.0f - cur[px * 4 + 1] / 255.0f;
+            const float bc = cur[px * 4 + 2] / 255.0f - cur[px * 4 + 1] / 255.0f;
+            const float rp = sample(sweep.prev, fx - 0.5f, fy - 0.5f, 0) - sample(sweep.prev, fx - 0.5f, fy - 0.5f, 1);
+            const float bp = sample(sweep.prev, fx - 0.5f, fy - 0.5f, 2) - sample(sweep.prev, fx - 0.5f, fy - 0.5f, 1);
+            sweep.chroma[px] += std::max(0.0f, 0.5f * (std::fabs(rc - rp) + std::fabs(bc - bp)) - tol);
+          }
+        }
+        sweep.prev.swap(cur);
+        sweep.prev_vp = view_projection;
+        sweep.prev_cam = camera_pos;
+        ++sweep.measured;
+        if (sweep.step < sweep_frames) {
+          move();
+          rhi->request_readback();
+          ++sweep.step;
+        } else {
+          const float norm = 1.0f / static_cast<float>(std::max(sweep.measured, 1));
+          double mat_sum[256] = {}, mat_cnt[256] = {}, mat_chroma[256] = {};
+          double total = 0.0, total_raw = 0.0, total_chroma = 0.0;
+          std::vector<std::uint8_t> heat(sweep.resid.size() * 4, 255);
+          const auto srgb_lin = [](std::uint8_t b) {
+            const float v = b / 255.0f;
+            return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+          };
+          for (std::size_t px = 0; px < sweep.resid.size(); ++px) {
+            const float f = sweep.resid[px] * norm;
+            total += f;
+            total_raw += sweep.raw[px] * norm;
+            total_chroma += sweep.chroma[px] * norm;
+            int id = 255;
+            if (sweep.ids.size() == sweep.resid.size() * 4) {
+              const float r = srgb_lin(sweep.ids[px * 4]), g = srgb_lin(sweep.ids[px * 4 + 1]), b = srgb_lin(sweep.ids[px * 4 + 2]);
+              if (b < 0.2f) id = static_cast<int>(std::lround(r * 15.0f)) + 16 * static_cast<int>(std::lround(g * 15.0f));
+              else if (b > 0.35f && b < 0.65f && r < 0.1f && g < 0.1f) id = 254;
+            }
+            mat_sum[id] += f;
+            mat_chroma[id] += sweep.chroma[px] * norm;
+            mat_cnt[id] += 1.0;
+            const float v = std::min(1.0f, f * 10.0f);
+            heat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
+            heat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
+            heat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+          }
+          const char* dir_name = sweep_dir == 1 ? "forward" : (sweep_dir == 2 ? "down" : "right");
+          std::printf("sweep: %d steps of %.3f m %s%s; mean temporal residual %.5f, chroma %.5f (raw frame difference %.5f) at %ux%u\n",
+                      sweep.measured, sweep_step, dir_name, sweep_blur > 0 ? " (blurred)" : "", total / static_cast<double>(sweep.resid.size()),
+                      total_chroma / static_cast<double>(sweep.resid.size()), total_raw / static_cast<double>(sweep.resid.size()), sweep.w, sweep.h);
+          struct Row { int id; double mean; double chroma; double share; };
+          std::vector<Row> rows;
+          for (int id = 0; id < 256; ++id) {
+            if (mat_cnt[id] < 200) continue;
+            rows.push_back(Row{id, mat_sum[id] / mat_cnt[id], mat_chroma[id] / mat_cnt[id], mat_sum[id] / std::max(total, 1e-9)});
+          }
+          std::sort(rows.begin(), rows.end(), [](const Row& p1, const Row& p2) { return p1.share > p2.share; });
+          const std::vector<inf::city::MaterialDesc> names = inf::city::make_materials();
+          std::printf("  %-4s %-18s %-10s %-10s %-10s %s\n", "id", "material", "pixels", "residual", "chroma", "share");
+          for (std::size_t i = 0; i < rows.size() && i < 12; ++i) {
+            const Row& r = rows[i];
+            const char* name = r.id == 255 ? "(sky)" : (r.id == 254 ? "(terrain)" : (r.id < static_cast<int>(names.size()) ? names[static_cast<std::size_t>(r.id)].name.c_str() : "?"));
+            std::printf("  %-4d %-18s %-10.0f %-10.5f %-10.5f %.1f%%\n", r.id, name, mat_cnt[r.id], r.mean, r.chroma, r.share * 100.0);
+          }
+          stbi_write_png((sweep_out + "-heat.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                         heat.data(), static_cast<int>(sweep.w * 4));
+          stbi_write_png((sweep_out + "-frame.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                         sweep.prev.data(), static_cast<int>(sweep.w * 4));
+          if (sweep.ids.size() == sweep.resid.size() * 4) {
+            stbi_write_png((sweep_out + "-ids.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                           sweep.ids.data(), static_cast<int>(sweep.w * 4));
+          }
+          {
+            // The chroma heat map (x50): colour-only flicker such as z-fighting between two textures.
+            std::vector<std::uint8_t> cheat(sweep.chroma.size() * 4, 255);
+            for (std::size_t px = 0; px < sweep.chroma.size(); ++px) {
+              const float v = std::min(1.0f, sweep.chroma[px] * norm * 50.0f);
+              cheat[px * 4 + 0] = static_cast<std::uint8_t>(255.0f * std::min(1.0f, v * 2.0f));
+              cheat[px * 4 + 1] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, std::min(1.0f, v * 2.0f - 0.6f)));
+              cheat[px * 4 + 2] = static_cast<std::uint8_t>(255.0f * std::max(0.0f, 1.0f - v * 4.0f) * 0.25f);
+            }
+            stbi_write_png((sweep_out + "-chroma.png").c_str(), static_cast<int>(sweep.w), static_cast<int>(sweep.h), 4,
+                           cheat.data(), static_cast<int>(sweep.w * 4));
+          }
+          std::printf("sweep: wrote %s-heat.png and %s-frame.png\n", sweep_out.c_str(), sweep_out.c_str());
+          std::fflush(stdout);
+          break;
+        }
+      }
+    }
     if (max_frames > 0 && frame >= max_frames) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);
     }

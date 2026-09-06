@@ -72,7 +72,21 @@ enum class Material : std::uint8_t {
   WindowDark = 43,
   FacadeWindows = 44,
   ScrapMetal = 45,
-  Count = 46,
+  // T0021 city surfaces (the cityblock demo's texture sets): concrete,
+  // asphalt, paving, terrazzo, marble, metals, bark. Layer ids in the
+  // shared library; the city material table refers to them.
+  Asphalt = 46,
+  PavementLight = 47,
+  PavingSlabs = 48,
+  Terrazzo = 49,
+  ConcreteWhite = 50,
+  ConcreteSmooth = 51,
+  ConcretePanels = 52,
+  MetalSilver = 53,
+  MetalBlack = 54,
+  Bark = 55,
+  Marble = 56,
+  Count = 57,
 };
 
 // Which per-planet tint a material takes (SurfacePalette below).
@@ -96,6 +110,8 @@ struct MaterialInfo {
 };
 
 const MaterialInfo& material_info(Material id);
+// Registry id of a material by its manifest name (-1 when unknown).
+int material_by_name(const char* name);
 inline constexpr std::uint32_t kMaterialCount = static_cast<std::uint32_t>(Material::Count);
 
 struct VertexMaterial {

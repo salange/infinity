@@ -34,6 +34,9 @@ struct SiteMeshParams {
   double focus_x{0.0};
   double focus_y{0.0};
   double focus_radius_m{0.0};
+  // Only the merged superblock masses outside the focus (T0021: the city
+  // system builds the focus itself; big sites keep their far context).
+  bool context_only{false};
 };
 
 struct SiteMesh {

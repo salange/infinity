@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -15,6 +16,9 @@
 #include "gen/terrain.hpp"
 #include "render/math.hpp"
 #include "render/rhi.hpp"
+
+#include "city/site_build.hpp"
+#include "city_render.hpp"
 
 namespace inf::app {
 
@@ -45,8 +49,28 @@ struct CivAnchor {
     double origin[3]{0.0, 0.0, 0.0};
     std::uint8_t palette[4]{0, 0, 0, 0};
     double focus_x{0.0}, focus_y{0.0};
+    // T0021 WP3: at the near and mid levels the site's buildings come from
+    // the city system (one scene per site, streamed by focus).
+    CityUpload city;
+    int city_detail{-1};
+    double city_focus_x{0.0}, city_focus_y{0.0};
   };
   std::vector<SiteMeshEntry> meshes;
+  // One city scene builds at a time on a worker (the scene is a pure
+  // function of the site and the focus); the entry keeps drawing its
+  // previous upload until the new one is committed.
+  struct PendingCity {
+    std::uint32_t site_index{0};
+    int detail{-1};
+    double focus_x{0.0}, focus_y{0.0};
+    std::future<CityUploadData> future;
+    std::vector<city::MaterialDesc> materials;
+    city::SiteBuildStats stats;
+    bool active{false};
+  };
+  PendingCity pending;
+  bool city_materials{false};  // the city material table is on the renderer
+  bool city_enabled{true};     // false: the mass path at every level (measurements)
 
   struct TileEntry {
     gen::EcumenopolisField::TileId id;
@@ -74,11 +98,17 @@ std::unique_ptr<CivAnchor> build_civ_anchor(const core::Seed128& seed,
 // the camera's.
 void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& field,
                     const render::Vec3& player_pos, const render::Vec3& camera_pos,
-                    const render::Mat4& view_projection,
-                    std::vector<render::Rhi::DrawItem>* items);
+                    const render::Mat4& view_projection, const CityDrawOptions& options,
+                    std::vector<render::Rhi::DrawItem>* items, std::vector<render::Rhi::CityRange>* ranges,
+                    CityDrawStats* city_stats = nullptr);
 
 // Releases the meshes (on re-anchoring).
 void release_civ_meshes(CivAnchor* civ, render::Rhi* rhi);
+
+// The point lights of every streamed city scene for this frame
+// (camera-relative, nearest first, at most 64; none by day).
+void civ_city_lights(const CivAnchor* civ, const render::Vec3& camera_pos, bool night,
+                     std::vector<render::Rhi::CityLight>* out);
 
 // --- the far-view bake (WP7) --------------------------------------------------
 // The orbit impostor is baked from the live generators on a background

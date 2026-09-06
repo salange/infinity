@@ -8,16 +8,9 @@
 #include <vector>
 
 #include "gpu.hpp"
+#include "materials.hpp"
 
 namespace cb {
-
-struct TextureSetSpec {
-  std::string name;  // directory under assets/textures
-  // Procedural fallback: base colour, roughness, and a pattern id.
-  float fallback_rgb[3]{0.5f, 0.5f, 0.5f};
-  float fallback_roughness{0.7f};
-  int fallback_pattern{0};  // 0 flat, 1 concrete noise, 2 metal brushed, 3 stone tiles, 4 grass, 5 asphalt
-};
 
 struct MaterialArrays {
   Texture albedo;  // RGBA8 sRGB

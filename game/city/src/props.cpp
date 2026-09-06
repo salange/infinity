@@ -1,12 +1,12 @@
-#include "props.hpp"
+#include "city/props.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-#include "site.hpp"
-#include "towers.hpp"
+#include "city/flora.hpp"
+#include "city/towers.hpp"
 
-namespace cb {
+namespace inf::city {
 
 namespace {
 
@@ -485,12 +485,12 @@ void build_overpass(Scene& sc, const std::vector<Vec2>& ctrl, float deck_y, floa
   }
 }
 
-// ---- government building ----------------------------------------------------------------
+// ---- the civic centre through the settlement's growth ---------------------------------
 
 void build_settler_house(Scene& sc, Vec2 c, float rot, float y, Rng& rng, int detail, bool deck) {
   Mesh& mesh = sc.opaque;
-  // a small glass pavilion for two: rounded plan, floor-to-ceiling glass,
-  // a thin white roof slab, a solar array on top
+  // A small glass pavilion for two: rounded plan, floor-to-ceiling glass,
+  // a thin white roof slab, a solar array on top.
   const std::vector<Vec2> plan = plan_transform(plan_rounded_rect(5.0f, 3.6f, 1.4f, 4), c, rot);
   const float h = 3.4f;
   Emit g(&mesh, M_GLASS_CLEAR);
@@ -525,7 +525,7 @@ void build_settler_house(Scene& sc, Vec2 c, float rot, float y, Rng& rng, int de
     d.polygon(deck_plan, y, true);
     build_hedge_ring(sc, deck_plan, 0.6f, 0.6f, 0.6f, y, 8.0f, rng);
   }
-  // the couple's utilities: a water tank and an antenna
+  // The couple's utilities: a water tank and an antenna.
   Emit u2(&mesh, M_SILVER);
   const Vec2 t = c + plan_transform({Vec2{6.5f, 2.5f}}, Vec2{0, 0}, rot)[0];
   u2.tube(P3(t, y), P3(t, y + 1.6f), 0.7f, 12, true);
@@ -535,14 +535,14 @@ void build_settler_house(Scene& sc, Vec2 c, float rot, float y, Rng& rng, int de
 void build_pod_wreck(Scene& sc, Vec2 c, float y, Rng& rng, int detail, bool memorial) {
   Mesh& mesh = sc.opaque;
   const int seg = detail >= 1 ? 40 : 20;
-  // the scorched pad ring the pod came down on
+  // The scorched pad ring the pod came down on.
   Emit dark(&mesh, M_PANEL_DARK);
   dark.polygon(plan_circle(9.0f, seg, c), y + 0.005f, true);
   Emit rim(&mesh, memorial ? M_MARBLE_WHITE : M_CONCRETE);
   rim.ring_cap(plan_circle(9.6f, seg, c), plan_circle(8.8f, seg, c), y + 0.15f, true);
   rim.wall(plan_circle(9.6f, seg, c), y, y + 0.15f, true, true);
-  // the pod: a truncated cone hull, tilted, landing legs (matte white so it
-  // does not read as a light source in the sun)
+  // The pod: a truncated cone hull, tilted, on landing legs (matte white
+  // so it does not read as a light source in the sun).
   Emit hull(&mesh, M_WHITE_METAL);
   const Vec3 base = P3(c + Vec2{1.5f, -0.8f}, y + 0.9f);
   const Vec3 tilt = normalize(Vec3{0.18f, 1.0f, -0.12f});
@@ -555,7 +555,7 @@ void build_pod_wreck(Scene& sc, Vec2 c, float y, Rng& rng, int detail, bool memo
     leg.tube(base + Vec3{std::cos(a) * 2.0f, 0.4f, std::sin(a) * 2.0f}, foot, 0.12f, 6, true);
     leg.frustum(foot, foot + Vec3{0, 0.12f, 0}, 0.45f, 0.5f, 8, true);
   }
-  // hatch door lying on the ground, a couple of crates
+  // The hatch door lying on the ground, a couple of crates.
   Emit door(&mesh, M_SILVER);
   door.box(P3(c + Vec2{-3.0f, 2.5f}, y + 0.2f), Vec3{1.1f, 0.05f, 0.8f}, Vec3{0.9f, 0, 0.44f}, Vec3{0, 1, 0}, Vec3{-0.44f, 0, 0.9f});
   Emit crate(&mesh, M_PANEL_DARK);
@@ -595,13 +595,15 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
     ring.torus(P3(c, y + 4.6f), Vec3{0, 1, 0}, 13.0f, 0.18f, 48, 8);
     return;
   }
-  // stage >= 2: a civic building. Marble is for the foundation only; walls,
-  // columns and entablature are the clean white the towers use.
+  // Stage 2 and up: a civic building that only grows — the plinth, the
+  // hall, the dome, the flag court; nothing moves between stages. Marble
+  // is for the foundation only; walls, columns and entablature are the
+  // clean white the towers use.
   const float body_scale = stage == 2 ? 0.55f : (stage == 3 ? 0.8f : 1.0f);
   const float h2 = half * body_scale;
   const float fh = stage == 2 ? 0.9f : (stage == 3 ? 2.2f : 3.2f);
   const std::vector<Vec2> base = plan_transform(plan_rect(h2 * 1.25f, h2 * 1.05f), c, rot);
-  build_foundation(sc, base, y, fh, 2, detail);
+  build_foundation(sc, base, y, fh, 2, detail);  // edge 2 = the +z (front) edge of plan_rect
   const float top = y + fh;
   const std::vector<Vec2> body = plan_transform(plan_superellipse(h2 * 0.78f, h2 * 0.62f, 4.0f, detail >= 1 ? 64 : 32), c, rot);
   const float storey = stage == 2 ? 4.6f : 5.2f;
@@ -622,6 +624,7 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
     }
     u += w;
   }
+  // Colonnade: columns on an outer ring carrying a thin entablature.
   const std::vector<Vec2> ring = plan_offset(body, stage == 2 ? 3.0f : 4.5f);
   Emit col(&mesh, M_WHITE_METAL);
   const float per = plan_perimeter(ring);
@@ -634,6 +637,7 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
   slab(mesh, plan_offset(ring, 1.0f), body_top + 0.6f, 0.8f, M_WHITE_METAL);
   parapet(mesh, plan_offset(ring, 1.0f), body_top + 0.6f, 0.9f, 0.4f, M_WHITE_METAL);
   if (stage >= 3) {
+    // Glass dome with ribs, the lantern and the beacon on top.
     const float dome_r = h2 * (stage == 3 ? 0.4f : (stage == 5 ? 0.6f : 0.5f));
     const Vec3 dc = P3(c, body_top + 0.6f);
     Emit dome(&mesh, M_GLASS_CLEAR);
@@ -661,6 +665,7 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
     roof.polygon(plan_offset(body, -0.3f), body_top + 0.62f, true);
   }
   if (stage >= 4) {
+    // The flag court in front of the stairs: one flag, three at stage 5.
     const Vec2 front = plan_transform({Vec2{0, h2 * 1.05f + 6.0f}}, c, rot)[0];
     const Vec2 side = plan_transform({Vec2{h2 * 0.9f, 0}}, Vec2{0, 0}, rot)[0];
     const int flags = stage == 5 ? 3 : 1;
@@ -676,4 +681,4 @@ void build_government(Scene& sc, Vec2 c, float rot, float half, float y, Rng& rn
   }
 }
 
-}  // namespace cb
+}  // namespace inf::city

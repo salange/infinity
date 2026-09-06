@@ -332,7 +332,7 @@ CityStats generate_city(Scene& sc, Rng root, CitySize size) {
         const Rng gr = r.child(7);
         for (int level = 0; level < 3; ++level) {
           const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
-          build_tower_group(sc, gr, to_world(b.centre), grot, 2 - level);
+          build_tower_group(sc, gr, to_world(b.centre), grot, kCurb, 2 - level);
           register_lod(first, static_cast<std::uint32_t>(sc.opaque.indices.size()), level, 180.0f);
         }
         st.towers += 2;

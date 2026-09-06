@@ -39,6 +39,7 @@ struct SiteBuildStats {
   std::uint32_t dropped{0};  // lots whose geometry came out non-finite (never drawn)
   std::uint32_t plazas{0};
   std::uint32_t overpasses{0};
+  std::uint32_t lawns{0};  // lots left unbuilt by the tier's fill probability
 };
 
 // Scene frame: x east, y up from the site datum, z south (metres from
@@ -47,7 +48,10 @@ struct SiteBuildStats {
 void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const gen::TerrainField& field,
                       const SiteBuildParams& params, Scene* scene, SiteBuildStats* stats);
 
-// The civic centre radius kept free of lots on a capital.
+// The founding site / civic centre radius kept free of lots (every
+// settlement has one; a capital's is the largest).
 double civic_centre_radius_m(const gen::Site& site);
+// The capitol stage of a site's tier (T0022 A.1): 0 outpost … 5 capital.
+int capitol_stage(const gen::Site& site);
 
 }  // namespace inf::city

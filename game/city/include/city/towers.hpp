@@ -72,8 +72,8 @@ TowerSpec random_tower(Rng& rng, float footprint_half, int max_floors);
 // Cheaper variant for the far ring.
 TowerSpec random_context_tower(Rng& rng, float footprint_half, int max_floors);
 
-// Shared podium with two or three towers of one family.
-void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, int detail);
+// Shared podium with two or three towers of one family, its ground at base_y.
+void build_tower_group(Scene& sc, Rng rng, Vec2 centre, float rot, float base_y, int detail);
 
 // Helpers shared with the site generator.
 Vec3 P3(Vec2 xz, float y);

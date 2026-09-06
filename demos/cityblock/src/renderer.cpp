@@ -1109,13 +1109,17 @@ void Renderer::render(const Camera& camera, float time_s, WGPUTextureView target
     }
     // candidate buffer (grow as needed) and args buffer
     const std::uint32_t n = static_cast<std::uint32_t>(I.cand.size());
-    if (n > I.cull_capacity || I.cull_bg == nullptr) {
+    // grow the buffers only when the candidate count exceeds them; the bind
+    // group alone is rebuilt whenever the depth pyramid was recreated
+    if (n > I.cull_capacity || I.cull_ranges == nullptr) {
       I.cull_capacity = std::max(n + 256, I.cull_capacity * 2);
       if (I.cull_ranges != nullptr) wgpuBufferRelease(I.cull_ranges);
       if (I.cull_args != nullptr) wgpuBufferRelease(I.cull_args);
       I.cull_ranges = gpu_->create_buffer(WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, I.cull_capacity * 32ull, nullptr, "cull-ranges");
       I.cull_args = gpu_->create_buffer(WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect | WGPUBufferUsage_CopySrc, I.cull_capacity * 20ull, nullptr, "cull-args");
-      if (I.cull_bg != nullptr) wgpuBindGroupRelease(I.cull_bg);
+      if (I.cull_bg != nullptr) { wgpuBindGroupRelease(I.cull_bg); I.cull_bg = nullptr; }
+    }
+    if (I.cull_bg == nullptr) {
       I.cull_bg = make_bg(dev, I.cull_bgl, {bg_buffer(0, I.cull_uniform, 160), bg_buffer(1, I.cull_ranges, I.cull_capacity * 32ull),
                                             bg_buffer(2, I.cull_args, I.cull_capacity * 20ull), bg_texture(3, I.hiz.view)});
     }

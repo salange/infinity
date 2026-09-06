@@ -42,6 +42,7 @@ struct Args {
   bool vsync{true};
   int rings{2};
   int bench{0};
+  int stress{0};
   int context_detail{-1};
   bool no_ssao{false};
   bool no_shadows{false};
@@ -98,6 +99,7 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--shadow-far-lod")) a.shadow_far_lod = true;
     else if (!std::strcmp(argv[i], "--rings")) a.rings = std::atoi(next("--rings"));
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
+    else if (!std::strcmp(argv[i], "--stress")) a.stress = std::atoi(next("--stress"));
     else if (!std::strcmp(argv[i], "--showcase")) a.showcase = true;
     else if (!std::strcmp(argv[i], "--sweep")) a.sweep = std::atoi(next("--sweep"));
     else if (!std::strcmp(argv[i], "--sweep-step")) a.sweep_step = static_cast<float>(std::atof(next("--sweep-step")));
@@ -325,6 +327,23 @@ int main(int argc, char** argv) {
     stbi_write_png((args.sweep_out + "-heat.png").c_str(), static_cast<int>(w), static_cast<int>(h), 4, heat.data(), static_cast<int>(w * 4));
     renderer.capture_png(args.sweep_out + "-frame.png");
     std::printf("  wrote %s-heat.png and %s-frame.png\n", args.sweep_out.c_str(), args.sweep_out.c_str());
+    renderer.shutdown();
+    gpu.destroy();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+  }
+  if (args.stress > 0) {
+    // Offscreen stress test: recreate the render targets every frame (as a
+    // window resize or an option toggle would) and check the renderer survives.
+    for (int i = 0; i < args.stress; ++i) {
+      renderer.settings().msaa = (i & 1) ? 1 : 4;
+      renderer.settings().ssao_half = (i & 2) != 0;
+      renderer.apply_settings();
+      renderer.render(cam, static_cast<float>(i) * 0.016f, nullptr);
+    }
+    gpu.poll(true);
+    std::printf("  stress: %d target recreations survived\n", args.stress);
     renderer.shutdown();
     gpu.destroy();
     glfwDestroyWindow(window);

@@ -59,6 +59,13 @@ struct TowerSpec {
 // -1 the far shell (one quad per plan segment and a roof, beyond ~1.2 km).
 void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rng rng, int detail);
 
+// Far-level facade patterns (T0022 C.2): from the far detail levels
+// the lattice members, fins and louvre blades are a band-limited pattern
+// the shader draws on the glass instead of sub-pixel geometry. Off keeps
+// the geometry for comparison. Process-wide, default on.
+void set_far_patterns(bool on);
+bool far_patterns();
+
 // Named families (the hero buildings), with their parameters exposed.
 TowerSpec spec_diagrid(float half, int floors);
 TowerSpec spec_lens(float half_w, float half_t, int floors, float rot);

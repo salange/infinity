@@ -29,6 +29,7 @@
 #include <stb_image_write.h>
 
 #include "city/materials.hpp"
+#include "city/towers.hpp"
 #include "city/showcase.hpp"
 #include "city_render.hpp"
 #include "civ_view.hpp"
@@ -522,6 +523,7 @@ int main(int argc, char** argv) {
   bool shadow_half_rate = false;
   bool shadow_far_lod = false;
   int stress_frames = 0;       // --stress N: recreate the render targets every frame N times, then exit
+  bool no_far_patterns = false;  // --no-far-patterns: sub-pixel member geometry at the far levels (A/B)
   int sweep_frames = 0;        // --sweep N: temporal-artifact analysis (the demo's tool)
   double sweep_step = 0.03;    // --sweep-step m
   std::string sweep_out = "sweep";  // --sweep-out name
@@ -608,6 +610,8 @@ int main(int argc, char** argv) {
       shadow_far_lod = true;
     } else if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
       stress_frames = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--no-far-patterns") == 0) {
+      no_far_patterns = true;
     } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
       // Shift the world clock (planet rotation, orbits): capture aid to
       // put a site into daylight. A per-save constant offset is exactly
@@ -626,6 +630,7 @@ int main(int argc, char** argv) {
     }
   }
 
+  inf::city::set_far_patterns(!no_far_patterns);
   const auto seed = inf::core::parse_seed(seed_text);
   if (!seed.has_value()) {
     std::fprintf(stderr, "invalid seed: %s\n", seed_text);

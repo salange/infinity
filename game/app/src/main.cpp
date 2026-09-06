@@ -485,6 +485,7 @@ int main(int argc, char** argv) {
   int window_w = 0;            // --window WxH: windowed at this size (measurements at a fixed resolution)
   int window_h = 0;
   bool no_city = false;        // --no-city: sites through the mass path only (baseline measurements)
+  bool beacons = true;         // --no-beacons: the light beams over every settlement (B toggles)
   bool no_ssao = false;        // --no-ssao / --no-shadows / --no-taa: renderer feature toggles
   bool no_shadows = false;
   bool no_taa = false;
@@ -549,6 +550,8 @@ int main(int argc, char** argv) {
       if (std::sscanf(argv[++i], "%dx%d", &window_w, &window_h) != 2) window_w = window_h = 0;
     } else if (std::strcmp(argv[i], "--no-city") == 0) {
       no_city = true;
+    } else if (std::strcmp(argv[i], "--no-beacons") == 0) {
+      beacons = false;
     } else if (std::strcmp(argv[i], "--no-ssao") == 0) {
       no_ssao = true;
     } else if (std::strcmp(argv[i], "--no-shadows") == 0) {
@@ -782,6 +785,30 @@ int main(int argc, char** argv) {
   const std::uint32_t impostor_mesh = rhi->create_mesh(fine_ball.data(), fine_ball.size());
   const std::vector<float> quad = unit_quad_vertices();
   const std::uint32_t glow_mesh = rhi->create_mesh(quad.data(), quad.size());
+  // Site beacon (mode 9): two crossed vertical quads, x/z in [-0.5, 0.5],
+  // y in [0, 1]; weights.x = 1 at the base .. 0 at the top, weights.y =
+  // 0 at the centre line .. 1 at the edge. Scaled per site per frame.
+  const std::uint32_t beacon_mesh = [&]() {
+    std::vector<float> v;
+    const auto vert = [&](float x, float y, float z, float edge) {
+      const float row[10] = {x, y, z, 0.0f, 1.0f, 0.0f, 1.0f - y, edge, 0.0f, 0.0f};
+      v.insert(v.end(), row, row + 10);
+    };
+    for (int q = 0; q < 2; ++q) {
+      const auto at = [&](float u, float y, float edge) {
+        if (q == 0) vert(u, y, 0.0f, edge);
+        else vert(0.0f, y, u, edge);
+      };
+      // Three strips across (edge 1, 0, 1) so the softness is per-vertex.
+      const float us[3] = {-0.5f, 0.0f, 0.5f};
+      const float edges[3] = {1.0f, 0.0f, 1.0f};
+      for (int k = 0; k < 2; ++k) {
+        at(us[k], 0.0f, edges[k]); at(us[k + 1], 0.0f, edges[k + 1]); at(us[k + 1], 1.0f, edges[k + 1]);
+        at(us[k], 0.0f, edges[k]); at(us[k + 1], 1.0f, edges[k + 1]); at(us[k], 1.0f, edges[k]);
+      }
+    }
+    return rhi->create_mesh_mat(v.data(), v.size());
+  }();
 
   // --- deep sky (T0018 WP2/WP3) ---------------------------------------
   // Static per system: the resolved-star field (one mesh of billboards
@@ -1056,6 +1083,8 @@ int main(int argc, char** argv) {
   bool m_was_down = false;
   bool esc_was_down = false;
   bool f9_was_down = false;
+  bool b_was_down = false;
+  double beacon_night = 0.0;  // the app's night factor, for the beacons' intensity
   double edit_cooldown = 0.0;
   double rec_flash = 0.0;          // REC icon flash after the F9 press
   std::string rec_dir_current;     // active recording dir (meta.csv sink)
@@ -1545,6 +1574,9 @@ int main(int argc, char** argv) {
       rec_flash = 0.7;
     }
     f9_was_down = f9_down;
+    const bool b_down = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+    if (b_down && !b_was_down) beacons = !beacons;
+    b_was_down = b_down;
 
     player.update(input);
 
@@ -2345,6 +2377,45 @@ int main(int argc, char** argv) {
     // T0021: city scenes through the city pipeline.
     if (show_surface && city_active) {
       inf::app::draw_city_upload(city_upload, camera_pos, view_projection, &items, &city_stats);
+    }
+    // Site beacons: a light beam over every settlement, its height and
+    // colour by tier, its width a few pixels at any distance so it reads
+    // from orbit as well as from the street. Additive, so it never hides
+    // anything; the planet occludes it.
+    if (beacons && show_surface && anchor->civ != nullptr && anchor->civ->sites != nullptr) {
+      const double px_world = 2.0 * std::tan(kFovY * 0.5) / state.height;
+      const double R = anchor->radius;
+      const double night = beacon_night;  // last frame's night factor
+      // Outpost, hamlet, village green; town cyan; city blue; metropolis
+      // orange; capital gold.
+      static const float kTierColour[8][3] = {{0.35f, 0.9f, 0.45f}, {0.35f, 0.9f, 0.45f}, {0.4f, 0.95f, 0.5f},
+                                              {0.3f, 0.95f, 0.75f}, {0.35f, 0.85f, 1.0f}, {0.25f, 0.55f, 1.0f},
+                                              {1.0f, 0.55f, 0.2f}, {1.0f, 0.8f, 0.25f}};
+      static const double kTierHeightM[8] = {600.0, 800.0, 1200.0, 1600.0, 2200.0, 3000.0, 4000.0, 5000.0};
+      for (const inf::gen::Site& site : anchor->civ->sites->sites()) {
+        const int tier = std::clamp(site.tier, 0, 7);
+        const RVec3 up{site.frame.up.x.to_double(), site.frame.up.y.to_double(), site.frame.up.z.to_double()};
+        const RVec3 east{site.frame.east.x.to_double(), site.frame.east.y.to_double(), site.frame.east.z.to_double()};
+        const RVec3 north{site.frame.north.x.to_double(), site.frame.north.y.to_double(), site.frame.north.z.to_double()};
+        const RVec3 base = up * (R + site.datum_m);
+        const RVec3 rel = base - camera_pos;
+        const double dist = inf::render::length(rel);
+        if (dist > 2.5e6) continue;
+        const double height = kTierHeightM[tier];
+        const double width = std::max(5.0, dist * px_world * 2.5);
+        const Mat4 model = inf::render::from_basis(east * width, up * height, north * width, rel);
+        const Mat4 mvp = inf::render::mul(view_projection, model);
+        inf::render::Rhi::DrawItem item;
+        item.mesh = beacon_mesh;
+        std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
+        item.color[0] = kTierColour[tier][0];
+        item.color[1] = kTierColour[tier][1];
+        item.color[2] = kTierColour[tier][2];
+        item.color[3] = 1.0f;
+        item.extra[0] = static_cast<float>(0.2 * (1.0 - 0.985 * night) * (site.capital ? 1.6 : 1.0));
+        item.extra[3] = 9.0f;
+        items.push_back(item);
+      }
     }
     for (const auto& [addr, chunk] : loaded) {
       if (!show_surface) {
@@ -3275,6 +3346,7 @@ int main(int argc, char** argv) {
                             static_cast<double>(frame_params.sun_dir[1]) * frame_params.planet_up[1] +
                             static_cast<double>(frame_params.sun_dir[2]) * frame_params.planet_up[2];
       city_settings.night = static_cast<float>(std::clamp((0.03 - sun_up) / 0.12, 0.0, 1.0));
+      beacon_night = city_settings.night;
       {
         // Twilight: the sun's light through the long atmospheric path at
         // the horizon — dim and warm as it sets, gone a few degrees under

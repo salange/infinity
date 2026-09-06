@@ -54,6 +54,9 @@ constexpr const char* kMeshShader = R"(
 //           and planet limb glow.
 //   mode 4: analytic sky dome (opaque, fullscreen quad at far depth):
 //           per-pixel view-ray gradient sky from the frame uniforms.
+//   mode 9: light beam (additive pass) — colour * extra.x, fading with
+//           weights.x (1 base .. 0 top) and softened across weights.y
+//           (0 centre .. 1 edge): the site beacons.
 struct Uniforms {
   mvp: mat4x4<f32>,
   color: vec4<f32>,
@@ -567,6 +570,14 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let mode = u32(u.extra.w + 0.5);
   let time = frame.sun_color.a;
+  if (mode == 9u) {
+    let h = clamp(in.weights.x, 0.0, 1.0);
+    let fade = pow(h, 2.2) * (0.6 + 0.4 * h);
+    let e = clamp(in.weights.y, 0.0, 1.0);
+    let soft = (1.0 - e * e) * (1.0 - e * e);
+    let core = exp(-e * e * 14.0) * 0.8;  // a brighter filament in the middle
+    return vec4<f32>(u.color.rgb * (u.extra.x * fade * (soft * 0.35 + core)), 1.0);
+  }
   if (mode == 3u) {
     let r = length(in.opos.xy);
     var base = 0.0;
@@ -2445,14 +2456,14 @@ struct Rhi::Impl {
     }
     // AO starts white (the passes fill it when they run).
     {
-      std::vector<std::uint8_t> white(static_cast<std::size_t>(((w + 255) / 256) * 256) * h, 255);
+      std::vector<std::uint8_t> white(static_cast<std::size_t>(((aw + 255) / 256) * 256) * ah, 255);
       for (WGPUTexture t : {ao_a, ao_b}) {
         WGPUTexelCopyTextureInfo dst{};
         dst.texture = t;
         WGPUTexelCopyBufferLayout layout{};
-        layout.bytesPerRow = ((w + 255) / 256) * 256;
-        layout.rowsPerImage = h;
-        const WGPUExtent3D extent{w, h, 1};
+        layout.bytesPerRow = ((aw + 255) / 256) * 256;
+        layout.rowsPerImage = ah;
+        const WGPUExtent3D extent{aw, ah, 1};
         wgpuQueueWriteTexture(queue, &dst, white.data(), white.size(), &layout, &extent);
       }
     }
@@ -3530,7 +3541,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         continue;  // city meshes: their own pipeline (draw_city)
       }
       const Pass item_pass = items[i].mode == 2 || items[i].mode == 3 ||
-                                     items[i].mode == 7
+                                     items[i].mode == 7 || items[i].mode == 9
                                  ? Pass::Additive
                              : items[i].translucent ? Pass::Blend
                                                     : Pass::Opaque;

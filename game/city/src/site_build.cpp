@@ -161,6 +161,7 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
       sites.lots_in_block(site, bx, by, &lots);
       if (lots.empty()) continue;
       const std::uint32_t block_first = static_cast<std::uint32_t>(sc.opaque.indices.size());
+      const std::size_t draws_before = sc.draws.size();
       // The block's level by distance from the focus, like its lots.
       int block_detail = params.detail;
       double bwx = (bx + 0.5) * B;
@@ -241,6 +242,14 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
       }
       Vec3 lo{1e30f, 1e30f, 1e30f};
       Vec3 hi{-1e30f, -1e30f, -1e30f};
+      {
+        const std::vector<Vec2> square = lattice_rect(bx * B - hs, by * B - hs, bx * B + B + hs, by * B + B + hs);
+        const float g = static_cast<float>(ground_z(bwx, bwy));
+        for (const Vec2& p : square) {
+          lo = vmin(lo, Vec3{p.x, g - 1.0f, p.y});
+          hi = vmax(hi, Vec3{p.x, g + 8.0f, p.y});
+        }
+      }
       for (const gen::Lot& lot : lots) {
         double cx = 0.0;
         double cy = 0.0;
@@ -323,8 +332,17 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
       }
       const std::uint32_t block_end = static_cast<std::uint32_t>(sc.opaque.indices.size());
       if (block_end > block_first) {
+        // One range per block over everything the lots did not register
+        // themselves (tower level groups), so nothing is drawn twice.
         const Vec3 centre = (lo + hi) * 0.5f;
-        sc.register_range(block_first, block_end, centre, length(hi - lo) * 0.5f + 1.0f);
+        const float radius = length(hi - lo) * 0.5f + 1.0f;
+        std::uint32_t cursor = block_first;
+        for (std::size_t d = draws_before; d < sc.draws.size(); ++d) {
+          const DrawRange& r = sc.draws[d];
+          if (r.first > cursor) sc.register_range(cursor, r.first, centre, radius);
+          cursor = std::max(cursor, r.first + r.count);
+        }
+        if (cursor < block_end) sc.register_range(cursor, block_end, centre, radius);
       }
     }
   }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -16,6 +17,7 @@
 #include "render/math.hpp"
 #include "render/rhi.hpp"
 
+#include "city/site_build.hpp"
 #include "city_render.hpp"
 
 namespace inf::app {
@@ -54,6 +56,19 @@ struct CivAnchor {
     double city_focus_x{0.0}, city_focus_y{0.0};
   };
   std::vector<SiteMeshEntry> meshes;
+  // One city scene builds at a time on a worker (the scene is a pure
+  // function of the site and the focus); the entry keeps drawing its
+  // previous upload until the new one is committed.
+  struct PendingCity {
+    std::uint32_t site_index{0};
+    int detail{-1};
+    double focus_x{0.0}, focus_y{0.0};
+    std::future<CityUploadData> future;
+    std::vector<city::MaterialDesc> materials;
+    city::SiteBuildStats stats;
+    bool active{false};
+  };
+  PendingCity pending;
   bool city_materials{false};  // the city material table is on the renderer
   bool city_enabled{true};     // false: the mass path at every level (measurements)
 
@@ -84,7 +99,7 @@ std::unique_ptr<CivAnchor> build_civ_anchor(const core::Seed128& seed,
 void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& field,
                     const render::Vec3& player_pos, const render::Vec3& camera_pos,
                     const render::Mat4& view_projection,
-                    std::vector<render::Rhi::DrawItem>* items);
+                    std::vector<render::Rhi::DrawItem>* items, CityDrawStats* city_stats = nullptr);
 
 // Releases the meshes (on re-anchoring).
 void release_civ_meshes(CivAnchor* civ, render::Rhi* rhi);

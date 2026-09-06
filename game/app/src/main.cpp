@@ -2335,15 +2335,16 @@ int main(int argc, char** argv) {
         items.push_back(stars_item);
       }
     }
+    inf::app::CityDrawStats city_stats;
     // T0020: settlement mass models of the anchor body.
     if (show_surface && anchor->civ != nullptr && !city_active) {
       anchor->civ->city_enabled = !no_city;
       inf::app::draw_civ_sites(anchor->civ.get(), rhi.get(), *anchor->field, to_render(player.position()),
-                               camera_pos, view_projection, &items);
+                               camera_pos, view_projection, &items, &city_stats);
     }
     // T0021: city scenes through the city pipeline.
     if (show_surface && city_active) {
-      inf::app::draw_city_upload(city_upload, camera_pos, view_projection, &items);
+      inf::app::draw_city_upload(city_upload, camera_pos, view_projection, &items, &city_stats);
     }
     for (const auto& [addr, chunk] : loaded) {
       if (!show_surface) {
@@ -3335,15 +3336,9 @@ int main(int argc, char** argv) {
       }
       if (++bench_count > bench_frames) {
         const double ms = (now_s - bench_start) / bench_frames * 1000.0;
-        std::size_t city_tris = 0;
-        if (anchor && anchor->civ) {
-          for (const auto& entry : anchor->civ->meshes) {
-            for (const auto& piece : entry.city.pieces) city_tris += piece.triangles;
-          }
-        }
-        for (const auto& piece : city_upload.pieces) city_tris += piece.triangles;
-        std::printf("bench: %d frames, %.2f ms/frame, %dx%d, %zu city triangles resident, %zu chunks (%ld uploaded during), %zu items, ssao %d shadows %d taa %d\n",
-                    bench_frames, ms, state.width, state.height, city_tris, loaded.size(), chunk_uploads - bench_uploads_start,
+        std::printf("bench: %d frames, %.2f ms/frame, %dx%d, city triangles %zu resident / %zu drawn / %zu shadow in %zu ranges, %zu chunks (%ld uploaded during), %zu items, ssao %d shadows %d taa %d\n",
+                    bench_frames, ms, state.width, state.height, city_stats.resident_triangles, city_stats.drawn_triangles,
+                    city_stats.shadow_triangles, city_stats.items, loaded.size(), chunk_uploads - bench_uploads_start,
                     items.size(), no_ssao ? 0 : 1, no_shadows ? 0 : 1, no_taa ? 0 : 1);
         std::fflush(stdout);
         break;

@@ -142,6 +142,9 @@ class Rhi {
     // Camera-relative bounding sphere (radius 0 = unbounded): the shadow
     // cascades and the prepass skip items outside their reach.
     float bounds[4]{0.0f, 0.0f, 0.0f, 0.0f};
+    // Drawn into the shadow maps and the prepass only (a coarse level of
+    // an object whose fine level is on screen).
+    bool shadow_only = false;
     float extra[4]{};
     // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow,
     // 3 = additive glow sprite (lens flare / veil / limb halo; extra.x

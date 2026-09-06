@@ -3507,7 +3507,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     wgpuRenderPassEncoderSetBindGroup(pass, 1, impl_->city_group, 1, &zero);
     wgpuRenderPassEncoderSetBindGroup(pass, 2, impl_->material_lib.group, 0, nullptr);
     for (std::size_t i = 0; i < count; ++i) {
-      if (items[i].mode != 8 || items[i].overlay) continue;
+      if (items[i].mode != 8 || items[i].shadow_only || items[i].overlay) continue;
       const auto it = impl_->meshes.find(items[i].mesh);
       if (it == impl_->meshes.end() || it->second.index_count == 0) continue;
       const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);

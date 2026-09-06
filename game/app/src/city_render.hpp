@@ -17,42 +17,84 @@ namespace inf::app {
 // curvature, and rotates normals and tangents by the frame at the
 // centre. Everything the renderer keeps is cosmetic: mesh handles and
 // per-frame draw items.
-struct CityUpload {
-  // The scene's meshes: the generators emit unshared vertices, so a big
-  // scene is split at lot boundaries into pieces under the renderer's
-  // buffer guard (opaque pieces first, then foliage).
+//
+// The scene's draw ranges (one per block, three levels per tower) become
+// the units of drawing: a range is culled by the camera frustum, a level
+// group draws the level its distance picks, and shadows come from the
+// coarsest level (WP5).
+struct CityUploadData {
   struct Piece {
-    std::uint32_t mesh{0};
+    std::vector<render::Rhi::CityVertex> vertices;
+    std::vector<std::uint32_t> indices;
     bool foliage{false};
-    std::uint32_t triangles{0};
     float centre[3]{0.0f, 0.0f, 0.0f};  // bounding sphere relative to the origin
     float radius{0.0f};
   };
-  std::vector<Piece> pieces;
-  bool drawable() const { return !pieces.empty(); }
-  double origin[3]{0.0, 0.0, 0.0};  // planet-local metres of the scene's (0, datum, 0)
+  struct Range {
+    std::uint32_t piece{0};
+    std::uint32_t first{0};  // index offset inside the piece
+    std::uint32_t count{0};
+    float centre[3]{0.0f, 0.0f, 0.0f};  // relative to the origin (planet frame)
+    float radius{0.0f};                 // 0 = unbounded
+    int lod_group{-1};
+    int lod_level{0};
+    float lod_max_distance{1e30f};
+  };
   struct Light {
     double position[3];
     float radius;
     float color[3];
     float intensity;
   };
+  std::vector<Piece> pieces;
+  std::vector<Range> ranges;
   std::vector<Light> lights;  // planet-local
-  std::vector<city::DrawRange> draws;
+  double origin[3]{0.0, 0.0, 0.0};
   std::uint32_t triangles{0};
+};
+
+struct CityUpload {
+  struct Piece {
+    std::uint32_t mesh{0};
+    bool foliage{false};
+    std::uint32_t triangles{0};
+  };
+  std::vector<Piece> pieces;
+  std::vector<CityUploadData::Range> ranges;
+  bool drawable() const { return !pieces.empty(); }
+  double origin[3]{0.0, 0.0, 0.0};  // planet-local metres of the scene's (0, datum, 0)
+  using Light = CityUploadData::Light;
+  std::vector<Light> lights;  // planet-local
+  std::uint32_t triangles{0};
+};
+
+// Per-frame drawing statistics.
+struct CityDrawStats {
+  std::size_t resident_triangles{0};
+  std::size_t drawn_triangles{0};
+  std::size_t shadow_triangles{0};
+  std::size_t items{0};
 };
 
 // The renderer's copy of the city material table (once per material set).
 void upload_city_materials(render::Rhi& rhi, const std::vector<city::MaterialDesc>& materials);
 
-// Uploads a scene placed in `frame` at `datum_m` above the nominal radius.
+// CPU half of an upload (safe on a worker): the scene placed in `frame`
+// at `datum_m` above the nominal radius, split into pieces under the
+// renderer's buffer guard at range boundaries.
+CityUploadData prepare_city_upload(const city::Scene& scene, const gen::SiteFrame& frame, double datum_m);
+// GPU half: creates the meshes.
+CityUpload commit_city_upload(render::Rhi& rhi, CityUploadData&& data);
+// Both halves.
 CityUpload upload_city_scene(render::Rhi& rhi, const city::Scene& scene, const gen::SiteFrame& frame,
                              double datum_m);
 void release_city_upload(render::Rhi& rhi, CityUpload* upload);
 
-// Draw items (mode 8) for a frame; camera_pos in planet-local metres.
+// Draw items (mode 8) for a frame: one per visible range at its level;
+// camera_pos in planet-local metres. Shadows use the coarsest level.
 void draw_city_upload(const CityUpload& upload, const render::Vec3& camera_pos,
-                      const render::Mat4& view_projection, std::vector<render::Rhi::DrawItem>* items);
+                      const render::Mat4& view_projection, std::vector<render::Rhi::DrawItem>* items,
+                      CityDrawStats* stats = nullptr);
 // The frame's point lights, camera-relative, nearest first (at most 64).
 void city_lights_for_frame(const CityUpload& upload, const render::Vec3& camera_pos, bool night,
                            std::vector<render::Rhi::CityLight>* out);

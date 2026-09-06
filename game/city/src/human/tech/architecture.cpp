@@ -135,9 +135,26 @@ LotBuildResult TechArchitecture::build_lot(Scene& sc, const LotInput& lot, Rng r
     // A plaza floor over the lot, then the tower.
     Emit floor(&sc.opaque, fm.floor);
     floor.polygon(lot.footprint, lot.ground_y + 0.01f, true);
-    build_tower(sc, spec, lot.centre, lot.ground_y, rng.child(8), detail);
     if (detail >= 1 && lot.style.ornament > 0.2f) {
       build_hedge_ring(sc, lot.footprint, 1.5f, 0.8f, 0.8f, lot.ground_y, 20.0f, rng);
+    }
+    const Rng tr = rng.child(8);
+    if (detail >= 2) {
+      // Three levels of the same tower in one group, switched by the
+      // camera's distance (200 m, 500 m): fins, mullions and lattice
+      // members below a pixel alias into moire whenever the camera moves.
+      const int group = sc.lod_groups++;
+      const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
+      const float switch_m[3] = {200.0f, 500.0f, 1e30f};
+      for (int level = 0; level < 3; ++level) {
+        const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
+        build_tower(sc, spec, lot.centre, lot.ground_y, tr, 2 - level);
+        sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
+                          Vec3{lot.centre.x, lot.ground_y + height * 0.5f, lot.centre.y}, height * 0.5f + inradius + 2.0f,
+                          group, level, switch_m[level]);
+      }
+    } else {
+      build_tower(sc, spec, lot.centre, lot.ground_y, tr, detail);
     }
     out.tower = true;
     out.built = true;

@@ -4,6 +4,7 @@
 #include "core/time/world_clock.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -148,6 +149,10 @@ std::unique_ptr<CivModifier> build_civ_modifier(const core::Key& body_entity, ge
 
 void release_civ_meshes(CivAnchor* civ, render::Rhi* rhi) {
   if (civ == nullptr) return;
+  if (civ->pending.active && civ->pending.future.valid()) {
+    civ->pending.future.wait();
+    civ->pending.active = false;
+  }
   for (auto& entry : civ->meshes) {
     if (entry.mesh != 0) {
       rhi->destroy_mesh(entry.mesh);
@@ -294,8 +299,31 @@ void draw_ecumenopolis(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField
 void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& field,
                     const render::Vec3& player_pos, const render::Vec3& camera_pos,
                     const render::Mat4& view_projection,
-                    std::vector<render::Rhi::DrawItem>* items) {
+                    std::vector<render::Rhi::DrawItem>* items, CityDrawStats* city_stats) {
   if (civ == nullptr) return;
+  // A finished worker build: commit its meshes to the entry.
+  if (civ->pending.active && civ->pending.future.valid() &&
+      civ->pending.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    CityUploadData data = civ->pending.future.get();
+    civ->pending.active = false;
+    if (civ->pending.site_index < civ->meshes.size()) {
+      CivAnchor::SiteMeshEntry& entry = civ->meshes[civ->pending.site_index];
+      if (!civ->city_materials) {
+        upload_city_materials(*rhi, civ->pending.materials);
+        civ->city_materials = true;
+      }
+      release_city_upload(*rhi, &entry.city);
+      entry.city = commit_city_upload(*rhi, std::move(data));
+      entry.city_detail = civ->pending.detail;
+      entry.city_focus_x = civ->pending.focus_x;
+      entry.city_focus_y = civ->pending.focus_y;
+      const gen::Site& site = civ->sites->sites()[civ->pending.site_index];
+      const city::SiteBuildStats& stats = civ->pending.stats;
+      std::printf("city: site %u (%s) detail %d: %u lots (%u towers, %u standards, %u key), %u triangles, %zu ranges\n",
+                  site.province, gen::to_string(static_cast<gen::SettlementTier>(site.tier)), entry.city_detail,
+                  stats.lots, stats.towers, stats.standards, stats.key_buildings, stats.triangles, entry.city.ranges.size());
+    }
+  }
   if (civ->ecumenopolis != nullptr) {
     draw_ecumenopolis(civ, rhi, field, player_pos, camera_pos, view_projection, items);
     return;
@@ -351,9 +379,9 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
       const bool refocus_city = site.radius_m > focus_radius &&
                                 (std::fabs(fx - entry.city_focus_x) > 0.5 * focus_radius ||
                                  std::fabs(fy - entry.city_focus_y) > 0.5 * focus_radius);
-      if (entry.city_detail != detail || refocus_city) {
-        if (rebuilt < 1) {  // one scene per frame; the previous upload draws meanwhile
-          ++rebuilt;
+      const bool pending_here = civ->pending.active && civ->pending.site_index == i;
+      if ((entry.city_detail != detail || refocus_city) && !civ->pending.active) {
+        {
           if (entry.mesh != 0) {
             rhi->destroy_mesh(entry.mesh);
             entry.mesh = 0;
@@ -383,24 +411,29 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
             bp.focus_y = fy;
             bp.focus_radius_m = focus_radius;
           }
-          city::Scene scene;
-          city::SiteBuildStats stats;
-          city::build_site_scene(*civ->sites, site, field, bp, &scene, &stats);
-          if (!civ->city_materials) {
-            upload_city_materials(*rhi, scene.materials);
-            civ->city_materials = true;
-          }
-          release_city_upload(*rhi, &entry.city);
-          entry.city = upload_city_scene(*rhi, scene, site.frame, site.datum_m);
-          entry.city_detail = detail;
-          entry.city_focus_x = fx;
-          entry.city_focus_y = fy;
-          std::printf("city: site %u (%s) detail %d: %u lots (%u towers, %u standards, %u key), %u triangles\n",
-                      site.province, gen::to_string(static_cast<gen::SettlementTier>(site.tier)), detail,
-                      stats.lots, stats.towers, stats.standards, stats.key_buildings, stats.triangles);
+          // The build and the vertex conversion on a worker; the field and
+          // the site field are immutable and shared with the chunk workers.
+          CivAnchor::PendingCity& pend = civ->pending;
+          pend.site_index = static_cast<std::uint32_t>(i);
+          pend.detail = detail;
+          pend.focus_x = fx;
+          pend.focus_y = fy;
+          pend.active = true;
+          const gen::SiteField* sites_ptr = civ->sites.get();
+          const gen::Site* site_ptr = &site;
+          const gen::TerrainField* field_ptr = &field;
+          city::SiteBuildStats* stats_ptr = &pend.stats;
+          std::vector<city::MaterialDesc>* materials_ptr = &pend.materials;
+          pend.future = std::async(std::launch::async, [sites_ptr, site_ptr, field_ptr, bp, stats_ptr, materials_ptr]() {
+            city::Scene scene;
+            city::build_site_scene(*sites_ptr, *site_ptr, *field_ptr, bp, &scene, stats_ptr);
+            *materials_ptr = scene.materials;
+            return prepare_city_upload(scene, site_ptr->frame, site_ptr->datum_m);
+          });
         }
       }
-      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, items);
+      (void)pending_here;
+      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, items, city_stats);
       if (entry.mesh != 0) {
         CivAnchor::TileEntry as_tile;
         as_tile.mesh = entry.mesh;

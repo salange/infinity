@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include "catalog.hpp"
 #include "city.hpp"
 #include "materials.hpp"
 #include "rng.hpp"
@@ -17,6 +18,14 @@ Scene generate_scene(const SceneParams& params) {
   sc.materials = make_materials();
   Rng root = root_rng(params.seed);
   set_far_patterns(params.far_patterns);
+  if (!params.asset.empty()) {
+    std::string error;
+    if (!generate_asset(sc, params.asset, root.child(300), params.detail, &error)) {
+      std::fprintf(stderr, "asset: %s\n", error.c_str());
+      std::exit(2);
+    }
+    return sc;
+  }
   if (params.showcase) {
     generate_showcase(sc, root.child(200), params.showcase_detail);
     sc.city_size = "showcase";

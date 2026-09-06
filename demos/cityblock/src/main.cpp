@@ -14,6 +14,7 @@
 #include <string>
 
 #include "camera.hpp"
+#include "catalog.hpp"
 #include "gpu.hpp"
 #include "ibl.hpp"
 #include "renderer.hpp"
@@ -60,6 +61,8 @@ struct Args {
   float sweep_step{0.03f};
   std::string sweep_out{"sweep"};
   int sweep_dir{0};  // 0 right, 1 forward, 2 down
+  std::string asset;  // --asset KIND:NAME[;key=value] (catalog mode); "list" prints the catalog
+  int detail{2};      // --detail L: the level the asset (or showcase) is built at
 };
 
 bool parse_vec3(const char* s, cb::Vec3* v) {
@@ -105,6 +108,8 @@ Args parse(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--bench")) a.bench = std::atoi(next("--bench"));
     else if (!std::strcmp(argv[i], "--stress")) a.stress = std::atoi(next("--stress"));
     else if (!std::strcmp(argv[i], "--showcase")) a.showcase = true;
+    else if (!std::strcmp(argv[i], "--asset")) a.asset = next("--asset");
+    else if (!std::strcmp(argv[i], "--detail")) a.detail = std::atoi(next("--detail"));
     else if (!std::strcmp(argv[i], "--no-pattern")) a.no_pattern = true;
     else if (!std::strcmp(argv[i], "--sweep-blur")) a.sweep_blur = std::atoi(next("--sweep-blur"));
     else if (!std::strcmp(argv[i], "--showcase-detail")) a.showcase_detail = std::atoi(next("--showcase-detail"));
@@ -191,6 +196,12 @@ int main(int argc, char** argv) {
   sp.showcase = args.showcase;
   sp.showcase_detail = args.showcase_detail;
   sp.far_patterns = !args.no_pattern;
+  sp.asset = args.asset;
+  sp.detail = args.detail;
+  if (args.asset == "list") {
+    std::printf("%s", cb::asset_catalog_text().c_str());
+    return 0;
+  }
   cb::Scene scene = cb::generate_scene(sp);
   std::printf("  city: %s, radius %.0f m, %d blocks, %d towers, %d standard buildings, %d plazas\n", scene.city_size.c_str(),
               scene.city_radius, scene.stats_blocks, scene.stats_towers, scene.stats_standards, scene.stats_plazas);

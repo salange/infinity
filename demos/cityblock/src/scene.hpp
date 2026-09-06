@@ -19,6 +19,7 @@ struct SceneParams {
   int showcase_detail{2};
   bool far_patterns{true};  // analytic facade patterns at the far detail levels  // detail level the showcase towers are built at (-1 far shell .. 2 full)
   int detail{2};  // 0 coarse … 2 full
+  std::string asset;  // catalog mode: one building or prop (catalog.hpp), empty = the city
 };
 
 Scene generate_scene(const SceneParams& params);

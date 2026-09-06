@@ -514,6 +514,14 @@ int main(int argc, char** argv) {
   bool no_ssao = false;        // --no-ssao / --no-shadows / --no-taa: renderer feature toggles
   bool no_shadows = false;
   bool no_taa = false;
+  // T0022 B.2: the performance options (each a runtime toggle, see the
+  // F-keys below): GPU occlusion culling, AO at full instead of half
+  // resolution, the far cascades at half rate, the far-cascade LOD.
+  bool no_occlusion = false;
+  bool ssao_full = false;
+  bool shadow_half_rate = false;
+  bool shadow_far_lod = false;
+  int stress_frames = 0;       // --stress N: recreate the render targets every frame N times, then exit
   int sweep_frames = 0;        // --sweep N: temporal-artifact analysis (the demo's tool)
   double sweep_step = 0.03;    // --sweep-step m
   std::string sweep_out = "sweep";  // --sweep-out name
@@ -583,6 +591,16 @@ int main(int argc, char** argv) {
       no_shadows = true;
     } else if (std::strcmp(argv[i], "--no-taa") == 0) {
       no_taa = true;
+    } else if (std::strcmp(argv[i], "--no-occlusion") == 0) {
+      no_occlusion = true;
+    } else if (std::strcmp(argv[i], "--ssao-full") == 0) {
+      ssao_full = true;
+    } else if (std::strcmp(argv[i], "--shadow-half-rate") == 0) {
+      shadow_half_rate = true;
+    } else if (std::strcmp(argv[i], "--shadow-far-lod") == 0) {
+      shadow_far_lod = true;
+    } else if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
+      stress_frames = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--clock-offset-s") == 0 && i + 1 < argc) {
       // Shift the world clock (planet rotation, orbits): capture aid to
       // put a site into daylight. A per-save constant offset is exactly
@@ -1287,6 +1305,7 @@ int main(int argc, char** argv) {
                      AddrHash>
       pending_ready;
   std::vector<inf::render::Rhi::DrawItem> items;
+  std::vector<inf::render::Rhi::CityRange> city_ranges;  // T0022: the ranges the mode-8 items refer to
 
   // --- far-view planet textures (T0016) --------------------------------
   // A background worker bakes one (height, albedo) cube-map pair per
@@ -2382,6 +2401,7 @@ int main(int argc, char** argv) {
     };
 
     items.clear();
+    city_ranges.clear();
     items.reserve(loaded.size() + player.beams().size() + 8);
 
     // --- sky dome (mode 4): analytic atmosphere while inside the band ---
@@ -2429,15 +2449,18 @@ int main(int argc, char** argv) {
       }
     }
     inf::app::CityDrawStats city_stats;
+    inf::app::CityDrawOptions city_options;
+    city_options.fine_ranges = !no_occlusion;
+    city_options.shadow_far_lod = shadow_far_lod;
     // T0020: settlement mass models of the anchor body.
     if (show_surface && anchor->civ != nullptr && !city_active) {
       anchor->civ->city_enabled = !no_city;
       inf::app::draw_civ_sites(anchor->civ.get(), rhi.get(), *anchor->field, to_render(player.position()),
-                               camera_pos, view_projection, &items, &city_stats);
+                               camera_pos, view_projection, city_options, &items, &city_ranges, &city_stats);
     }
     // T0021: city scenes through the city pipeline.
     if (show_surface && city_active) {
-      inf::app::draw_city_upload(city_upload, camera_pos, view_projection, &items, &city_stats);
+      inf::app::draw_city_upload(city_upload, camera_pos, view_projection, city_options, &items, &city_ranges, &city_stats);
     }
     // Site beacons: a light beam over every settlement, its height and
     // colour by tier, its width a few pixels at any distance so it reads
@@ -3405,6 +3428,9 @@ int main(int argc, char** argv) {
         const RVec3 shift = camera_pos - city_prev_camera;
         const Mat4 prev_rel = inf::render::mul(city_prev_view_proj, inf::render::translate(shift));
         std::memcpy(frame_params.prev_view_proj, prev_rel.m, sizeof(prev_rel.m));
+        frame_params.camera_delta[0] = static_cast<float>(shift.x);
+        frame_params.camera_delta[1] = static_cast<float>(shift.y);
+        frame_params.camera_delta[2] = static_cast<float>(shift.z);
         city_prev_view_proj = view_projection;
         city_prev_camera = camera_pos;
       }
@@ -3432,6 +3458,16 @@ int main(int argc, char** argv) {
       city_settings.ssao = !no_ssao;
       city_settings.shadows = !no_shadows;
       city_settings.taa = !no_taa;
+      city_settings.occlusion = !no_occlusion;
+      city_settings.ssao_half = !ssao_full;
+      city_settings.shadow_half_rate = shadow_half_rate;
+      city_settings.shadow_far_lod = shadow_far_lod;
+      if (stress_frames > 0) {
+        // --stress: flip the size-dependent options every frame so the
+        // targets are recreated N times (the leak regression of T0022 C.3).
+        city_settings.ssao_half = (frame & 1) != 0;
+        city_settings.occlusion = (frame & 2) != 0;
+      }
       rhi->set_city_settings(city_settings);
       {
         std::vector<inf::render::Rhi::CityLight> lights;
@@ -3460,7 +3496,14 @@ int main(int argc, char** argv) {
                      static_cast<int>(player.mode()));
       }
     }
+    frame_params.city_ranges = city_ranges.data();
+    frame_params.city_range_count = city_ranges.size();
     rhi->render_frame(frame_params, items.data(), items.size());
+    if (stress_frames > 0 && frame >= static_cast<long>(stress_frames)) {
+      std::printf("stress: %d target recreations survived\n", stress_frames);
+      std::fflush(stdout);
+      break;
+    }
 
     if (bench_frames > 0 && frame >= sweep_warmup && script_pc >= script.size() && script_wait <= 0.0) {
       // Frame time from the wall clock around whole frames (the GPU is
@@ -3476,10 +3519,13 @@ int main(int argc, char** argv) {
       }
       if (++bench_count > bench_frames) {
         const double ms = (now_s - bench_start) / bench_frames * 1000.0;
-        std::printf("bench: %d frames, %.2f ms/frame, %dx%d, city triangles %zu resident / %zu drawn / %zu shadow in %zu ranges, %zu chunks (%ld uploaded during), %zu items, ssao %d shadows %d taa %d\n",
+        const inf::render::Rhi::CityPassStats& ps = rhi->city_pass_stats();
+        std::printf("bench: %d frames, %.2f ms/frame, %dx%d, city triangles %zu resident / %zu drawn / %zu shadow in %zu ranges (%u main, %u occluded, %u shadow) over %zu meshes, %zu chunks (%ld uploaded during), %zu items, ssao %d%s shadows %d%s%s taa %d occlusion %d\n",
                     bench_frames, ms, state.width, state.height, city_stats.resident_triangles, city_stats.drawn_triangles,
-                    city_stats.shadow_triangles, city_stats.items, loaded.size(), chunk_uploads - bench_uploads_start,
-                    items.size(), no_ssao ? 0 : 1, no_shadows ? 0 : 1, no_taa ? 0 : 1);
+                    city_stats.shadow_triangles, city_stats.ranges, ps.ranges_main, ps.ranges_occluded, ps.ranges_shadow, city_stats.items,
+                    loaded.size(), chunk_uploads - bench_uploads_start, items.size(), no_ssao ? 0 : 1, ssao_full ? "" : " (half)",
+                    no_shadows ? 0 : 1, shadow_half_rate ? " (half rate)" : "", shadow_far_lod ? " (far lod)" : "", no_taa ? 0 : 1,
+                    no_occlusion ? 0 : 1);
         std::fflush(stdout);
         break;
       }

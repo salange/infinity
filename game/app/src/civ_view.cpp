@@ -298,8 +298,9 @@ void draw_ecumenopolis(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField
 
 void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& field,
                     const render::Vec3& player_pos, const render::Vec3& camera_pos,
-                    const render::Mat4& view_projection,
-                    std::vector<render::Rhi::DrawItem>* items, CityDrawStats* city_stats) {
+                    const render::Mat4& view_projection, const CityDrawOptions& options,
+                    std::vector<render::Rhi::DrawItem>* items, std::vector<render::Rhi::CityRange>* ranges,
+                    CityDrawStats* city_stats) {
   if (civ == nullptr) return;
   // A finished worker build: commit its meshes to the entry.
   if (civ->pending.active && civ->pending.future.valid() &&
@@ -433,7 +434,7 @@ void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& f
         }
       }
       (void)pending_here;
-      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, items, city_stats);
+      if (entry.city.drawable()) draw_city_upload(entry.city, camera_pos, view_projection, options, items, ranges, city_stats);
       if (entry.mesh != 0) {
         CivAnchor::TileEntry as_tile;
         as_tile.mesh = entry.mesh;

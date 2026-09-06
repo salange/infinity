@@ -55,7 +55,8 @@ struct TowerSpec {
 };
 
 // Builds the tower at `centre` with its ground at `base_y`. detail: 2 full,
-// 1 near context (no mullion boxes, coarser members), 0 far context.
+// 1 near context (no mullion boxes, coarser members), 0 far context,
+// -1 the far shell (one quad per plan segment and a roof, beyond ~1.2 km).
 void build_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float base_y, Rng rng, int detail);
 
 // Named families (the hero buildings), with their parameters exposed.

@@ -41,21 +41,30 @@ class Rhi {
   std::uint32_t create_mesh_mat(const float* vertices, std::size_t float_count);
   void destroy_mesh(std::uint32_t mesh);
 
-  // --- city meshes (T0021) ---------------------------------------------
-  // Indexed meshes in the city vertex layout (68 bytes: position, normal,
-  // tangent + handedness, metric uv, material id, aux = facade-local
-  // metres, element random, baked occlusion), drawn by mode-8 items
+  // --- city meshes (T0021, T0022) --------------------------------------
+  // Indexed meshes in the packed 32-byte city vertex layout (T0022 B.1,
+  // the demo's layout so shaders can be shared): position f32x3,
+  // octahedral normal snorm16x2, octahedral tangent snorm16x2, metric uv
+  // f16x2, packed bytes (material lo, hi, element random, baked
+  // occlusion in 7 bits + the tangent sign bit), facade-local metres
+  // unorm16x2 in units of 655.35 m (1 cm steps). Drawn by mode-8 items
   // through the city PBR pipeline (engine/render/src/city_shader.hpp).
   // Positions are relative to the item's origin (DrawItem::aux carries
   // the camera-relative origin), like terrain chunks.
   struct CityVertex {
     float position[3];
-    float normal[3];
-    float tangent[4];
-    float uv[2];
-    std::uint32_t material;
-    float aux[4];
+    std::int16_t normal_oct[2];
+    std::int16_t tangent_oct[2];
+    std::uint16_t uv_half[2];
+    std::uint8_t packed[4];
+    std::uint16_t aux_unorm[2];
   };
+  static_assert(sizeof(CityVertex) == 32, "the packed city vertex is 32 bytes");
+  // Packs one vertex: unit normal and tangent (xyz + handedness w), uv,
+  // material id, aux = facade-local metres xy, element random z,
+  // occlusion w (1 = open).
+  static CityVertex pack_city_vertex(const float position[3], const float normal[3], const float tangent[4],
+                                     const float uv[2], std::uint32_t material, const float aux[4]);
   std::uint32_t create_city_mesh(const CityVertex* vertices, std::size_t vertex_count,
                                  const std::uint32_t* indices, std::size_t index_count);
   // The city material table (one entry per city material id): tint +
@@ -76,10 +85,47 @@ class Rhi {
     float color_int[4]{1.0f, 0.85f, 0.6f, 1.0f};
   };
   void set_city_lights(const CityLight* lights, std::size_t count);
+  // One draw range of a city mesh for a frame (T0022 B.1): an index span
+  // with a camera-relative bounding sphere (radius 0 = unbounded) and the
+  // passes it joins. A mode-8 item hands the renderer a span of these
+  // (FrameParams::city_ranges, DrawItem::city_range_first/count) instead
+  // of one item per range; every pass then issues one multi-draw
+  // indirect call per mesh from CPU-built arguments, and the GPU
+  // occlusion cull works on the ranges flagged for it.
+  struct CityRange {
+    std::uint32_t first{0};
+    std::uint32_t count{0};
+    float centre[3]{0.0f, 0.0f, 0.0f};
+    float radius{0.0f};
+    std::uint32_t flags{0};
+  };
+  enum : std::uint32_t {
+    kCityMain = 1u,      // the main pass and the prepass
+    kCityCastNear = 2u,  // shadow cascades 0 and 1
+    kCityCastFar = 4u,   // the far cascade
+    kCityOcclude = 8u,   // tested against the depth pyramid when occlusion culling is on
+  };
+  // Per-frame counts of the city draw path.
+  struct CityPassStats {
+    std::uint32_t ranges_main{0};
+    std::uint32_t ranges_occluded{0};  // of ranges_main, culled by the depth pyramid (read back with a delay)
+    std::uint32_t ranges_shadow{0};
+    std::uint32_t multi_draws{0};
+  };
+  const CityPassStats& city_pass_stats() const;
   struct CitySettings {
     bool shadows{true};
     bool ssao{true};
     bool taa{true};
+    // Performance options (T0022 B.2), each recreating its targets at
+    // runtime: GPU occlusion culling against the depth pyramid of this
+    // frame's prepass; AO at half resolution; the two far shadow
+    // cascades refit and redrawn on alternating frames; the far cascade
+    // cast by tower shells only, skipping bounded ranges beyond 350 m.
+    bool occlusion{true};
+    bool ssao_half{true};
+    bool shadow_half_rate{false};
+    bool shadow_far_lod{false};
     float ao_strength{2.0f};
     float night{0.0f};        // 0 day .. 1 night (lit rooms, lamps, night-only emissive)
     float ibl_intensity{0.35f};
@@ -167,6 +213,10 @@ class Rhi {
     // draws the whole mesh.
     std::uint32_t first_index{0};
     std::uint32_t index_count{0};
+    // Mode 8 (T0022): a span of FrameParams::city_ranges drawn instead of
+    // the single range above (count 0 = the single range).
+    std::uint32_t city_range_first{0};
+    std::uint32_t city_range_count{0};
     // T0021: casts shadows and joins the depth/normal prepass (terrain
     // chunks and city meshes; never the planet impostors or glows).
     bool shadow_caster = false;
@@ -222,6 +272,12 @@ class Rhi {
     bool have_view_proj{false};
     float view_proj[16]{};
     float prev_view_proj[16]{};
+    // T0022: the camera's move since the previous frame (planet-local
+    // metres) — the persisted shadow cascades are re-expressed by it.
+    float camera_delta[3]{0.0f, 0.0f, 0.0f};
+    // T0022: the ranges the mode-8 items refer to (valid for this call).
+    const CityRange* city_ranges{nullptr};
+    std::size_t city_range_count{0};
   };
 
   // Clears, draws the items (sun-lit terrain, unlit overlays, star

@@ -98,8 +98,9 @@ std::unique_ptr<CivAnchor> build_civ_anchor(const core::Seed128& seed,
 // the camera's.
 void draw_civ_sites(CivAnchor* civ, render::Rhi* rhi, const gen::TerrainField& field,
                     const render::Vec3& player_pos, const render::Vec3& camera_pos,
-                    const render::Mat4& view_projection,
-                    std::vector<render::Rhi::DrawItem>* items, CityDrawStats* city_stats = nullptr);
+                    const render::Mat4& view_projection, const CityDrawOptions& options,
+                    std::vector<render::Rhi::DrawItem>* items, std::vector<render::Rhi::CityRange>* ranges,
+                    CityDrawStats* city_stats = nullptr);
 
 // Releases the meshes (on re-anchoring).
 void release_civ_meshes(CivAnchor* civ, render::Rhi* rhi);

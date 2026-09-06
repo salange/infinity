@@ -449,6 +449,16 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
         }
         const std::uint32_t tris = (static_cast<std::uint32_t>(sc.opaque.indices.size()) - lot_first) / 3;
         ++st.lots;
+        if (!r.tower) {
+          // One culling range per building (T0022 B.1): tight enough for
+          // occlusion culling to bite; the block stays the coarse range.
+          Vec2 flo, fhi;
+          plan_bounds(in.footprint, &flo, &fhi);
+          const float h = lot.height_budget_m + 3.0f;
+          const Vec2 fc = (flo + fhi) * 0.5f;
+          const float rad = std::sqrt(0.25f * ((fhi.x - flo.x) * (fhi.x - flo.x) + (fhi.y - flo.y) * (fhi.y - flo.y)) + 0.25f * h * h) + 3.0f;
+          sc.register_fine(lot_first, static_cast<std::uint32_t>(sc.opaque.indices.size()), Vec3{fc.x, in.ground_y + h * 0.5f, fc.y}, rad);
+        }
         if (r.tower) {
           ++st.towers;
           st.max_tower_triangles = std::max(st.max_tower_triangles, tris);
@@ -471,10 +481,10 @@ void build_site_scene(const gen::SiteField& sites, const gen::Site& site, const 
         std::uint32_t cursor = block_first;
         for (std::size_t d = draws_before; d < sc.draws.size(); ++d) {
           const DrawRange& r = sc.draws[d];
-          if (r.first > cursor) sc.register_range(cursor, r.first, centre, radius);
+          if (r.first > cursor) sc.register_range(cursor, r.first, centre, radius, -1, 0, 1e30f, true);
           cursor = std::max(cursor, r.first + r.count);
         }
-        if (cursor < block_end) sc.register_range(cursor, block_end, centre, radius);
+        if (cursor < block_end) sc.register_range(cursor, block_end, centre, radius, -1, 0, 1e30f, true);
       }
     }
   }

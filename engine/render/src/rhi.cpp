@@ -2054,6 +2054,44 @@ struct Rhi::Impl {
   CitySettings city_settings;
   float city_prev_view_proj[16] = {};
   bool passes_ran = false;  // shadows/AO produced this frame
+  // T0022 B.1: indirect draw arguments per pass slot (0 prepass, 1..3
+  // cascades, 4 main) for the mode-8 range lists — one buffer per slot,
+  // one multi-draw call per mesh over its own span. Buffers only grow,
+  // keyed to the count (never to a stale bind group).
+  static constexpr int kArgSlots = 5;
+  WGPUBuffer pass_args[kArgSlots] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+  std::uint32_t pass_args_capacity[kArgSlots] = {0, 0, 0, 0, 0};
+  struct ItemArgs {
+    std::uint32_t offset{0};  // in arguments (20 bytes each)
+    std::uint32_t count{0};
+  };
+  std::vector<ItemArgs> item_args[kArgSlots];
+  std::vector<std::uint32_t> args_cpu[kArgSlots];
+  CityPassStats pass_stats;
+  bool multi_draw = true;  // wgpu-native ships MultiDrawIndexedIndirect on every backend (not gated)
+  void ensure_args(int slot, std::uint32_t n) {
+    if (pass_args[slot] != nullptr && n <= pass_args_capacity[slot]) return;
+    if (pass_args[slot] != nullptr) wgpuBufferRelease(pass_args[slot]);
+    pass_args_capacity[slot] = std::max(n + 512u, pass_args_capacity[slot] * 2u);
+    WGPUBufferDescriptor bd{};
+    bd.label = sv("city-args");
+    bd.usage = WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst;
+    bd.size = static_cast<std::uint64_t>(pass_args_capacity[slot]) * 20ull;
+    pass_args[slot] = wgpuDeviceCreateBuffer(device, &bd);
+  }
+  // Records one item's span of a slot's arguments into `pass`.
+  void multi_draw_item(WGPURenderPassEncoder pass, int slot, std::size_t item) {
+    const ItemArgs& a = item_args[slot][item];
+    if (a.count == 0) return;
+    if (multi_draw) {
+      wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, pass_args[slot], static_cast<std::uint64_t>(a.offset) * 20ull, a.count);
+    } else {
+      for (std::uint32_t k = 0; k < a.count; ++k) {
+        wgpuRenderPassEncoderDrawIndexedIndirect(pass, pass_args[slot], static_cast<std::uint64_t>(a.offset + k) * 20ull);
+      }
+    }
+    ++pass_stats.multi_draws;
+  }
   // Readback (--sweep).
   bool readback_requested = false;
   bool readback_ready = false;
@@ -2542,10 +2580,11 @@ struct Rhi::Impl {
     wgsl.code = sv(kCityPostShader);
     WGPUShaderModule post_module = wgpuDeviceCreateShaderModule(device, &module_desc);
 
+    // The packed 32-byte city vertex (T0022 B.1; see rhi.hpp CityVertex).
     WGPUVertexAttribute attrs[6] = {};
-    const WGPUVertexFormat fmts[6] = {WGPUVertexFormat_Float32x3, WGPUVertexFormat_Float32x3, WGPUVertexFormat_Float32x4,
-                                      WGPUVertexFormat_Float32x2, WGPUVertexFormat_Uint32, WGPUVertexFormat_Float32x4};
-    const std::uint64_t offs[6] = {0, 12, 24, 40, 48, 52};
+    const WGPUVertexFormat fmts[6] = {WGPUVertexFormat_Float32x3, WGPUVertexFormat_Snorm16x2, WGPUVertexFormat_Snorm16x2,
+                                      WGPUVertexFormat_Float16x2, WGPUVertexFormat_Uint8x4, WGPUVertexFormat_Unorm16x2};
+    const std::uint64_t offs[6] = {0, 12, 16, 20, 24, 28};
     for (std::uint32_t i = 0; i < 6; ++i) {
       attrs[i].format = fmts[i];
       attrs[i].offset = offs[i];
@@ -2869,6 +2908,11 @@ struct Rhi::Impl {
       if (*b != nullptr) wgpuBufferRelease(*b);
       *b = nullptr;
     }
+    for (int slot = 0; slot < kArgSlots; ++slot) {
+      if (pass_args[slot] != nullptr) wgpuBufferRelease(pass_args[slot]);
+      pass_args[slot] = nullptr;
+      pass_args_capacity[slot] = 0;
+    }
     for (WGPUBindGroup* g : {&city_group, &city_caster_group, &terrain_pass_group}) {
       if (*g != nullptr) wgpuBindGroupRelease(*g);
       *g = nullptr;
@@ -3105,6 +3149,51 @@ void Rhi::destroy_mesh(std::uint32_t mesh) {
     impl_->meshes.erase(it);
   }
 }
+
+namespace {
+std::int16_t snorm16_of(float f) {
+  return static_cast<std::int16_t>(std::lround(std::min(1.0f, std::max(-1.0f, f)) * 32767.0f));
+}
+// Octahedral encoding of a unit vector into two snorm16 (the shader's
+// oct_decode inverts it).
+void oct_encode(const float* n, std::int16_t* ox, std::int16_t* oy) {
+  const float l1 = std::max(std::fabs(n[0]) + std::fabs(n[1]) + std::fabs(n[2]), 1e-9f);
+  float x = n[0] / l1;
+  float y = n[1] / l1;
+  if (n[2] < 0.0f) {
+    const float sx = x >= 0.0f ? 1.0f : -1.0f;
+    const float sy = y >= 0.0f ? 1.0f : -1.0f;
+    const float nx = (1.0f - std::fabs(y)) * sx;
+    const float ny = (1.0f - std::fabs(x)) * sy;
+    x = nx;
+    y = ny;
+  }
+  *ox = snorm16_of(x);
+  *oy = snorm16_of(y);
+}
+}  // namespace
+
+Rhi::CityVertex Rhi::pack_city_vertex(const float position[3], const float normal[3], const float tangent[4],
+                                      const float uv[2], std::uint32_t material, const float aux[4]) {
+  CityVertex p{};
+  p.position[0] = position[0];
+  p.position[1] = position[1];
+  p.position[2] = position[2];
+  oct_encode(normal, &p.normal_oct[0], &p.normal_oct[1]);
+  oct_encode(tangent, &p.tangent_oct[0], &p.tangent_oct[1]);
+  p.uv_half[0] = float_to_half(uv[0]);
+  p.uv_half[1] = float_to_half(uv[1]);
+  p.packed[0] = static_cast<std::uint8_t>(material & 0xffu);
+  p.packed[1] = static_cast<std::uint8_t>((material >> 8) & 0xffu);
+  p.packed[2] = static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, aux[2])) * 255.0f);
+  p.packed[3] = static_cast<std::uint8_t>(std::lround(std::min(1.0f, std::max(0.0f, aux[3])) * 127.0f)) |
+                (tangent[3] < 0.0f ? 0x80u : 0u);
+  p.aux_unorm[0] = static_cast<std::uint16_t>(std::min(1.0f, std::max(0.0f, aux[0] / 655.35f)) * 65535.0f);
+  p.aux_unorm[1] = static_cast<std::uint16_t>(std::min(1.0f, std::max(0.0f, aux[1] / 655.35f)) * 65535.0f);
+  return p;
+}
+
+const Rhi::CityPassStats& Rhi::city_pass_stats() const { return impl_->pass_stats; }
 
 std::uint32_t Rhi::create_city_mesh(const CityVertex* vertices, std::size_t vertex_count,
                                     const std::uint32_t* indices, std::size_t index_count) {
@@ -3510,6 +3599,63 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     wgpuQueueWriteBuffer(impl_->queue, impl_->taa_buf, 0, taa_block, sizeof(taa_block));
   }
 
+  // --- T0022 B.1: the range lists of the mode-8 items become indirect
+  // arguments per pass, culled here per range (prepass reach, cascade
+  // light box); the main pass takes every main range (the GPU occlusion
+  // cull rewrites its instance counts when it is on).
+  {
+    for (int slot = 0; slot < Impl::kArgSlots; ++slot) {
+      impl_->item_args[slot].assign(count, Impl::ItemArgs{});
+      impl_->args_cpu[slot].clear();
+    }
+    impl_->pass_stats = CityPassStats{};
+    const auto push = [&](int slot, std::size_t i, const CityRange& r) {
+      std::vector<std::uint32_t>& a = impl_->args_cpu[slot];
+      Impl::ItemArgs& ia = impl_->item_args[slot][i];
+      if (ia.count == 0) ia.offset = static_cast<std::uint32_t>(a.size() / 5);
+      a.push_back(r.count);
+      a.push_back(1);
+      a.push_back(r.first);
+      a.push_back(0);
+      a.push_back(0);
+      ++ia.count;
+    };
+    const auto in_cascade = [&](int c, const CityRange& r) {
+      if (r.radius <= 0.0f) return true;
+      const float* m = impl_->cascade_vp[c];
+      const float x = m[0] * r.centre[0] + m[4] * r.centre[1] + m[8] * r.centre[2] + m[12];
+      const float y = m[1] * r.centre[0] + m[5] * r.centre[1] + m[9] * r.centre[2] + m[13];
+      const float rr = r.radius / std::max(impl_->cascade_radius[c], 1e-3f);
+      return std::fabs(x) <= 1.0f + rr && std::fabs(y) <= 1.0f + rr;
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+      const DrawItem& it_ = items[i];
+      if (it_.mode != 8 || it_.overlay || it_.city_range_count == 0 || frame.city_ranges == nullptr) continue;
+      if (static_cast<std::size_t>(it_.city_range_first) + it_.city_range_count > frame.city_range_count) continue;
+      for (std::uint32_t k = 0; k < it_.city_range_count; ++k) {
+        const CityRange& r = frame.city_ranges[it_.city_range_first + k];
+        if ((r.flags & kCityMain) != 0u) {
+          push(4, i, r);
+          ++impl_->pass_stats.ranges_main;
+          const float d = std::sqrt(r.centre[0] * r.centre[0] + r.centre[1] * r.centre[1] + r.centre[2] * r.centre[2]);
+          if (r.radius <= 0.0f || d - r.radius < 1600.0f) push(0, i, r);
+        }
+        for (int c = 0; c < static_cast<int>(Impl::kCityCascades); ++c) {
+          const std::uint32_t mask = c < 2 ? kCityCastNear : kCityCastFar;
+          if ((r.flags & mask) == 0u || !in_cascade(c, r)) continue;
+          push(1 + c, i, r);
+          ++impl_->pass_stats.ranges_shadow;
+        }
+      }
+    }
+    for (int slot = 0; slot < Impl::kArgSlots; ++slot) {
+      const std::uint32_t n = static_cast<std::uint32_t>(impl_->args_cpu[slot].size() / 5);
+      if (n == 0) continue;
+      impl_->ensure_args(slot, n);
+      wgpuQueueWriteBuffer(impl_->queue, impl_->pass_args[slot], 0, impl_->args_cpu[slot].data(), n * 20ull);
+    }
+  }
+
   enum class Pass { Opaque, Blend, Additive };
   const auto draw_city = [&](WGPURenderPassEncoder pass) {
     if (!has_city) return;
@@ -3522,6 +3668,14 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       const auto it = impl_->meshes.find(items[i].mesh);
       if (it == impl_->meshes.end() || it->second.index_count == 0) continue;
       const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
+      if (items[i].city_range_count > 0) {
+        if (impl_->item_args[4][i].count == 0) continue;
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
+        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetIndexBuffer(pass, it->second.index_buffer, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+        impl_->multi_draw_item(pass, 4, i);
+        continue;
+      }
       wgpuRenderPassEncoderSetBindGroup(pass, 0, impl_->bind_group, 1, &offset);
       wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
       wgpuRenderPassEncoderSetIndexBuffer(pass, it->second.index_buffer, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
@@ -3613,7 +3767,13 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
       const DrawItem& it_ = items[i];
       if (it_.overlay || (it_.mode != 8 && it_.mode != 0)) continue;
       if (!(it_.shadow_caster || (prepass && it_.prepass))) continue;
-      if (!caster_visible(it_, cascade)) continue;
+      const int slot = prepass ? 0 : 1 + cascade;
+      const bool ranged = it_.mode == 8 && it_.city_range_count > 0;
+      if (ranged) {
+        if (impl_->item_args[slot][i].count == 0) continue;
+      } else if (!caster_visible(it_, cascade)) {
+        continue;
+      }
       const auto it = impl_->meshes.find(it_.mesh);
       if (it == impl_->meshes.end() || it->second.vertex_count == 0) continue;
       const std::uint32_t offset = static_cast<std::uint32_t>(i * kUniformStride);
@@ -3629,6 +3789,10 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         }
         wgpuRenderPassEncoderSetVertexBuffer(pass, 0, it->second.buffer, 0, WGPU_WHOLE_SIZE);
         wgpuRenderPassEncoderSetIndexBuffer(pass, it->second.index_buffer, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+        if (ranged) {
+          impl_->multi_draw_item(pass, slot, i);
+          continue;
+        }
         const std::uint32_t first = it_.first_index;
         std::uint32_t n = it_.index_count == 0 ? it->second.index_count : it_.index_count;
         if (first >= it->second.index_count) continue;

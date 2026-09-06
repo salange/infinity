@@ -107,14 +107,37 @@ fn hash33(p: vec3<f32>) -> vec3<f32> {
   return fract((q.xxy + q.yxx) * q.zyx);
 }
 
+// The packed 32-byte vertex (T0022 B.1): position f32x3, octahedral
+// normal snorm16x2, octahedral tangent snorm16x2, uv f16x2, packed bytes
+// (material lo, hi, element random, occlusion 7 bits + tangent sign
+// bit), facade coordinates unorm16x2 in units of 655.35 m (1 cm steps).
 struct VertexIn {
   @location(0) position: vec3<f32>,
-  @location(1) normal: vec3<f32>,
-  @location(2) tangent: vec4<f32>,
+  @location(1) normal_oct: vec2<f32>,
+  @location(2) tangent_oct: vec2<f32>,
   @location(3) uv: vec2<f32>,
-  @location(4) material: u32,
-  @location(5) aux: vec4<f32>,
+  @location(4) packed: vec4<u32>,
+  @location(5) aux_packed: vec2<f32>,
 };
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+  var v = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  if (v.z < 0.0) {
+    let sx = select(-1.0, 1.0, v.x >= 0.0);
+    let sy = select(-1.0, 1.0, v.y >= 0.0);
+    v = vec3<f32>((1.0 - abs(v.y)) * sx, (1.0 - abs(v.x)) * sy, v.z);
+  }
+  return normalize(v);
+}
+struct Unpacked { normal: vec3<f32>, tangent: vec4<f32>, material: u32, aux: vec4<f32> };
+fn unpack_vertex(in: VertexIn) -> Unpacked {
+  var o: Unpacked;
+  o.normal = oct_decode(in.normal_oct);
+  let sign = select(1.0, -1.0, (in.packed.w & 128u) != 0u);
+  o.tangent = vec4<f32>(oct_decode(in.tangent_oct), sign);
+  o.material = in.packed.x | (in.packed.y << 8u);
+  o.aux = vec4<f32>(in.aux_packed * 655.35, f32(in.packed.z) / 255.0, f32(in.packed.w & 127u) / 127.0);
+  return o;
+}
 struct VOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) world: vec3<f32>,     // camera-relative
@@ -128,17 +151,18 @@ struct VOut {
 
 @vertex fn vs_main(in: VertexIn) -> VOut {
   var o: VOut;
+  let v = unpack_vertex(in);
   var clip = u.mvp * vec4<f32>(in.position, 1.0);
   clip.x += cf.jitter.x * clip.w;
   clip.y += cf.jitter.y * clip.w;
   o.pos = clip;
   o.world = in.position + u.aux.xyz;
   o.local = in.position + u.extra.xyz;  // origin modulo the tile period
-  o.normal = in.normal;
-  o.tangent = in.tangent;
+  o.normal = v.normal;
+  o.tangent = v.tangent;
   o.uv = in.uv;
-  o.material = in.material;
-  o.aux = in.aux;
+  o.material = v.material;
+  o.aux = v.aux;
   return o;
 }
 
@@ -151,7 +175,7 @@ struct ShadowOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>
   var o: ShadowOut;
   o.pos = cascade.light_vp * vec4<f32>(in.position + u.aux.xyz, 1.0);
   o.uv = in.uv;
-  o.material = in.material;
+  o.material = in.packed.x | (in.packed.y << 8u);
   return o;
 }
 @fragment fn fs_shadow_foliage(in: ShadowOut) {
@@ -166,9 +190,9 @@ struct PreOut { @builtin(position) pos: vec4<f32>, @location(0) vnormal: vec3<f3
   clip.x += cf.jitter.x * clip.w;
   clip.y += cf.jitter.y * clip.w;
   o.pos = clip;
-  o.vnormal = (cf.view * vec4<f32>(in.normal, 0.0)).xyz;
+  o.vnormal = (cf.view * vec4<f32>(oct_decode(in.normal_oct), 0.0)).xyz;
   o.uv = in.uv;
-  o.material = in.material;
+  o.material = in.packed.x | (in.packed.y << 8u);
   return o;
 }
 @fragment fn fs_prepass(in: PreOut) -> @location(0) vec4<f32> {

@@ -73,10 +73,13 @@ namespace {
 void emit_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float ground_y, float inradius, Rng tr, int detail,
                 int finest) {
   if (detail >= 2) {
+    // Levels 0-2 are the real geometry (switched at 200 and 500 m), level
+    // 3 the far shell beyond 1.2 km (T0022 B.1); shadows come from the
+    // coarsest real level.
     const int group = sc.lod_groups++;
     const float height = spec.floor_h * static_cast<float>(spec.floors + spec.base_floors + 4);
-    const float switch_m[3] = {200.0f, 500.0f, 1e30f};
-    for (int level = std::clamp(finest, 0, 2); level < 3; ++level) {
+    const float switch_m[4] = {200.0f, 500.0f, 1200.0f, 1e30f};
+    for (int level = std::clamp(finest, 0, 2); level < 4; ++level) {
       const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
       build_tower(sc, spec, centre, ground_y, tr, 2 - level);
       sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
@@ -93,8 +96,8 @@ void emit_tower(Scene& sc, const TowerSpec& spec, Vec2 centre, float ground_y, f
 void emit_tower_group(Scene& sc, Rng gr, Vec2 centre, float rot, float ground_y, float inradius, int detail, int finest) {
   if (detail >= 2) {
     const int group = sc.lod_groups++;
-    const float switch_m[3] = {200.0f, 500.0f, 1e30f};
-    for (int level = std::clamp(finest, 0, 2); level < 3; ++level) {
+    const float switch_m[4] = {200.0f, 500.0f, 1200.0f, 1e30f};
+    for (int level = std::clamp(finest, 0, 2); level < 4; ++level) {
       const std::uint32_t first = static_cast<std::uint32_t>(sc.opaque.indices.size());
       build_tower_group(sc, gr, centre, rot, ground_y, 2 - level);
       sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),

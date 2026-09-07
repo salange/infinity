@@ -140,7 +140,8 @@ class Rhi {
   // over the body's height amplitude; material is RGBA8 albedo. This is
   // deliberately NOT a general texture system — one pair per resident
   // body plus a shared sampler.
-  std::uint32_t create_planet_texture(std::uint32_t face_size);
+  std::uint32_t create_planet_texture(std::uint32_t face_size, std::uint32_t cube_count = 1);
+  // cube_count > 1 reserves consecutive six-layer cubes for sky interpolation.
   // Full-layer upload of one cube face: height as raw IEEE half floats
   // (face_size^2), material as RGBA8 (face_size^2 * 4 bytes).
   void update_planet_face(std::uint32_t handle, std::uint32_t face,

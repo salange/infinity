@@ -105,3 +105,10 @@ cmake -B build-headless -DUNENDLICH_BUILD_APP=OFF
 
 Rule of the house: `core`/`gen`/`world`/`cli` never depend on a window,
 GPU, or engine. Rendering is a view of the world, not part of it.
+
+### Galaxy traversal
+
+Press **F6** in flight mode for a live 120-second tour through the current galaxy
+center. **F6** or **Escape** returns to the player. High-resolution views and
+resolved stars are generated ahead in a RAM buffer; a cancellable preparation
+view appears before departure. See [route, controls, and profiling](docs/galaxy-flythrough.md).

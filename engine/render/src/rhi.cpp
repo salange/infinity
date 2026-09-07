@@ -364,13 +364,21 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     // depth is forced just above the sky dome so terrain and planets
     // occlude stars but the dome never does. extra.xy = NDC per corner
     // unit (from the viewport size).
-    var clip = u.mvp * vec4<f32>(position, 0.0);
+    // Moving catalog positions are sample-relative light-years. Subtract the
+    // observer on the CPU in f64, then pass the small relative offset in aux.
+    var direction = position;
+    var flux = normal.z;
+    if (u.extra.z > 0.5) {
+      direction += u.aux.xyz;
+      flux *= min(dot(position, position) / max(dot(direction, direction), 0.01), 100.0) * u.color.a;
+    }
+    var clip = u.mvp * vec4<f32>(direction, 0.0);
     let corner = normal.xy;
     let half_len = max(max(abs(corner.x), abs(corner.y)), 1.0e-4);
     out.pos = vec4<f32>(clip.xy + corner * vec2<f32>(u.extra.x, u.extra.y) * clip.w,
                         clip.w * 3.0e-22, clip.w);
     out.opos = vec3<f32>(corner.x / half_len, corner.y / half_len, 0.0);
-    out.normal = vec3<f32>(normal.z, 0.0, 0.0);
+    out.normal = vec3<f32>(flux, 0.0, 0.0);
     out.weights = weights;
     return out;
   }
@@ -558,10 +566,17 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
   // by day the scattered blue washes it out via exposure, and in space
   // (density -> 0) the bake stands alone.
   let fuv = cube_face_uv(view);
-  let layer = i32(fuv.z);
-  let deep = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb *
+  let layer = i32(fuv.z) + i32(u.aux.x);
+  var deep = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb *
              textureSampleLevel(planet_height, planet_sampler, fuv.xy, layer, 0.0).r *
              u.extra.x;
+  // Mode 4: aux.xy select cube bases, extra.y blends decoded linear radiance.
+  if (u.extra.y > 0.0) {
+    let next_layer = i32(fuv.z) + i32(u.aux.y);
+    let next = textureSampleLevel(planet_material, planet_sampler, fuv.xy, next_layer, 0.0).rgb *
+               textureSampleLevel(planet_height, planet_sampler, fuv.xy, next_layer, 0.0).r * u.extra.x;
+    deep = mix(deep, next, u.extra.y);
+  }
   let space = vec3<f32>(0.00004, 0.00005, 0.0001);
   return deep + space + c * density;
 }
@@ -1175,6 +1190,7 @@ struct Rhi::Impl {
     WGPUTextureView material_view = nullptr;
     WGPUBindGroup group = nullptr;
     std::uint32_t size = 0;
+    std::uint32_t layers = 6;
   };
   WGPUBindGroupLayout tex_layout = nullptr;
   WGPUSampler planet_sampler = nullptr;
@@ -1408,13 +1424,14 @@ struct Rhi::Impl {
   std::unordered_map<std::uint32_t, PlanetTexEntry> planet_textures;
   std::uint32_t next_planet_tex_id = 1;
 
-  PlanetTexEntry make_planet_tex(std::uint32_t face_size) {
+  PlanetTexEntry make_planet_tex(std::uint32_t face_size, std::uint32_t cube_count = 1) {
     PlanetTexEntry entry;
     entry.size = face_size;
+    entry.layers = 6 * cube_count;
     WGPUTextureDescriptor desc{};
     desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
     desc.dimension = WGPUTextureDimension_2D;
-    desc.size = WGPUExtent3D{face_size, face_size, 6};
+    desc.size = WGPUExtent3D{face_size, face_size, entry.layers};
     desc.mipLevelCount = 1;
     desc.sampleCount = 1;
     desc.label = sv("planet-height");
@@ -1426,7 +1443,7 @@ struct Rhi::Impl {
     WGPUTextureViewDescriptor view_desc{};
     view_desc.dimension = WGPUTextureViewDimension_2DArray;
     view_desc.baseArrayLayer = 0;
-    view_desc.arrayLayerCount = 6;
+    view_desc.arrayLayerCount = entry.layers;
     view_desc.baseMipLevel = 0;
     view_desc.mipLevelCount = 1;
     view_desc.format = WGPUTextureFormat_R16Float;
@@ -3438,17 +3455,17 @@ void Rhi::set_city_lights(const CityLight* lights, std::size_t count) {
 
 void Rhi::set_city_settings(const CitySettings& settings) { impl_->city_settings = settings; }
 
-std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size) {
+std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size, std::uint32_t cube_count) {
   impl_->ensure_mesh_pipeline();  // layouts + sampler exist from here on
   const std::uint32_t id = impl_->next_planet_tex_id++;
-  impl_->planet_textures.emplace(id, impl_->make_planet_tex(face_size));
+  impl_->planet_textures.emplace(id, impl_->make_planet_tex(face_size, std::clamp(cube_count, 1U, 4U)));
   return id;
 }
 
 void Rhi::update_planet_face(std::uint32_t handle, std::uint32_t face,
                              const std::uint16_t* height_half, const std::uint8_t* rgba) {
   const auto it = impl_->planet_textures.find(handle);
-  if (it == impl_->planet_textures.end() || face >= 6) {
+  if (it == impl_->planet_textures.end() || face >= it->second.layers) {
     return;
   }
   impl_->write_planet_face(it->second, face, height_half, rgba);

@@ -52,6 +52,7 @@
 #include "world/edit_store.hpp"
 #include "gen/effective_field.hpp"
 #include "deep_sky_render.hpp"
+#include "galaxy_flythrough.hpp"
 
 namespace {
 
@@ -494,6 +495,8 @@ int main(int argc, char** argv) {
   const char* seed_text = "83";
   const char* type_text = nullptr;
   const char* diff_text = nullptr;
+  bool galaxy_demo = false;
+  const char* galaxy_profile = nullptr;
   bool map_demo = false;  // scripted M/Esc for headless smoke + captures
   bool windowed = false;  // default is fullscreen on the primary monitor
   const char* capture_text = nullptr;  // --capture <path.ppm>: PPM of the last frame
@@ -544,6 +547,10 @@ int main(int argc, char** argv) {
       spawn_altitude = std::strtod(argv[++i], nullptr);
     } else if (std::strcmp(argv[i], "--diff-file") == 0 && i + 1 < argc) {
       diff_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--galaxy-demo") == 0) {
+      galaxy_demo = true;
+    } else if (std::strcmp(argv[i], "--galaxy-profile") == 0 && i + 1 < argc) {
+      galaxy_profile = argv[++i];
     } else if (std::strcmp(argv[i], "--map-demo") == 0) {
       map_demo = true;
     } else if (std::strcmp(argv[i], "--windowed") == 0) {
@@ -1556,9 +1563,27 @@ int main(int argc, char** argv) {
     }
   };
 
+  bool f6_was_down = false;
+  std::printf("F6: 120-second galaxy fly-through; F6/Esc: return to player\n");
   long frame = 0;
   while (glfwWindowShouldClose(window) == GLFW_FALSE) {
     glfwPollEvents();
+    const bool f6_down = glfwGetKey(window, GLFW_KEY_F6) == GLFW_PRESS;
+    if (galaxy_demo || (f6_down && !f6_was_down && map_phase == MapPhase::Off)) {
+      const bool scripted = galaxy_demo;
+      galaxy_demo = false;
+      rhi->set_ring_enabled(false);
+      inf::app::run_galaxy_flythrough(window, *rhi, *hud, glow_mesh, *seed,
+          galaxy_params, state.width, state.height, galaxy_profile, capture_text);
+      rhi->set_ring_enabled(!release_mode);
+      last_time = world_clock.now();
+      glfwGetCursorPos(window, &last_mx, &last_my);
+      esc_was_down = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+      f6_was_down = glfwGetKey(window, GLFW_KEY_F6) == GLFW_PRESS;
+      if (scripted && galaxy_profile != nullptr) glfwSetWindowShouldClose(window, GLFW_TRUE);
+      continue;
+    }
+    f6_was_down = f6_down;
     upload_finished_bakes();
     if (materials.poll(*rhi)) {
       // Every tile is resident: re-bake the far views with the measured

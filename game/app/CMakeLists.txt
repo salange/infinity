@@ -1,5 +1,6 @@
 add_executable(game_app
   src/main.cpp
+  src/galaxy_flythrough.cpp
   src/civ_view.cpp
   src/city_render.cpp
   src/hud.cpp

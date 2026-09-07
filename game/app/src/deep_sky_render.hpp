@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -35,7 +36,9 @@ std::vector<float> build_star_field_mesh(const gen::GalaxyOctree& octree,
                                          const gen::Dir3& eye_m,
                                          double apparent_mag_limit,
                                          std::size_t max_stars,
-                                         StarCatalogStats* stats = nullptr);
+                                         StarCatalogStats* stats = nullptr, bool positions_ly = false);
+// positions_ly keeps sample-relative distances for per-frame parallax; the
+// default unit-direction catalog and its flux/material values are unchanged.
 
 // --- WP3/WP4/WP5: the diffuse deep-sky cube map ---------------------------
 // Line integrals of the ONE shared density model (stars emission, dust
@@ -47,6 +50,7 @@ std::vector<float> build_star_field_mesh(const gen::GalaxyOctree& octree,
 // material = chromaticity RGBA8. Face frame matches the shader's
 // cube_face_uv exactly.
 struct SkyView {
+  bool interplanetary_dust{true};
   gen::Dir3 eye_m;             // galactocentric bake position
   gen::Dir3 sun_dir;           // unit, planet -> star (galactic frame)
   gen::Dir3 ecliptic_normal;   // unit normal of the planet's orbital plane
@@ -60,6 +64,7 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
                             const gen::NebulaField& nebulae,
                             const gen::StarClusterField& clusters,
                             const core::Seed128& seed, const SkyView& view,
-                            std::uint32_t face_size, int thread_count);
+                            std::uint32_t face_size, int thread_count,
+                            const std::atomic<bool>* cancel = nullptr, bool diagnostics = true);
 
 }  // namespace inf::app

@@ -82,6 +82,7 @@ void saturate_tint(float c[3], float amount) {
 struct CatalogStar {
   V3 dir;
   double apparent_mag;
+  double distance_m;
   double temperature_k;
   float phase;
 };
@@ -138,6 +139,7 @@ void collect_cell(CatalogBuild& build, const gen::GalaxyOctree::CellId& cell) {
     CatalogStar out;
     out.dir = rel * (1.0 / d);
     out.apparent_mag = m_app;
+    out.distance_m = d;
     out.temperature_k = star.temperature_k.to_double();
     // Cheap decorrelated phase for atmospheric twinkle.
     const std::uint64_t h =
@@ -155,7 +157,7 @@ std::vector<float> build_star_field_mesh(const gen::GalaxyOctree& octree,
                                          const gen::Dir3& eye_m,
                                          double apparent_mag_limit,
                                          std::size_t max_stars,
-                                         StarCatalogStats* stats) {
+                                         StarCatalogStats* stats, bool positions_ly) {
   CatalogBuild build;
   build.octree = &octree;
   build.eye = to_v3(eye_m);
@@ -193,10 +195,11 @@ std::vector<float> build_star_field_mesh(const gen::GalaxyOctree& octree,
         static_cast<float>(static_cast<int>(tint[0] * 255.0f) * 65536 +
                            static_cast<int>(tint[1] * 255.0f) * 256 +
                            static_cast<int>(tint[2] * 255.0f));
+    const double radius = positions_ly ? star.distance_m / gen::kLightYearM : 1.0;
     for (const auto& corner : kCorners) {
       mesh.insert(mesh.end(),
-                  {static_cast<float>(star.dir.x), static_cast<float>(star.dir.y),
-                   static_cast<float>(star.dir.z), corner[0] * rel_size,
+                  {static_cast<float>(star.dir.x * radius), static_cast<float>(star.dir.y * radius),
+                   static_cast<float>(star.dir.z * radius), corner[0] * rel_size,
                    corner[1] * rel_size, static_cast<float>(flux), packed,
                    star.phase, 0.0f, 0.0f});
     }
@@ -340,7 +343,8 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
                             const gen::NebulaField& nebulae,
                             const gen::StarClusterField& clusters,
                             const core::Seed128& seed, const SkyView& view,
-                            std::uint32_t face_size, int thread_count) {
+                            std::uint32_t face_size, int thread_count,
+                            const std::atomic<bool>* cancel, bool diagnostics) {
   SkyBakeResult result;
   result.face_size = face_size;
   const std::size_t texels = static_cast<std::size_t>(face_size) * face_size;
@@ -613,7 +617,7 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
     std::vector<float> row_rgb(static_cast<std::size_t>(face_size) * 3);
     for (;;) {
       const int row = next_row.fetch_add(1);
-      if (row >= total_rows) {
+      if (row >= total_rows || (cancel != nullptr && cancel->load())) {
         return;
       }
       const int face = row / static_cast<int>(face_size);
@@ -711,7 +715,7 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
         // wedge hugging the arrival planet's orbital plane, brightening
         // toward the sun — and the gegenschein, its faint antisolar
         // counterglow. Both analytic in (elongation, ecliptic latitude).
-        {
+        if (view.interplanetary_dust) {
           const double cs = dot(dir, sun_dir);
           const double sin_beta = std::abs(dot(dir, ecl_normal));
           const double plane = std::exp(-5.0 * sin_beta);
@@ -772,7 +776,7 @@ SkyBakeResult bake_deep_sky(const gen::GalaxyDensity& density,
     th.join();
   }
   // Bring-up diagnostics (cheap, once per bake).
-  {
+  if (diagnostics) {
     float max_lum = 0.0f;
     double sum = 0.0;
     for (int face = 0; face < 6; ++face) {

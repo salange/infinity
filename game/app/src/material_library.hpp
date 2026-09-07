@@ -50,7 +50,7 @@ class MaterialLibrary {
   bool complete_{false};
 };
 
-// Where the assets live: --assets, INFINITY_ASSETS, <exe dir>/assets, or
+// Where the assets live: --assets, UNENDLICH_ASSETS, <exe dir>/assets, or
 // the source tree's assets/ directory (development convenience).
 std::string find_assets_dir(const char* override_dir, const char* argv0);
 

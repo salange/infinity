@@ -1,6 +1,8 @@
-# infinity-engine
+# unendlich engine
 
-Self-contained engine underneath the game "Infinity": deterministic
+See [naming and compatibility](../docs/renaming.md) for the 2026-09-07 rename.
+
+Self-contained engine underneath the game "unendlich": deterministic
 procedural-universe framework, world streaming machinery, and a thin GPU
 layer. Designed to become its own repository (included as a submodule)
 without changes — nothing in here includes or links anything outside
@@ -8,7 +10,7 @@ without changes — nothing in here includes or links anything outside
 
 | Library | Contents | Constraints |
 |---|---|---|
-| `engine-core` | det:: numerics (fixed-point, controlled reals, bit-exact trig), Philox keys, golden hashing, WorldTime/WorldClock, Kepler/ephemeris math, the InfinityTree framework (Address, Node, AxisView, materializer, InceptionStore) | headless, deterministic, no external deps |
+| `engine-core` | det:: numerics (fixed-point, controlled reals, bit-exact trig), Philox keys, golden hashing, WorldTime/WorldClock, Kepler/ephemeris math, the UnendlichTree framework (Address, Node, AxisView, materializer, InceptionStore) | headless, deterministic, no external deps |
 | `engine-world` | cube-sphere geometry, gradient noise, chunk grids, Transvoxel meshing, chunk/LOD streaming over a game-provided `ChunkSampler` | headless, depends on core |
 | `engine-render` | RHI on wgpu-native (Vulkan/Metal), render math | client-only |
 

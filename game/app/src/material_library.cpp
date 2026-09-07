@@ -262,8 +262,12 @@ std::string find_assets_dir(const char* override_dir, const char* argv0) {
   if (override_dir != nullptr && has_manifest(override_dir)) {
     return override_dir;
   }
-  if (const char* env = std::getenv("INFINITY_ASSETS"); env != nullptr && has_manifest(env)) {
+  if (const char* env = std::getenv("UNENDLICH_ASSETS"); env != nullptr && has_manifest(env)) {
     return env;
+  }
+  // Compatibility with installations configured before 2026-09-07.
+  if (const char* env = std::getenv("INFINITY_ASSETS"); env != nullptr && has_manifest(env)) {
+    return std::string(env);
   }
   if (argv0 != nullptr) {
     std::error_code ec;
@@ -275,9 +279,9 @@ std::string find_assets_dir(const char* override_dir, const char* argv0) {
       }
     }
   }
-#ifdef INFINITY_SOURCE_DIR
-  if (has_manifest(fs::path(INFINITY_SOURCE_DIR) / "assets")) {
-    return (fs::path(INFINITY_SOURCE_DIR) / "assets").string();
+#ifdef UNENDLICH_SOURCE_DIR
+  if (has_manifest(fs::path(UNENDLICH_SOURCE_DIR) / "assets")) {
+    return (fs::path(UNENDLICH_SOURCE_DIR) / "assets").string();
   }
 #endif
   return std::string();

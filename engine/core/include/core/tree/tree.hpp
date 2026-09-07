@@ -288,4 +288,7 @@ class InfinityTree {
   std::list<Address> lru_;  // front = most recent
 };
 
+// Current product name; preserves the existing type and binary interface.
+using UnendlichTree = InfinityTree;
+
 }  // namespace inf::core::tree

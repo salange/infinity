@@ -237,7 +237,7 @@ TEST_CASE("terrain: elevation gradient matches central difference (WP0)") {
 TEST_CASE("terrain: measured land fraction tracks the solved sea level (WP1)") {
   // The T0015 WP1 contract: the sea level is SOLVED from the macro
   // quantile, so measured land must track the drawn target. The wide
-  // 100-seed sweep lives in `infinity-cli macro-stats`; this is the
+  // 100-seed sweep lives in `unendlich-cli macro-stats`; this is the
   // in-tree canary.
   constexpr double kPi = 3.14159265358979323846;
   for (std::uint64_t seed : {3ULL, 7ULL, 0x83ULL, 0x2fULL, 21ULL, 55ULL}) {

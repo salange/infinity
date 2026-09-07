@@ -185,8 +185,8 @@ GeneratorRegistry make_registry() {
   return registry;
 }
 
-std::unique_ptr<core::tree::InfinityTree> make_tree(const core::Seed128& seed) {
-  return std::make_unique<core::tree::InfinityTree>(seed, kind::Universe, make_registry());
+std::unique_ptr<core::tree::UnendlichTree> make_tree(const core::Seed128& seed) {
+  return std::make_unique<core::tree::UnendlichTree>(seed, kind::Universe, make_registry());
 }
 
 core::tree::Address default_system_address() {

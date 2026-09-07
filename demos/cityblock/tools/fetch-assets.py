@@ -21,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(ROOT, "assets", "manifest.json")
 TEX_OUT = os.path.join(ROOT, "assets", "textures")
 SKY_OUT = os.path.join(ROOT, "assets", "sky")
-UA = {"User-Agent": "infinity-cityblock-fetch/1.0"}
+UA = {"User-Agent": "unendlich-cityblock-fetch/1.0"}
 MAP_FILES = {
     "Color": "color.jpg",
     "NormalGL": "normal.jpg",

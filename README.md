@@ -1,4 +1,6 @@
-# infinity
+# unendlich
+
+See [naming and compatibility](docs/renaming.md) for the 2026-09-07 rename.
 
 ![The galactic band rising over a night-side ocean, a moon hanging in the
 dust lanes — rendered live, generated from the seed](docs/deep-sky.png)
@@ -57,19 +59,19 @@ ctest --test-dir build
 
 Targets:
 
-- `app/infinity` — windowed app (wgpu-native: Vulkan on Linux/Windows,
+- `build/game/app/unendlich` (`game_app`) — windowed app (wgpu-native: Vulkan on Linux/Windows,
   Metal on macOS). Starts fullscreen on the primary monitor; `--windowed`
   keeps a 1280x720 window. `--frames N` renders N frames and exits
   (smoke testing).
-- `cli/infinity-cli` — headless tool (generation, hashing, determinism
+- `build/game/cli/unendlich-cli` (`game_cli`) — headless tool (generation, hashing, determinism
   checks). Never links window or GPU libraries.
-- `tests/infinity_tests` — unit tests (doctest, via ctest).
+- `build/game/tests/game_tests` and `build/engine/tests/engine_tests` — unit tests (doctest, via ctest).
 
 `ci/check.sh` runs the full local gauntlet: configure, build, lint gates,
 tests, smoke runs.
 
 `ci/package-mac.sh` (or `cmake --build build --target package-mac`) builds
-a standalone macOS distribution: a self-contained `Infinity.app` — binary,
+a standalone macOS distribution: a self-contained `unendlich.app` — binary,
 bundled wgpu-native library, icon — ad-hoc signed and wrapped in a
 drag-to-Applications DMG under `build-dist/`. Apple Silicon, macOS 12+;
 recipients install nothing else (first launch needs the usual
@@ -78,13 +80,13 @@ right-click → Open, since the build is not notarized).
 Surface tiles: `tools/fetch-textures.py` downloads the CC0 material sets
 listed in `assets/manifest.json` (ambientCG, ~250 MB) into `assets/textures/`
 (git-ignored). Without them every material falls back to a procedural tile;
-`--assets <dir>` / `INFINITY_ASSETS` point the app elsewhere, `--tex-size`
+`--assets <dir>` / `UNENDLICH_ASSETS` point the app elsewhere, `--tex-size`
 picks the tile resolution (default 1024).
 
 Headless-only build (no window/GPU dependencies at all):
 
 ```sh
-cmake -B build-headless -DINFINITY_BUILD_APP=OFF
+cmake -B build-headless -DUNENDLICH_BUILD_APP=OFF
 ```
 
 ## Layout

@@ -7,8 +7,8 @@ add_executable(game_app
   src/material_library.cpp
   src/stb_impl.cpp)
 target_compile_definitions(game_app PRIVATE
-  INFINITY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-set_target_properties(game_app PROPERTIES OUTPUT_NAME "infinity")
+  UNENDLICH_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+set_target_properties(game_app PROPERTIES OUTPUT_NAME "unendlich")
 target_link_libraries(game_app
   PRIVATE engine::render game::sim game::tex game::city glfw stb::headers game_warnings)
 
@@ -21,7 +21,7 @@ if(NOT WIN32)
   set_target_properties(game_app PROPERTIES BUILD_RPATH "$ORIGIN;@loader_path")
 endif()
 
-# Standalone macOS distribution: Infinity.app + drag-to-Applications DMG
+# Standalone macOS distribution: unendlich.app + drag-to-Applications DMG
 # (see ci/package-mac.sh — runs its own Release build in build-dist/).
 if(APPLE)
   add_custom_target(package-mac

@@ -10,7 +10,7 @@
 
 namespace inf::gen {
 
-// Infinity's InfinityTree wiring (T0011): registers the game's kinds and
+// unendlich's UnendlichTree wiring (T0011): registers the game's kinds and
 // axes with the engine framework and provides the standard walk to the
 // default body (origin cluster -> galaxy 0 -> system 0 -> planet slot 0),
 // which replaces the old hard-coded key chain. Key paths CHANGED with
@@ -20,7 +20,7 @@ namespace inf::gen {
 core::tree::GeneratorRegistry make_registry();
 
 // The tree for a universe seed (no inceptions by default).
-std::unique_ptr<core::tree::InfinityTree> make_tree(const core::Seed128& seed);
+std::unique_ptr<core::tree::UnendlichTree> make_tree(const core::Seed128& seed);
 
 // Address of the default body: clusters(0,0,0)/galaxies(0)/systems(0)/
 // planets(slot 0).

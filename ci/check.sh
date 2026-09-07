@@ -75,7 +75,7 @@ echo "=== tests ==="
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
 echo "=== cli smoke ==="
-CLI="$BUILD_DIR/game/cli/infinity-cli"
+CLI="$BUILD_DIR/game/cli/unendlich-cli"
 "$CLI" --version
 test "$("$CLI" --seed 0xDEADBEEF)" = "000000000000000000000000deadbeef"
 if "$CLI" --seed nothex 2>/dev/null; then
@@ -100,11 +100,11 @@ echo "=== golden hashes ==="
   || { echo "FAIL: hash-city diverges from goldens" >&2; exit 1; }
 
 echo "=== payload determinism ==="
-"$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-a.json
-"$CLI" dump-planet --seed 7 --type EarthLike > /tmp/infinity-dump-b.json
-diff /tmp/infinity-dump-a.json /tmp/infinity-dump-b.json \
+"$CLI" dump-planet --seed 7 --type EarthLike > /tmp/unendlich-dump-a.json
+"$CLI" dump-planet --seed 7 --type EarthLike > /tmp/unendlich-dump-b.json
+diff /tmp/unendlich-dump-a.json /tmp/unendlich-dump-b.json \
   || { echo "FAIL: dump-planet not reproducible" >&2; exit 1; }
-rm -f /tmp/infinity-dump-a.json /tmp/infinity-dump-b.json
+rm -f /tmp/unendlich-dump-a.json /tmp/unendlich-dump-b.json
 
 echo "=== headless invariant ==="
 if command -v ldd >/dev/null 2>&1; then
@@ -120,8 +120,8 @@ elif command -v otool >/dev/null 2>&1; then
 fi
 
 echo "=== app smoke (60 frames, needs display) ==="
-if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && [ -z "${INFINITY_SKIP_APP_SMOKE:-}" ]; then
-  "$BUILD_DIR/game/app/infinity" --frames 60 --windowed
+if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && [ -z "${UNENDLICH_SKIP_APP_SMOKE:-${INFINITY_SKIP_APP_SMOKE:-}}" ]; then
+  "$BUILD_DIR/game/app/unendlich" --frames 60 --windowed
 else
   echo "no display (or skipped) — app smoke not run"
 fi

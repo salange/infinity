@@ -3,6 +3,6 @@
 namespace inf::gen {
 
 inline constexpr const char* kVersion = "@PROJECT_VERSION@";
-inline constexpr const char* kGitHash = "@INFINITY_GIT_HASH@";
+inline constexpr const char* kGitHash = "@UNENDLICH_GIT_HASH@";
 
 }  // namespace inf::gen

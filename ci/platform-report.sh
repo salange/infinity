@@ -17,8 +17,8 @@ OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 REPORT="report-${OS}-${ARCH}.txt"
 
-cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DINFINITY_BUILD_APP=OFF
-cmake --build "$BUILD_DIR" --target infinity-cli --parallel
+cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DUNENDLICH_BUILD_APP=OFF
+cmake --build "$BUILD_DIR" --target game_cli --parallel
 
-"$BUILD_DIR/game/cli/infinity-cli" goldens > "$REPORT"
+"$BUILD_DIR/game/cli/unendlich-cli" goldens > "$REPORT"
 echo "wrote $REPORT ($(wc -l < "$REPORT") lines) — diff against the other platforms"

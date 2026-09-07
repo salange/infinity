@@ -56,7 +56,7 @@ Address leaf_at(std::int64_t i) {
 }  // namespace
 
 TEST_CASE("tree: two-seed rule separates params from subtree") {
-  InfinityTree tree(Seed128{1, 2}, kRootKind, make_registry());
+  UnendlichTree tree(Seed128{1, 2}, kRootKind, make_registry());
   const auto root = tree.get(Address{});
   REQUIRE(root != nullptr);
   CHECK(root->params_key() == derive_named(root->key(), kParamsName));
@@ -70,8 +70,8 @@ TEST_CASE("tree: two-seed rule separates params from subtree") {
 }
 
 TEST_CASE("tree: materialize-anywhere, no order dependence") {
-  InfinityTree tree_a(Seed128{7, 9}, kRootKind, make_registry());
-  InfinityTree tree_b(Seed128{7, 9}, kRootKind, make_registry());
+  UnendlichTree tree_a(Seed128{7, 9}, kRootKind, make_registry());
+  UnendlichTree tree_b(Seed128{7, 9}, kRootKind, make_registry());
 
   // Far grid cell materialized FIRST on tree_a, LAST on tree_b: identical.
   const Address far = Address{}.child(Step{kGridAxis, Cell::grid(1'000'000'000'000LL,
@@ -87,7 +87,7 @@ TEST_CASE("tree: materialize-anywhere, no order dependence") {
 }
 
 TEST_CASE("tree: occupancy bounds and cache purity") {
-  InfinityTree tree(Seed128{3, 4}, kRootKind, make_registry(), nullptr,
+  UnendlichTree tree(Seed128{3, 4}, kRootKind, make_registry(), nullptr,
                     TreeConfig{.cache_capacity = 2});
   CHECK(tree.get(leaf_at(2)) != nullptr);
   CHECK(tree.get(leaf_at(3)) == nullptr);  // out of the occupied range
@@ -108,8 +108,8 @@ TEST_CASE("tree: SeedPin inception overrides a subtree's key") {
   auto store = std::make_shared<InceptionStore>(
       std::vector<Inception>{Inception{graft, SeedPin{pinned}}});
 
-  InfinityTree plain(Seed128{5, 6}, kRootKind, make_registry());
-  InfinityTree grafted(Seed128{5, 6}, kRootKind, make_registry(), store);
+  UnendlichTree plain(Seed128{5, 6}, kRootKind, make_registry());
+  UnendlichTree grafted(Seed128{5, 6}, kRootKind, make_registry(), store);
 
   CHECK(!(plain.get(graft)->key() == pinned));
   CHECK(grafted.get(graft)->key() == pinned);

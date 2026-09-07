@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
-project(infinity-engine VERSION 0.0.1 LANGUAGES C CXX)
+project(unendlich-engine VERSION 0.0.1 LANGUAGES C CXX)
 
 # Self-contained engine project (T0011): builds standalone or inside the
 # game superbuild. Three libraries:
 #   engine-core   deterministic substrate (det::, keys, time, ephemeris,
-#                 InfinityTree) — headless, no external deps
+#                 UnendlichTree) — headless, no external deps
 #   engine-world  generic world machinery (noise, chunk grids, meshing,
 #                 streaming) — headless, depends on engine-core
 #   engine-render RHI on wgpu — client-only
@@ -15,8 +15,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(INFINITY_BUILD_APP "Build window/GPU targets" ON)
-option(INFINITY_ENGINE_TESTS "Build engine unit tests" ON)
+include(cmake/branding.cmake)
+
+unendlich_option(BUILD_APP "Build window/GPU targets" ON)
+unendlich_option(ENGINE_TESTS "Build engine unit tests" ON)
 
 add_library(engine_warnings INTERFACE)
 if(MSVC)
@@ -37,10 +39,10 @@ include(cmake/deps.cmake)
 
 add_subdirectory(core)
 add_subdirectory(world)
-if(INFINITY_BUILD_APP)
+if(UNENDLICH_BUILD_APP)
   add_subdirectory(render)
 endif()
-if(INFINITY_ENGINE_TESTS)
+if(UNENDLICH_ENGINE_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()

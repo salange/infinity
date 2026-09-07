@@ -3,7 +3,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 
-extern "C" void* infinityMetalLayerForCocoaWindow(void* nsWindow) {
+extern "C" void* unendlichMetalLayerForCocoaWindow(void* nsWindow) {
   NSWindow* window = (__bridge NSWindow*)nsWindow;
   NSView* view = [window contentView];
   if (![view.layer isKindOfClass:[CAMetalLayer class]]) {

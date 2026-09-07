@@ -1,4 +1,4 @@
-# The game "Infinity": content generators, simulation, client and tools.
+# The game "unendlich": content generators, simulation, client and tools.
 # Depends on the engine targets; the engine never depends on this.
 
 add_library(game_warnings INTERFACE)
@@ -22,7 +22,7 @@ add_subdirectory(city)
 add_subdirectory(tex)
 add_subdirectory(sim)
 add_subdirectory(cli)
-if(INFINITY_BUILD_APP)
+if(UNENDLICH_BUILD_APP)
   add_subdirectory(app)
 endif()
 enable_testing()

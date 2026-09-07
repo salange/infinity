@@ -183,7 +183,7 @@ PlanetParams derive_planet_params(const core::Key& body_entity_key,
   // elevation, which lifts land above the pure-macro quantile. Correct
   // the solved sea level by the type's EXPECTED province base (weights x
   // range midpoints of the archetype table) so measured land tracks the
-  // target. Calibrated against `infinity-cli macro-stats`.
+  // target. Calibrated against `unendlich-cli macro-stats`.
   constexpr double kExpectedProvinceBase[4] = {402.0, 202.0, 184.0, 329.0};
   const Real base_correction =
       Real(kExpectedProvinceBase[static_cast<std::size_t>(params.type)] * 1.05);

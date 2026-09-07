@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Standalone macOS distribution: builds Release, assembles Infinity.app
+# Standalone macOS distribution: builds Release, assembles unendlich.app
 # (binary + bundled wgpu-native dylib + icon + Info.plist), ad-hoc signs
 # it, and wraps it in a drag-to-Applications DMG. Fully self-contained —
 # recipients install nothing else. Apple Silicon (arm64): the bundled
 # wgpu-native release library is per-architecture.
 #
 # Usage: ci/package-mac.sh            (or: cmake --build <dir> --target package-mac)
-# Output: build-dist/Infinity-<version>-arm64.dmg
+# Output: build-dist/unendlich-<version>-arm64.dmg
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,7 +15,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-BUILD=build-dist
+BUILD="${BUILD_DIR:-build-dist}"
 ARCH="$(uname -m)"
 
 echo "=== configure + build (Release) ==="
@@ -24,13 +24,13 @@ cmake --build "$BUILD" --target game_app
 
 VERSION="$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' "$BUILD/game/gen/generated/gen/version.hpp")"
 VERSION="${VERSION:-0.0.0}"
-APP="$BUILD/Infinity.app"
-DMG="$BUILD/Infinity-$VERSION-$ARCH.dmg"
+APP="$BUILD/unendlich.app"
+DMG="$BUILD/unendlich-$VERSION-$ARCH.dmg"
 
-echo "=== assemble Infinity.app (v$VERSION, $ARCH) ==="
+echo "=== assemble unendlich.app (v$VERSION, $ARCH) ==="
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BUILD/game/app/infinity" "$APP/Contents/MacOS/infinity"
+cp "$BUILD/game/app/unendlich" "$APP/Contents/MacOS/unendlich"
 # The binary carries an @loader_path rpath, so the dylib lives beside it.
 cp "$BUILD/game/app/libwgpu_native.dylib" "$APP/Contents/MacOS/"
 
@@ -39,11 +39,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key>               <string>Infinity</string>
-  <key>CFBundleDisplayName</key>        <string>Infinity</string>
+  <key>CFBundleName</key>               <string>unendlich</string>
+  <key>CFBundleDisplayName</key>        <string>unendlich</string>
   <key>CFBundleIdentifier</key>         <string>com.psiori.infinity</string>
-  <key>CFBundleExecutable</key>         <string>infinity</string>
-  <key>CFBundleIconFile</key>           <string>infinity.icns</string>
+  <key>CFBundleExecutable</key>         <string>unendlich</string>
+  <key>CFBundleIconFile</key>           <string>unendlich.icns</string>
   <key>CFBundlePackageType</key>        <string>APPL</string>
   <key>CFBundleShortVersionString</key> <string>$VERSION</string>
   <key>CFBundleVersion</key>            <string>$VERSION</string>
@@ -57,7 +57,7 @@ PLIST
 
 # Icon: the README hero shot, square-cropped through the icns sizes.
 if [[ -f docs/deep-sky.png ]]; then
-  ICONSET="$BUILD/infinity.iconset"
+  ICONSET="$BUILD/unendlich.iconset"
   rm -rf "$ICONSET"
   mkdir -p "$ICONSET"
   SQ="$BUILD/icon-square.png"
@@ -69,7 +69,7 @@ if [[ -f docs/deep-sky.png ]]; then
     d=$((s * 2))
     sips -z "$d" "$d" "$SQ" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
   done
-  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/infinity.icns"
+  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/unendlich.icns"
 fi
 
 echo "=== sign (ad-hoc) ==="
@@ -78,7 +78,7 @@ codesign --force -s - "$APP"
 codesign --verify --deep "$APP"
 
 echo "=== smoke: 60 frames from inside the bundle ==="
-"$APP/Contents/MacOS/infinity" --windowed --frames 60 >/dev/null
+"$APP/Contents/MacOS/unendlich" --windowed --frames 60 >/dev/null
 
 echo "=== DMG ==="
 STAGE="$BUILD/dmg-stage"
@@ -87,12 +87,12 @@ mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 cat > "$STAGE/README.txt" <<'README'
-Infinity — a fully procedural universe from a single seed.
+unendlich — a fully procedural universe from a single seed.
 
-Install: drag Infinity.app into Applications (or run it from anywhere).
+Install: drag unendlich.app into Applications (or run it from anywhere).
 
 First launch: this build is not notarized with Apple, so macOS will warn
-about an unidentified developer. Right-click Infinity.app and choose
+about an unidentified developer. Right-click unendlich.app and choose
 "Open", or approve it under System Settings > Privacy & Security >
 "Open Anyway". This is only needed once.
 
@@ -105,7 +105,7 @@ Cmd+Q quits. Your edits persist per seed in
 ~/Library/Application Support/Infinity.
 README
 rm -f "$DMG"
-hdiutil create -volname "Infinity" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+hdiutil create -volname "unendlich" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 
 echo "PACKAGED: $DMG"
 du -h "$DMG" | cut -f1

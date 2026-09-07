@@ -8,7 +8,7 @@ FetchContent_Declare(doctest
 set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(doctest)
 
-if(INFINITY_BUILD_APP)
+if(UNENDLICH_BUILD_APP)
   FetchContent_Declare(glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
     GIT_TAG 3.4

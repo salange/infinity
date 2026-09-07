@@ -16,7 +16,7 @@ namespace {
 
 int print_usage() {
   std::printf(
-      "usage: infinity-cli <command> [args]\n"
+      "usage: unendlich-cli <command> [args]\n"
       "  --version            print version\n"
       "  --seed <hex128>      parse a universe seed, print canonical form\n"
       "  hash-core            print the deterministic-core golden report\n"
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
   }
 
   if (std::strcmp(argv[1], "--version") == 0) {
-    std::printf("infinity-cli %s (%s)\n", inf::gen::kVersion, inf::gen::kGitHash);
+    std::printf("unendlich-cli %s (%s)\n", inf::gen::kVersion, inf::gen::kGitHash);
     return 0;
   }
 

@@ -11,7 +11,7 @@
 
 namespace inf::gen {
 
-// Adapts Infinity's TerrainField to the engine's streaming interface,
+// Adapts unendlich's TerrainField to the engine's streaming interface,
 // folding the player-diff overlay (M7) into every padded grid so meshes
 // show craters/built material. Workers call this concurrently; the edit
 // store is thread-safe.

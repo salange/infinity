@@ -7,7 +7,7 @@
 
 namespace inf::gen {
 
-// Infinity's frozen id registries over the engine's opaque id types
+// unendlich's frozen id registries over the engine's opaque id types
 // (seeding spec section 9). NameId values are the first 8 bytes (LE) of
 // MD5(name string) — verified against a reference MD5 in
 // tests/test_names.cpp (drift + collision check). All registries are
@@ -61,7 +61,7 @@ inline constexpr core::NameId CivilV1{0xb2b88c5e2f3618cdULL};         // "civil/
 inline constexpr core::NameId BuildingsV1{0xa11bb8a793d0df20ULL};     // "buildings/v1"
 inline constexpr core::NameId EcumenopolisV1{0x7fcdd973ffbdabe1ULL};  // "ecumenopolis/v1"
 inline constexpr core::NameId CivNamesV1{0xd5aea597f5cfddf7ULL};      // "civ-names/v1"
-// InfinityTree axes.
+// UnendlichTree axes.
 inline constexpr core::NameId ClustersAxis{0x7ec0fe4d89436ce4ULL};    // "clusters/v1"
 inline constexpr core::NameId GalaxiesAxis{0x033ac9f54f8c9dc4ULL};    // "galaxies/v1"
 inline constexpr core::NameId SystemsAxis{0x9dd08cd7977763e7ULL};     // "systems/v1"

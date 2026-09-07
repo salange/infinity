@@ -135,7 +135,7 @@ streets, no lots, no arterial kit.
   `--stress N` recreates the targets every frame N times (the leak
   regression). Camera passes render reversed Z (near = 1, far = 0) on a
   float depth buffer — the standing rule for every renderer here.
-- `infinity --city-showcase` places the catalog scene on the first Town
+- `unendlich --city-showcase` places the catalog scene on the first Town
   of the anchor body; `--city-debug N` (1 albedo, 2 normal, 3 occlusion,
   4 shadow, 5 roughness, 6 sun term, 7 sky irradiance, 12 material id);
   `--no-ssao`, `--no-shadows`, `--no-taa`, `--no-city`; `--bench N` (mean
@@ -146,9 +146,9 @@ streets, no lots, no arterial kit.
   previous frame through the depth buffer, sampled and differenced with
   half a pixel of gradient tolerated; luminance and chroma apart, per
   material; heat maps written); `--window WxH` with `--hidden`.
-- `infinity-cli civ site --seed 83 --tier Town` prints the site's city
+- `unendlich-cli civ site --seed 83 --tier Town` prints the site's city
   scene statistics and capture camera lines (each tier shows its stage);
-  `infinity-cli hash-city` is the golden (the showcase for two seeds and
+  `unendlich-cli hash-city` is the golden (the showcase for two seeds and
   the seed-83 home town's whole scene, centimetre-quantised).
 - `game/tests/test_city.cpp`: determinism, finite geometry, budgets per
   level, the home town, the capital's civic centre and ring-6 towers.

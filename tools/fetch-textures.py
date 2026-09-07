@@ -20,7 +20,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(ROOT, "assets", "manifest.json")
 OUT = os.path.join(ROOT, "assets", "textures")
-UA = {"User-Agent": "infinity-fetch-textures/1.0"}
+UA = {"User-Agent": "unendlich-fetch-textures/1.0"}
 
 MAP_FILES = {
     "Color": "color.jpg",

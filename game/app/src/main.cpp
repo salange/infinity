@@ -489,7 +489,7 @@ int main(int argc, char** argv) {
   // moon. Seed "83" (hex, = 0x83): G star, 9 planets, EarthLike
   // super-earth with 2 moons at slot 1. If a generation change breaks
   // these properties for this seed, search for a new qualifying seed
-  // (scan `infinity-cli dump-system` over seeds) and replace it here AND
+  // (scan `unendlich-cli dump-system` over seeds) and replace it here AND
   // in the contract test (game/tests/test_system.cpp).
   const char* seed_text = "83";
   const char* type_text = nullptr;
@@ -768,7 +768,7 @@ int main(int argc, char** argv) {
     player.set_attitude(inf::sim::rotate(fwd, right, rad), inf::sim::rotate(up, right, rad));
   }
 
-  std::printf("infinity %s (%s) — %s planet (slot %d), radius %.0f m\n",
+  std::printf("unendlich %s (%s) — %s planet (slot %d), radius %.0f m\n",
               inf::gen::kVersion, inf::gen::kGitHash,
               inf::gen::to_string(anchor->planet.type), home_slot, anchor->radius);
 
@@ -807,7 +807,7 @@ int main(int argc, char** argv) {
       monitor = nullptr;  // no usable video mode: fall back to windowed
     }
   }
-  GLFWwindow* window = glfwCreateWindow(win_w, win_h, "infinity", monitor, nullptr);
+  GLFWwindow* window = glfwCreateWindow(win_w, win_h, "unendlich", monitor, nullptr);
   if (window == nullptr) {
     std::fprintf(stderr, "glfwCreateWindow failed\n");
     glfwTerminate();
@@ -3593,7 +3593,7 @@ int main(int argc, char** argv) {
       }
       char title[192];
       std::snprintf(title, sizeof(title),
-                    "infinity — %s | %.0f fps | %zu chunks | alt %.0f m | %.0f m/s",
+                    "unendlich — %s | %.0f fps | %zu chunks | alt %.0f m | %.0f m/s",
                     mode_name, fps_frames / fps_accum, loaded.size(), player.altitude(),
                     player.speed());
       glfwSetWindowTitle(window, title);

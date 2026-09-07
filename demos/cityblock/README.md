@@ -10,7 +10,7 @@ by the game yet; the game can adopt pieces once they prove out.
 
 ## Build and run
 
-The demo is part of the superbuild (`INFINITY_BUILD_DEMOS`, on by default
+The demo is part of the superbuild (`UNENDLICH_BUILD_DEMOS`, on by default
 when the app targets build):
 
 ```

@@ -18,7 +18,7 @@
 #include <sstream>
 
 #if defined(__APPLE__)
-extern "C" void* infinityMetalLayerForCocoaWindow(void* nsWindow);
+extern "C" void* unendlichMetalLayerForCocoaWindow(void* nsWindow);
 #endif
 
 namespace cb {
@@ -63,7 +63,7 @@ WGPUSurface create_surface(WGPUInstance instance, GLFWwindow* window, std::strin
 #elif defined(__APPLE__)
   WGPUSurfaceSourceMetalLayer source{};
   source.chain.sType = WGPUSType_SurfaceSourceMetalLayer;
-  source.layer = infinityMetalLayerForCocoaWindow(glfwGetCocoaWindow(window));
+  source.layer = unendlichMetalLayerForCocoaWindow(glfwGetCocoaWindow(window));
   desc.nextInChain = &source.chain;
   return wgpuInstanceCreateSurface(instance, &desc);
 #elif defined(_WIN32)

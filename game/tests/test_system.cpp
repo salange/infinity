@@ -93,7 +93,7 @@ TEST_CASE("system: default-seed contract (seed 83)") {
   // Contract (2026-08-31): the app's DEFAULT seed must yield a system
   // with >= 5 planets, at least one of them EarthLike with >= 1 moon.
   // If a generation change trips this test, scan for a new qualifying
-  // seed (infinity-cli dump-system) and update BOTH the app default
+  // seed (unendlich-cli dump-system) and update BOTH the app default
   // (game/app/src/main.cpp) and this test. Seed text is HEX: "83" = 0x83.
   const gen::StarSystemParams system = system_for(0x83);
   int occupied = 0;

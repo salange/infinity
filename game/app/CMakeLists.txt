@@ -7,6 +7,7 @@ add_executable(game_app
   src/civ_view.cpp
   src/city_render.cpp
   src/hud.cpp
+  src/debug_overlay.cpp
   src/deep_sky_render.cpp
   src/material_library.cpp
   src/stb_impl.cpp)

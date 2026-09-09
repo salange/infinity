@@ -114,3 +114,38 @@ control where you have reached. The shared sky follows the actual observer every
 frame, with short, cancellable preparation for nearby stars. Use
 `--render-width 1280` for a 1280×720 window, including on Retina displays.
 See [route, controls, and profiling](docs/galaxy-flythrough.md).
+
+## Contextual debugging overlay
+
+Press **F3** to show/hide the independent right-side debugging panel. The
+normal flight/walking HUD remains visible. F3 also hides the REC indicator,
+window-title statistics, and any `--city-debug` material visualization (the
+selected view is restored on showing debug again). Recording continues in the
+background. The panel starts hidden unless a city debug view was requested.
+
+**1 City, 2 Planet/moon, 3 Planetary system, 4 Galaxy** fold/unfold each section.
+Keys 5–9 are reserved for future sections. **0** expands all if any are folded,
+otherwise folds all. Hold **Alt** in flight/walking to release the mouse, then
+click a section heading; release Alt to resume steering. While released, mouse
+steering, shooting, and terrain editing are suppressed. Map mode retains its
+own pointer behavior; the debug panel remains readable and keyboard-foldable.
+
+Planet context is the closest surface within one body radius, including moons
+and unlandable giants. City context uses the currently anchored body's existing
+settlement sites: the nearest valid centre within twice the site's radius,
+including vertical distance. No qualifying city/planet means an empty section,
+not stale statistics. Planet-wide cities are identified explicitly. Ties follow
+the stable site iteration order. These thresholds are display policies only.
+
+Metrics: city province/tier/growth/extent, queued detail build and resident
+geometry; planet name, surface distance, radius, atmosphere, gravity and anchor
+status; active system identity/cell, type, star/planet/moon counts and primary
+star properties; current home galaxy type, diameter, arms, position and age.
+System/galaxy data remain available between planets. All data comes from
+already-live state; no terrain, settlement, or galaxy generation is triggered
+by the panel. The panel, state, input and renderer live separately from Hud.
+
+Scripted captures support `debug 1` / `debug 0` and `debugfold N` (0–4), using
+the same visibility and fold state. Existing `hud 0` controls only the gameplay
+HUD, independently of diagnostics. Distances are labelled in game metres/km
+or game light-years using the authoritative galaxy conversion constant.

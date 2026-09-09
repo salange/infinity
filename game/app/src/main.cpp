@@ -48,6 +48,7 @@
 #include "gen/universe.hpp"
 #include "gen/version.hpp"
 #include "hud.hpp"
+#include "debug_overlay.hpp"
 #include "material_library.hpp"
 #include "render/math.hpp"
 #include "render/rhi.hpp"
@@ -1093,6 +1094,12 @@ int main(int argc, char** argv) {
   rebuild_sea();
   {  // HUD scope: must destruct before the RHI is torn down.
   auto hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
+  inf::app::DebugOverlay debug_overlay(*rhi);
+  inf::app::DebugState debug_state;
+  debug_state.visible = city_debug != 0;
+  inf::app::DebugSnapshot debug_snapshot;
+  bool debug_pointer = false;
+  bool debug_click_was_down = false;
   SVec3 last_player_pos = player.position();
   double measured_speed = 0.0;
 
@@ -1651,6 +1658,35 @@ int main(int argc, char** argv) {
     double mx = 0.0;
     double my = 0.0;
     glfwGetCursorPos(window, &mx, &my);
+    const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+    std::array<bool, 10> debug_digits{};
+    for (int digit = 0; digit <= 9; ++digit) {
+      debug_digits[static_cast<std::size_t>(digit)] = glfwGetKey(window, GLFW_KEY_0 + digit) == GLFW_PRESS;
+    }
+    const bool debug_was_visible = debug_state.visible;
+    debug_state.keys(glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS, debug_digits, focused);
+    if (debug_was_visible && !debug_state.visible) glfwSetWindowTitle(window, "infinity");
+    const bool want_debug_pointer = debug_state.visible && focused && map_phase == MapPhase::Off &&
+        (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+         glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
+    if (want_debug_pointer != debug_pointer) {
+      debug_pointer = want_debug_pointer;
+      glfwSetInputMode(window, GLFW_CURSOR,
+                      debug_pointer || map_phase != MapPhase::Off ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+      glfwGetCursorPos(window, &mx, &my);
+      last_mx = mx;
+      last_my = my;
+    }
+    const bool debug_click = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (debug_pointer && debug_click && !debug_click_was_down) {
+      int window_width = 1, window_height = 1;
+      glfwGetWindowSize(window, &window_width, &window_height);
+      const inf::app::DebugLayout layout(state.width, state.height, debug_state, debug_snapshot);
+      const int section = layout.hit(mx * state.width / std::max(window_width, 1),
+                                     my * state.height / std::max(window_height, 1));
+      if (section >= 0) debug_state.toggle_section(static_cast<std::size_t>(section));
+    }
+    debug_click_was_down = debug_click;
     const bool e_down = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
 
     inf::sim::InputFrame input;
@@ -1670,6 +1706,11 @@ int main(int argc, char** argv) {
     last_mx = mx;
     last_my = my;
     e_was_down = e_down;
+    if (debug_pointer) {
+      input.mouse_dx = 0.0;
+      input.mouse_dy = 0.0;
+      input.fire = false;
+    }
     if (jump_timer > 0.0) {
       // The jump transition suspends the pilot: one atomic frame swap in
       // the middle, no control input on either side of it.
@@ -2283,6 +2324,12 @@ int main(int argc, char** argv) {
         const SVec3 fwd = inf::sim::normalize(tangent * std::cos(dip) -
                                               up_ref * std::sin(dip));
         player.set_attitude(fwd, up_ref);
+      } else if (cmd.op == "debug" && !cmd.args.empty()) {
+        debug_state.visible = arg_d(0) != 0.0;
+      } else if (cmd.op == "debugfold" && !cmd.args.empty()) {
+        const int section = static_cast<int>(arg_d(0));
+        if (section == 0) debug_state.toggle_all();
+        else if (section > 0) debug_state.toggle_section(static_cast<std::size_t>(section - 1));
       } else if (cmd.op == "hud" && !cmd.args.empty()) {
         script_hud = arg_d(0) != 0.0;  // clean-frame captures
       } else if (cmd.op == "speed" && !cmd.args.empty()) {
@@ -2338,7 +2385,7 @@ int main(int argc, char** argv) {
     const bool dig_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
     const bool add_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
     edit_cooldown -= dt;
-    if (map_phase == MapPhase::Off && (dig_down || add_down) && edit_cooldown <= 0.0) {
+    if (map_phase == MapPhase::Off && !debug_pointer && (dig_down || add_down) && edit_cooldown <= 0.0) {
       apply_edit(dig_down);
       edit_cooldown = 0.18;  // hold to keep carving
     } else if (!dig_down && !add_down && edit_cooldown < 0.0) {
@@ -3373,14 +3420,14 @@ int main(int argc, char** argv) {
       items.push_back(hud_quad(cube_mesh, rx - box / ar, ry, thick / ar, box * 2.2, 1.0f, 0.75f, 0.2f));
     }
 
-    // REC indicator: red square top right — solid flash on the F9 press,
+    // REC indicator: red square top left (clear of the diagnostics panel) — solid flash on the F9 press,
     // then blinking while the triggered recording is still capturing.
     rec_flash = std::max(0.0, rec_flash - dt);
-    if (rec_flash > 0.0 || rhi->recording_active()) {
+    if (debug_state.visible && (rec_flash > 0.0 || rhi->recording_active())) {
       const double blink = std::fmod(static_cast<double>(now.ns_since_epoch) * 1e-9, 0.8);
       if (rec_flash > 0.0 || blink < 0.55) {
         items.push_back(
-            hud_quad(cube_mesh, 0.94, 0.90, 0.030 / ar, 0.05, 1.0f, 0.16f, 0.12f));
+            hud_quad(cube_mesh, -0.94, 0.90, 0.030 / ar, 0.05, 1.0f, 0.16f, 0.12f));
       }
     }
 
@@ -3577,6 +3624,91 @@ int main(int argc, char** argv) {
       }
     }
 
+    // Independent diagnostic view of already-live world data. Rebuild the
+    // snapshot from scratch so leaving a context cannot retain the old entity.
+    debug_snapshot = {};
+    if (debug_state.visible) {
+      const auto line = [](const char* format, auto... args) {
+        char buffer[192];
+        std::snprintf(buffer, sizeof(buffer), format, args...);
+        return std::string(buffer);
+      };
+      const ClosestBody near = closest_body();
+      const bool near_planet = inf::app::debug_body_near(near.gap, near.radius);
+      const bool near_anchor = near_planet && near.slot == anchor->slot && near.moon == anchor->moon;
+      auto& city = debug_snapshot.sections[0];
+      auto& planet = debug_snapshot.sections[1];
+      auto& system_info = debug_snapshot.sections[2];
+      auto& galaxy = debug_snapshot.sections[3];
+      if (near_planet) {
+        const auto& entry = system.planets[static_cast<std::size_t>(near.slot)];
+        const std::string name = near.moon < 0 ? slot_names[static_cast<std::size_t>(near.slot)] :
+            moon_names[static_cast<std::size_t>(near.slot)][static_cast<std::size_t>(near.moon)];
+        planet.push_back(name + (near.moon >= 0 ? " (moon)" : " (planet)"));
+        planet.push_back(line("Surface gap %.1f km | radius %.1f km", near.gap / 1000.0, near.radius / 1000.0));
+        planet.push_back(line("Atmosphere %.1f km | anchor %s", near.atmosphere / 1000.0, near_anchor ? "yes" : "no"));
+        const auto& physics = near.moon < 0 ? entry.phys : entry.moons[static_cast<std::size_t>(near.moon)].phys;
+        planet.push_back(line("Gravity %.2f m/s2 | %s", physics.g_surface.to_double(),
+                              near.moon >= 0 ? "moon surface" : body_type_label(entry)));
+      }
+      if (near_anchor && anchor->civ && anchor->civ->settled) {
+        const auto& civ = *anchor->civ;
+        const inf::gen::Site* selected = nullptr;
+        std::uint32_t selected_index = 0;
+        double best_distance = std::numeric_limits<double>::max();
+        if (civ.sites) {
+          const auto& sites = civ.sites->sites();
+          for (std::size_t i = 0; i < sites.size(); ++i) {
+            const auto& site = sites[i];
+            if (!site.valid) continue;
+            const SVec3 center{site.frame.up.x.to_double() * (anchor->radius + site.datum_m),
+                               site.frame.up.y.to_double() * (anchor->radius + site.datum_m),
+                               site.frame.up.z.to_double() * (anchor->radius + site.datum_m)};
+            const double distance = inf::sim::length(player.position() - center);
+            if (inf::app::debug_site_near(distance, site.radius_m) && distance < best_distance) {
+              selected = &site;
+              selected_index = static_cast<std::uint32_t>(i);
+              best_distance = distance;
+            }
+          }
+        }
+        if (selected) {
+          city.push_back(line("Province %u | tier %d%s", selected->province, selected->tier, selected->capital ? " | capital" : ""));
+          city.push_back(line("Centre %.1f km | extent %.1f km", best_distance / 1000.0, selected->radius_m / 1000.0));
+          city.push_back(line("Growth %.0f%% | %s", selected->progress * 100.0, selected->ruined ? "ruined" : "active"));
+          const bool building = civ.pending.active && civ.pending.site_index == selected_index;
+          city.push_back(std::string("Detail build: ") + (building ? "in progress" : "idle"));
+          for (const auto& mesh : civ.meshes) {
+            if (mesh.site_index == selected_index) {
+              city.push_back(line("LOD %d | resident triangles %u", mesh.city_detail, mesh.city.triangles));
+              break;
+            }
+          }
+        } else if (civ.ecumenopolis) {
+          city.push_back("Planet-wide city (ecumenopolis)");
+          city.push_back(line("Development %d | growth %.0f%%", civ.state.level, civ.state.progress * 100.0));
+        }
+      }
+      // System/galaxy remain available when the nearby planet or city is absent.
+      // System context follows the same active system as the live sky and map.
+      system_info.push_back(inf::gen::body_display_name(inf::gen::system_key_for(*seed, current_cell)) +
+                            " | " + inf::gen::to_string(system.archetype));
+      int planet_count = 0;
+      std::size_t moon_count = 0;
+      for (const auto& entry : system.planets) if (entry.occupied) { ++planet_count; moon_count += entry.moons.size(); }
+      system_info.push_back(line("Stars %zu | planets %d | moons %zu", system.companions.size() + 1, planet_count, moon_count));
+      system_info.push_back(line("Primary %.2f solar masses | %.0f K", system.star.mass_solar.to_double(), system.star.temperature_k.to_double()));
+      system_info.push_back(line("Cell %lld,%lld,%lld / L%d", static_cast<long long>(current_cell.x),
+                                static_cast<long long>(current_cell.y), static_cast<long long>(current_cell.z), current_cell.level));
+      galaxy.push_back(std::string("Home galaxy | ") + inf::gen::to_string(galaxy_params.type));
+      galaxy.push_back(line("Diameter %.0f ly | arms %d", galaxy_params.diameter_ly.to_double(), galaxy_params.arm_count));
+      const SVec3 position_galaxy = galactic_pos + planet_sys + player.position();
+      galaxy.push_back(line("Centre %.1f ly | height %.1f ly", inf::sim::length(position_galaxy) / inf::gen::kLightYearM,
+                           position_galaxy.z / inf::gen::kLightYearM));
+      galaxy.push_back(line("Age %.1f Gyr", galaxy_params.age_gyr.to_double()));
+      debug_overlay.build(items, debug_state, debug_snapshot, state.width, state.height);
+    }
+
     // Frame lighting: the star with the highest apparent flux at the
     // player is the directional sun (matters in bi/tri-star systems when
     // roaming near a companion); tint softened toward white.
@@ -3686,7 +3818,7 @@ int main(int argc, char** argv) {
           frame_params.sun_color[c] *= static_cast<float>((0.02 + 0.98 * tw) * warm[c]);
         }
       }
-      city_settings.debug_view = city_debug;
+      city_settings.debug_view = debug_state.visible ? city_debug : 0;
       city_settings.ssao = !no_ssao;
       city_settings.shadows = !no_shadows;
       city_settings.taa = !no_taa;
@@ -3830,7 +3962,7 @@ int main(int argc, char** argv) {
                     "unendlich — %s | %.0f fps | %zu chunks | alt %.0f m | %.0f m/s",
                     mode_name, fps_frames / fps_accum, loaded.size(), player.altitude(),
                     player.speed());
-      glfwSetWindowTitle(window, title);
+      glfwSetWindowTitle(window, debug_state.visible ? title : "infinity");
       fps_accum = 0.0;
       fps_frames = 0;
     }

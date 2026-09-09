@@ -182,6 +182,8 @@ struct Hud::Impl {
   std::uint32_t quad_mesh = 0;
   std::uint32_t disc_mesh = 0;
   std::uint32_t ring_mesh = 0;
+  std::uint32_t hyper_ring_mesh = 0;
+  TextLine hyper_line;
   TextLine speed_line;
   TextLine range_line;
   TextLine asl_line;
@@ -213,6 +215,8 @@ struct Hud::Impl {
     disc_mesh = rhi->create_mesh(disc.data(), disc.size());
     const auto ring = ring_vertices(48, 0.47f, 0.5f);
     ring_mesh = rhi->create_mesh(ring.data(), ring.size());
+    const auto hyper_ring = ring_vertices(128, 0.496f, 0.5f);
+    hyper_ring_mesh = rhi->create_mesh(hyper_ring.data(), hyper_ring.size());
     grid_elev.assign(static_cast<std::size_t>(kGridN) * kGridN, 0.0);
     letter_n.set(rhi, "N");
     letter_s.set(rhi, "S");
@@ -224,7 +228,8 @@ struct Hud::Impl {
     rhi->destroy_mesh(quad_mesh);
     rhi->destroy_mesh(disc_mesh);
     rhi->destroy_mesh(ring_mesh);
-    for (TextLine* line : {&speed_line, &range_line, &asl_line, &biome_line, &location_line,
+    rhi->destroy_mesh(hyper_ring_mesh);
+    for (TextLine* line : {&hyper_line, &speed_line, &range_line, &asl_line, &biome_line, &location_line,
                            &target_name_line, &target_info_line, &letter_n, &letter_s,
                            &letter_e, &letter_w}) {
       line->destroy(rhi);
@@ -487,6 +492,20 @@ void Hud::build(std::vector<Rhi::DrawItem>* items, const sim::Player& player,
   }
   const bool near_planet = altitude < atmosphere;
 
+  if (player.mode() == sim::PlayerMode::Flight) {
+    const auto& drive = player.hyperdrive();
+    char hyper_text[128];
+    const char* label = drive.state() == sim::Hyperdrive::State::Charging ? "CHARGING" :
+        drive.state() == sim::Hyperdrive::State::Cruise ? "ENGAGED" :
+        drive.state() == sim::Hyperdrive::State::Proximity ? "PROXIMITY STOP" : "READY";
+    std::snprintf(hyper_text, sizeof(hyper_text), "HYPER %s  %.1fc / %.1fc  H: %s  W/S: 2-10c",
+                  label, drive.speed() / sim::Player::kLightSpeed, drive.factor(),
+                  drive.active() ? "STOP" : "ENGAGE");
+    impl.hyper_line.set(impl.rhi, hyper_text);
+    impl.text_item(items, impl.hyper_line, 0, 0.88, 0.0042,
+                   Color{0.35f, 0.85f, 1.0f}, aspect, true);
+  }
+
   // --- lower left: velocity + altitude/distance ------------------------
   char buffer[64];
   if (measured_speed_mps >= 1000.0) {
@@ -627,3 +646,36 @@ void Hud::build_map_card(std::vector<Rhi::DrawItem>* items,
 }
 
 }  // namespace inf::app
+
+// Unlit optical trails use the final overlay, leaving exposure and temporal
+// history untouched. A clear centre preserves target and approach visibility.
+void inf::app::Hud::build_hyper_effect(std::vector<render::Rhi::DrawItem>* items,
+                                      const sim::Hyperdrive& drive, double aspect) {
+  const double strength = drive.effect();
+  if (strength <= 0) return;
+  for (int i = 0; i < 96; ++i) {
+    const double angle = i * 2.399963229728653;
+    const double phase = std::fmod(drive.phase() * (0.65 + drive.speed() / sim::Hyperdrive::kLightSpeed * 0.12)
+                                  + i * 0.61803398875, 1.0);
+    const double radius = 0.28 + phase * phase * 1.5;
+    const double trail = strength * (0.035 + phase * 0.30);
+    const double c = std::cos(angle), sn = std::sin(angle);
+    const float light = static_cast<float>(strength * (1.0 - phase) * 0.8);
+    auto item = hud_item(impl_->quad_mesh, c * radius * aspect, sn * radius,
+                         trail, 0.002 * strength, Color{light * 0.35f, light * 0.8f, light}, aspect);
+    item.mvp[0] = static_cast<float>(c * trail);
+    item.mvp[1] = static_cast<float>(sn * trail);
+    item.mvp[4] = static_cast<float>(-sn * 0.002 * strength / aspect);
+    item.mvp[5] = static_cast<float>(c * 0.002 * strength);
+    item.overlay = true;
+    items->push_back(item);
+  }
+  // The charge aperture expands away; cruise retains only the moving trails.
+  const double radius = 0.30 + strength * 0.85;
+  const float light = static_cast<float>(strength * (1.0 - strength) * 0.9);
+  if (light <= 0) return;
+  auto ring = hud_item(impl_->hyper_ring_mesh, 0, 0, radius * 2, radius * 2,
+                       Color{light * 0.3f, light * 0.8f, light}, aspect);
+  ring.overlay = true;
+  items->push_back(ring);
+}

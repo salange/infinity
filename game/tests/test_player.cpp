@@ -261,3 +261,76 @@ TEST_CASE("player: small flight steps accumulate at interstellar coordinates") {
   for (int i = 0; i < 600; ++i) player.update(tick(1.0 / 60.0));
   CHECK(std::abs(player.position().x - origin - 10000) <= 512);
 }
+
+TEST_CASE("player: hyperdrive recovery, steering, anchor rebase and map cancellation") {
+  const auto body = body_for(0xBEEF);
+  const auto planet = gen::derive_planet_params(body, gen::PlanetType::Barren);
+  const gen::TerrainField field(body.entity, planet);
+  const gen::EffectiveField eff(field);
+  Player player(eff, {1e10, 0, 0});
+  player.set_attitude({1, 0, 0}, {0, 1, 0});
+  for (int i = 0; i < 200; ++i) {
+    auto input = tick(.02);
+    input.hyper_toggle = i == 0;
+    player.update(input);
+  }
+  CHECK(player.position().x - 1e10 == doctest::Approx(5.9 * Player::kLightSpeed));
+  CHECK(player.speed() == 2 * Player::kLightSpeed);
+  const auto speed = player.speed();
+  const Vec3 new_center{2e9, 3e8, 0};
+  const Vec3 before = player.position();
+  player.rebase(eff, before - new_center);
+  CHECK(sim::length(player.position() + new_center - before) < .001);
+  CHECK(player.speed() == speed);
+  CHECK(player.hyperdrive().active());
+  auto roll = tick(.02);
+  roll.left = true;
+  player.update(roll);
+  CHECK(sim::length(player.up() - Vec3{0, 1, 0}) > .01);
+  auto cancel = tick(.02);
+  cancel.hyper_cancel = true;
+  player.update(cancel);
+  CHECK(player.speed() == 0);
+  CHECK_FALSE(player.hyperdrive().active());
+  // Ordinary control immediately agrees with a fresh player at the same pose.
+  Player ordinary(eff, player.position());
+  ordinary.set_attitude(player.forward(), player.up());
+  auto thrust = tick(.02);
+  thrust.forward = true;
+  for (int i = 0; i < 20; ++i) { player.update(thrust); ordinary.update(thrust); }
+  CHECK(player.speed() == ordinary.speed());
+  CHECK(sim::length(player.position() - ordinary.position()) < .001);
+  auto engage = tick(.02);
+  engage.hyper_toggle = true;
+  player.update(engage);
+  player.enter_map();
+  CHECK(player.hyperdrive().effect() == 0);
+  CHECK_FALSE(player.hyperdrive().active());
+  player.exit_map();
+  CHECK(player.mode() == PlayerMode::Flight);
+  CHECK(player.speed() == 0);
+}
+
+TEST_CASE("player: external controllers and E clear suspended hyperdrive effects") {
+  const auto body = body_for(0xBEEF);
+  const auto planet = gen::derive_planet_params(body, gen::PlanetType::Barren);
+  const gen::TerrainField field(body.entity, planet);
+  const gen::EffectiveField eff(field);
+  for (bool interact : {false, true}) {
+    Player player(eff, {1e10, 0, 0});
+    auto engage = tick(.1);
+    engage.hyper_toggle = true;
+    player.update(engage);
+    CHECK(player.hyperdrive().effect() > 0);
+    if (interact) {
+      auto input = tick(.1);
+      input.interact_pressed = true;
+      player.update(input);
+    } else {
+      player.cancel_hyperdrive();  // F6 / J handoff
+    }
+    CHECK_FALSE(player.hyperdrive().active());
+    CHECK(player.hyperdrive().effect() == 0);
+    CHECK(player.speed() == 0);
+  }
+}

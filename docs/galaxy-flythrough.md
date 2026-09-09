@@ -1,85 +1,104 @@
-# Live galaxy traversal
+# Continuous galaxy flight
 
-Press **F6** in flight mode to enter the galaxy camera demo. Press **F6** again
-or **Escape** to return to the untouched player position, orientation and mode.
-The demo returns automatically after 120 seconds. Map mode owns its own input;
-exit the map before starting the tour. The preparation screen remains cancellable.
+Press **F6** in normal flight mode. The player starts at the current position,
+with the current attitude, roll, field of view and exposure. If the view points
+more than 10 degrees away from the center, it first turns smoothly toward it.
+A smaller correction blends into departure. The first second of translation
+accelerates gently at first, then reaches interstellar cruise speed. The route
+passes through the center and brakes at the opposite outskirts after 120 seconds.
+The outskirts are 1.1 times the seed's nominal galaxy radius; the density has a
+soft outer tail. Distances retain the existing `gen::kLightYearM` conversion.
 
-The current app visits systems within its home galaxy. The route uses that same
-seed's `home_galaxy_params`, never a separately generated galaxy or a fixed
-100,000-light-year distance. Endpoints are ±1.1 times its nominal radius along
-the normalized galactic vector (1, 0.35, 0.12). A galaxy has a diffuse outer tail;
-these endpoints mean 10% beyond the model's nominal radius, not zero density.
-Motion is linear in galactocentric game metres, crosses the origin at 60 seconds,
-and reaches the opposite endpoint at 120 seconds. Speed is route length / 120;
-`gen::kLightYearM` retains the existing 1:10 interstellar conversion. The camera
-looks along travel on entry and smoothly turns to look back during the exit.
+**F6** or **Escape** brakes over one second and restores normal controls at the
+reached location. Completion does the same at the route endpoint. It does not
+restore the departure position. Exit map mode before starting. The automatic
+controller owns movement while active; ordinary controls work after it finishes.
+Small flight steps accumulate even at large interstellar coordinates.
 
-The demo is an observing camera, separate from the player's local system and
-planet coordinates, physical speed limits, collision and persistent edits.
-It does not jump between systems, alter a generator, or write a player save.
+## Shared rendering
 
-The existing sky integrator computes the shared galaxy density, dust, nebulae,
-clusters and neighboring galaxy splats at half-second route samples, using
-**512×512 cube faces**, the same resolution as the stationary sky. The background
-worker retains 72 initial views (36 seconds of route lookahead) before departure,
-then continues generating while flying. Its bounded queue holds up to 128 views:
-at most roughly **3 GB** of sky pixels and 60,000-star catalogs, plus transient
-worker and renderer allocations. The first generated entry view is displayed
-while buffering, and preparation remains cancellable. Its measured time is
-reported separately from the 120-second traversal.
+The flight is a camera controller inside the ordinary game loop. Ordinary play,
+J arrivals and this controller use the same spatial sky, star visibility,
+atmosphere, exposure and projection. There is no separate flight scene, camera
+cut, quality switch, future-image queue, catalog crossfade, or buffering screen.
+Existing world generators, seeds, addresses and scale factors remain unchanged.
+The departure system's bodies retain their actual positions and angular sizes;
+a distant sun's minimum raster footprint conserves its shrinking visible area.
 
-Two GPU cube slots interpolate decoded linear radiance every frame. Only newly
-arrived samples are uploaded; full images are never blended or uploaded on the
-CPU each display frame. Resolved stars retain sample-relative positions, so
-camera-relative parallax and inverse-square brightness update every frame.
-Overlapping catalogs fade between samples. Coordinate subtraction happens in
-f64 game metres before conversion to render-only light-year offsets. This does
-not alter world coordinates or the interstellar scale.
+A disposable **192³ RGBA16F spatial field** samples the galaxy density, dust,
+nebula and cluster models once during scene initialization. It stores emission
+and extinction, not pictures of future camera views. Nonlinear coordinates
+concentrate samples in the thin disc and core. Every frame integrates the field
+from the actual observer with 96 logarithmically spaced segments, trilinear
+sampling and continuous attenuation. The resolution is fixed throughout flight.
+The field occupies 54 MiB plus a 13.5 MiB texture companion; CPU preparation
+arrays are released after upload. It is rebuilt from the seed, never persisted.
 
-No route samples survive a run. If production misses a deadline the camera clock
-continues and the last available sky is held; the profiler exposes that age
-instead of hiding it by slowing the tour. Cancellation is checked between
-ray-march rows. Interplanetary zodiacal light is omitted for this interstellar
-observer. The number of ray-march threads leaves two hardware threads available
-(on systems with at least four).
+A background stellar worker continually prepares a short corridor around the
+current position and velocity (0.25 seconds behind, 1.25 seconds ahead). It holds
+one pending request and one completed result. Meaningful direction/speed changes
+invalidate obsolete work and completed results. A 64 MiB expendable cell cache
+reduces repeated generation; result vertex buffers are additional transient
+memory. There is no route-length lookahead or queue of future skies.
 
-Remaining approximations: diffuse sky views crossfade between half-second
-samples, so rapid central features can smear; changing magnitude-limited catalogs
-can fade stars in/out. The exact center is intrinsically bright in the existing
-density and exposure model. Local planets and surfaces are not materialized
-while traversing interstellar distances; their subpixel appearance is carried
-by the galaxy and stellar LODs. The player resumes its original system on exit.
+Stars belong to fixed spatial cells and fixed intrinsic-magnitude bands; cell
+subdivision depends on population, not observer distance. Surviving points keep
+the same seeded positions, luminosities and colors across catalog changes.
+Actual distance, inverse-square flux, angular size and a smooth photometric
+visibility window are evaluated on the GPU every frame. Preparation includes a
+fainter visibility guard and follows continuously adapting exposure. Neighboring
+galaxies also retain fixed positions, with continuously projected footprints.
 
-## Reproduce and measure
+Dark bands toward the center come primarily from modeled **dust extinction**,
+including dark nebulae: they obscure light behind them. Low stellar density can
+also make a region dim, but a dark lane does not imply an empty region.
 
-Run a Release build with the default seed (83):
+These remain rendering approximations: the fixed field smooths features smaller
+than its sample spacing, and resolved stellar points use the existing statistical
+GalaxyOctree representation. Continuous travel does not yet stream an arbitrary
+new planetary system's terrain on approach; J still materializes that destination
+system. Matching-view checks therefore cover the galactic sky, not a claim of
+complete planet/surface streaming along every possible interstellar path.
+
+## Run and measure
+
+For a Release build and a 1280×720 physical-pixel window:
 
 ```sh
-./build-t0003/game/app/unendlich --release --galaxy-demo --galaxy-profile /tmp/galaxy.csv
+./build/game/app/unendlich --release --render-width 1280 --galaxy-demo \
+  --galaxy-profile /tmp/galaxy.csv
+uv run --script tools/profile-galaxy.py /tmp/galaxy.csv
 ```
 
-The default fullscreen mode uses the primary display; the CSV records actual
-framebuffer dimensions, including Retina scaling. `--window WxH` selects a
-window instead. `--release` disables the debug capture ring. The profile command
-exits after returning from the demo. Without `--galaxy-demo`, `--galaxy-profile`
-records each manually activated tour to the selected file (replacing it).
+`--render-width` accepts 320–16384 pixels and uses a 16:9 window. It disables
+automatic framebuffer scaling on Retina displays; verify the actual dimensions
+in the profile. `--window WxH` remains available for ordinary logical window
+sizes. `--release` disables the debug capture ring. The automatic profile run
+exits on completion; without `--galaxy-demo`, the chosen file records each F6
+flight, replacing the previous contents.
 
-CSV rows cover the whole traversal: monotonic elapsed time, frame-call cadence,
-CPU upload submission, sky deadline lag, source bake cost, surface
-presentation success and framebuffer size. Header metadata includes adapter,
-preparation time, cancellation/completion, shutdown join time, diameter and speed.
-The target on the development Mac is its native 3024×1964 framebuffer and a
-16.7 ms frame budget (`--window 1512x982` with 2× Retina scaling). Check the CSV
-dimensions rather than inferring physical pixels from window points.
+The CSV covers the complete 120-second trajectory, including its first and last
+frames. It records elapsed time, frame-call duration, last catalog build cost,
+presentation success, actual framebuffer dimensions and galactocentric position.
+A monotonic clock drives the camera independently of simulation frame clamping;
+a late frame never silently extends the route. The summary checks completeness
+and reports departure, entry, center and exit, including 24/60 fps budget misses.
+Frame-call cadence includes render submission and presentation backpressure. It
+is not a GPU timestamp or an OS compositor scanout measurement.
 
-Frame cadence includes render submission and presentation backpressure; it is
-**not** a GPU timestamp or an OS compositor scanout measurement. Failed surface
-acquisition remains a row and must not be counted as a displayed frame.
-Preparation precedes the route clock and is reported separately. Compare entry
-(0–40 s), center (40–80 s), and exit (80–120 s); count frames above 16.7 ms as
-well as tail percentiles, maximum, missing presentations and nonzero sky lag.
+Use a separate capture run for inspection: `--script` accepts `galaxy`,
+`galaxy-stop`, `pose`, `galactic x y z`, `attitude fx fy fz ux uy uz`,
+`exposure-lock 1`, and the existing `wait`, `hud`, `capture` and `record` commands.
+Matching poses with exposure locked and `--no-taa` compare a moving view against
+a stationary one without exposure/history differences. Synchronous screenshots
+can stall the GPU and must not be used as performance evidence.
 
-For visual inspection, add `--capture /tmp/galaxy` to a separate run. It produces
-`/tmp/galaxy-0.ppm`, `-60.ppm`, and `-120.ppm`. These synchronous GPU readbacks
-perturb timing; do not use a capture run as performance evidence.
+The ordinary system's zodiacal light and gegenschein remain visible near its
+orbital dust plane and fade continuously with distance from that system.
+`INF_NOSKY` and `INF_NOSTARS` remain available for rendering diagnostics.
+
+Automatic activation waits for the first normal scene presentation. That initial
+scene frame belongs to application startup; the recorded first flight frame is
+still at elapsed time zero. Manual F6 activation requires no preparation pause.
+Material-library completion requests an asynchronous planet-texture refresh;
+the main loop keeps rendering while an obsolete body bake finishes cancelling.

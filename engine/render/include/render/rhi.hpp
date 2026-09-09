@@ -23,6 +23,7 @@ class Rhi {
   ~Rhi();
 
   void resize(std::uint32_t width, std::uint32_t height);
+  float exposure() const;
 
   // Acquires the next surface texture, clears it to the given color,
   // presents. Returns false if the frame had to be skipped (e.g. surface
@@ -140,8 +141,12 @@ class Rhi {
   // over the body's height amplitude; material is RGBA8 albedo. This is
   // deliberately NOT a general texture system — one pair per resident
   // body plus a shared sampler.
-  std::uint32_t create_planet_texture(std::uint32_t face_size, std::uint32_t cube_count = 1);
-  // cube_count > 1 reserves consecutive six-layer cubes for sky interpolation.
+  std::uint32_t create_planet_texture(std::uint32_t face_size);
+  // Spatial radiance/extinction volume, RGBA16F slices in a 2D array. Its
+  // contents are world-space samples, never camera images or route frames.
+  std::uint32_t create_sky_volume(std::uint32_t size);
+  void update_sky_slice(std::uint32_t handle, std::uint32_t slice,
+                        const std::uint16_t* rgba_half);
   // Full-layer upload of one cube face: height as raw IEEE half floats
   // (face_size^2), material as RGBA8 (face_size^2 * 4 bytes).
   void update_planet_face(std::uint32_t handle, std::uint32_t face,

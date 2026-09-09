@@ -1,12 +1,17 @@
+#include <GLFW/glfw3.h>
+#include <stb_image_write.h>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <atomic>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -16,43 +21,41 @@
 #include <utility>
 #include <vector>
 
-#include <GLFW/glfw3.h>
-
-#include "core/ephem/ephemeris.hpp"
-#include "core/key.hpp"
-#include "gen/version.hpp"
-#include "core/time/world_clock.hpp"
-#include "gen/planet.hpp"
-#include "gen/system.hpp"
-#include "gen/galaxy.hpp"
-#include "gen/deep_sky.hpp"
-#include <stb_image_write.h>
-
 #include "city/materials.hpp"
-#include "city/towers.hpp"
 #include "city/showcase.hpp"
+#include "city/towers.hpp"
 #include "city_render.hpp"
 #include "civ_view.hpp"
+#include "core/ephem/ephemeris.hpp"
+#include "core/key.hpp"
+#include "core/time/world_clock.hpp"
+#include "deep_sky_render.hpp"
+#include "distant_galaxies.hpp"
+#include "galaxy_flythrough.hpp"
 #include "gen/civ_time.hpp"
 #include "gen/civilization.hpp"
 #include "gen/colony.hpp"
+#include "gen/deep_sky.hpp"
+#include "gen/effective_field.hpp"
+#include "gen/galaxy.hpp"
 #include "gen/galaxy_octree.hpp"
 #include "gen/human.hpp"
+#include "gen/planet.hpp"
 #include "gen/planet_texture.hpp"
+#include "gen/system.hpp"
 #include "gen/terrain.hpp"
 #include "gen/terrain_sampler.hpp"
 #include "gen/universe.hpp"
+#include "gen/version.hpp"
 #include "hud.hpp"
 #include "material_library.hpp"
 #include "render/math.hpp"
 #include "render/rhi.hpp"
 #include "sim/map_camera.hpp"
 #include "sim/player.hpp"
+#include "stellar_stream.hpp"
 #include "world/chunk_manager.hpp"
 #include "world/edit_store.hpp"
-#include "gen/effective_field.hpp"
-#include "deep_sky_render.hpp"
-#include "galaxy_flythrough.hpp"
 
 namespace {
 
@@ -495,6 +498,7 @@ int main(int argc, char** argv) {
   const char* seed_text = "83";
   const char* type_text = nullptr;
   const char* diff_text = nullptr;
+  bool pixel_window = false;
   bool galaxy_demo = false;
   const char* galaxy_profile = nullptr;
   bool map_demo = false;  // scripted M/Esc for headless smoke + captures
@@ -547,6 +551,17 @@ int main(int argc, char** argv) {
       spawn_altitude = std::strtod(argv[++i], nullptr);
     } else if (std::strcmp(argv[i], "--diff-file") == 0 && i + 1 < argc) {
       diff_text = argv[++i];
+    } else if (std::strcmp(argv[i], "--render-width") == 0 && i + 1 < argc) {
+      char* end = nullptr;
+      const long pixels = std::strtol(argv[++i], &end, 10);
+      if (*end != '\0' || pixels < 320 || pixels > 16384) {
+        std::fprintf(stderr, "--render-width must be 320..16384 pixels\n");
+        return EXIT_FAILURE;
+      }
+      window_w = static_cast<int>(pixels);
+      window_h = window_w * 9 / 16;
+      pixel_window = true;
+      windowed = true;
     } else if (std::strcmp(argv[i], "--galaxy-demo") == 0) {
       galaxy_demo = true;
     } else if (std::strcmp(argv[i], "--galaxy-profile") == 0 && i + 1 < argc) {
@@ -784,6 +799,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  if (pixel_window) glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
   if (hidden) {
     // Scripted/headless captures: render into an invisible window — no
     // window appears, nothing steals focus.
@@ -872,79 +888,29 @@ int main(int argc, char** argv) {
     return rhi->create_mesh_mat(v.data(), v.size());
   }();
 
-  // --- deep sky (T0018 WP2/WP3) ---------------------------------------
-  // Static per system: the resolved-star field (one mesh of billboards
-  // from the octree, magnitude-limited) and the diffuse band cube map
-  // (line integrals of the shared galaxy density plus nebula/cluster
-  // splats). Rebaked on every jump; parallax within a system is
-  // sub-pixel, so nothing moves between jumps.
-  const inf::gen::NebulaField nebula_field(inf::gen::home_galaxy_key(*seed),
-                                           galaxy_params);
-  const inf::gen::StarClusterField cluster_field(inf::gen::home_galaxy_key(*seed),
-                                                 galaxy_params);
-  std::uint32_t star_field_mesh = 0;
-  std::uint32_t sky_texture = 0;
-  constexpr std::uint32_t kSkyFaceSize = 512;
-  const auto rebuild_deep_sky = [&](const SVec3& gal_pos) {
-    inf::app::SkyView view;
-    view.eye_m = inf::gen::Dir3{inf::det::Real(gal_pos.x), inf::det::Real(gal_pos.y),
-                                inf::det::Real(gal_pos.z)};
-    // Sun direction and ecliptic (WP5) from the anchor's orbit at bake
-    // time: the zodiacal wedge drifts with the planet's year, but at the
-    // compressed periods that is ~1 deg/hour — a per-arrival bake holds.
-    {
-      const auto& orbit = system.planets[static_cast<std::size_t>(anchor->slot)].orbit;
-      const inf::core::LocalClock clock;
-      const auto pv = inf::core::Ephemeris::evaluate(orbit, clock.now());
-      const SVec3 planet_sys{pv.x.to_double(), pv.y.to_double(), pv.z.to_double()};
-      const SVec3 to_sun = inf::sim::normalize(planet_sys * -1.0);
-      view.sun_dir = inf::gen::Dir3{inf::det::Real(to_sun.x), inf::det::Real(to_sun.y),
-                                    inf::det::Real(to_sun.z)};
-      const double i = orbit.i_rad.to_double();
-      const double raan = orbit.raan_rad.to_double();
-      view.ecliptic_normal =
-          inf::gen::Dir3{inf::det::Real(std::sin(raan) * std::sin(i)),
-                         inf::det::Real(-std::cos(raan) * std::sin(i)),
-                         inf::det::Real(std::cos(i))};
-    }
-    const inf::gen::Dir3& eye = view.eye_m;
-    if (star_field_mesh != 0) {
-      rhi->destroy_mesh(star_field_mesh);
-      star_field_mesh = 0;
-    }
-    const inf::core::LocalClock sky_clock;
-    const inf::core::WorldTime sky_t0 = sky_clock.now();
-    inf::app::StarCatalogStats stats;
-    // m 8.3 is the display visibility floor at the night exposure
-    // ceiling — fainter stars would cost bake time without ever showing.
-    const std::vector<float> field =
-        inf::app::build_star_field_mesh(galaxy_octree, eye, 8.3, 90000, &stats);
-    // Bring-up isolation switches: INF_NOSTARS / INF_NOSKY.
-    if (!field.empty() && std::getenv("INF_NOSTARS") == nullptr) {
-      star_field_mesh = rhi->create_mesh_mat(field.data(), field.size());
-    }
-    const inf::core::WorldTime sky_t1 = sky_clock.now();
-    const int threads =
-        std::max(2U, std::thread::hardware_concurrency()) - 1;
-    const inf::app::SkyBakeResult bake = inf::app::bake_deep_sky(
-        galaxy_octree.density(), nebula_field, cluster_field, *seed, view,
-        kSkyFaceSize, threads);
-    if (sky_texture == 0) {
-      sky_texture = rhi->create_planet_texture(kSkyFaceSize);
-    }
-    for (std::uint32_t face = 0; face < 6; ++face) {
-      rhi->update_planet_face(sky_texture, face, bake.luminance_half[face].data(),
-                              bake.chroma_rgba[face].data());
-    }
-    const inf::core::WorldTime sky_t2 = sky_clock.now();
-    std::printf(
-        "deep sky: %zu stars (brightest m=%.1f, %zu cells, %.0f ms), band %ux%u "
-        "(%.0f ms)\n",
-        stats.star_count, stats.brightest_apparent_mag, stats.cells_visited,
-        static_cast<double>(sky_t1 - sky_t0) * 1e-6, kSkyFaceSize, kSkyFaceSize,
-        static_cast<double>(sky_t2 - sky_t1) * 1e-6);
-  };
-  rebuild_deep_sky(galactic_pos);
+  // Both free flight and J arrivals use the same spatial sky and star stream.
+  auto sky_volume = inf::app::build_galaxy_volume(*seed, galaxy_params);
+  const auto sky_texture = rhi->create_sky_volume(sky_volume.size);
+  for (std::uint32_t z = 0; z < sky_volume.size; ++z)
+    rhi->update_sky_slice(sky_texture, z,
+                          sky_volume.rgba_half.data() +
+                              static_cast<std::size_t>(z) * sky_volume.size *
+                                  sky_volume.size * 4);
+  sky_volume.rgba_half.clear();
+  sky_volume.rgba_half.shrink_to_fit();
+  const auto neighbour_galaxies = inf::app::distant_galaxies(*seed);
+  inf::app::StellarStream stellar_stream(*seed, galaxy_params);
+  auto star_catalog = inf::app::build_stellar_catalog(
+      galaxy_octree, galactic_pos, {}, nullptr, 5.5);
+  std::uint32_t star_field_mesh =
+      star_catalog.vertices.empty()
+          ? 0
+          : rhi->create_mesh_mat(star_catalog.vertices.data(),
+                                 star_catalog.vertices.size());
+  star_catalog.vertices.clear();
+  using FlightClock = inf::core::MonotonicClock;
+  auto star_requested = FlightClock::now();
+
   // Sea shell (spec section 5): one translucent sphere at sea level,
   // EarthLike only. Zero shading effort by design. Rebuilt per anchor.
   std::uint32_t sea_mesh = 0;
@@ -1161,6 +1127,7 @@ int main(int argc, char** argv) {
   bool script_land = false;
   bool script_map = false;   // scripted M press (map captures)
   bool script_jump = false;  // scripted J select + instant confirm
+  bool script_exposure_locked = false;
   bool script_hud = true;    // scripted HUD visibility (clean captures)
 
   // --- map mode state (T0013, design/map-mode.md) -----------------------
@@ -1441,6 +1408,8 @@ int main(int argc, char** argv) {
   std::mutex bake_mutex;
   std::vector<BakeResult> bake_done;
   std::atomic<bool> bake_quit{false};
+  std::atomic<bool> bake_running{false};
+  bool bake_restart_pending = false;
   std::thread bake_thread;
   // Restartable (T0017): a jump regenerates the system, so the worker is
   // stopped, textures dropped, and a new worker started for the arrival
@@ -1448,6 +1417,7 @@ int main(int argc, char** argv) {
   const auto start_bake_worker = [&](const inf::gen::StarSystemParams system_copy,
                                      const inf::gen::SystemCell cell_copy) {
     bake_quit.store(false);
+    bake_restart_pending = false;
     std::vector<float> means_copy(materials.mean_albedo_table(),
                                   materials.mean_albedo_table() + inf::gen::kMaterialCount * 3);
     // T0020 WP7: the settled bodies' civ inputs, gathered on this thread
@@ -1456,77 +1426,92 @@ int main(int argc, char** argv) {
     // and night lights from orbit.
     std::vector<inf::app::CivBodyInputs> civ_bodies =
         inf::app::gather_civ_bodies(*seed, civ_registry, civ_resolver, cell_copy, civ_now(world_clock.now()));
-    bake_thread = std::thread([&bake_mutex, &bake_done, &bake_quit, &body_tex_key,
-                               seed_copy = *seed, system_copy, cell_copy, means_copy, civ_bodies]() {
-    struct Job {
-      int slot;
-      int moon;  // -1 = the planet itself
-      std::uint32_t size;
-    };
-    std::vector<Job> jobs;
-    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
-      const auto& entry = system_copy.planets[static_cast<std::size_t>(slot)];
-      if (!entry.occupied) {
-        continue;
+    bake_running.store(true);
+    bake_thread = std::thread([&bake_mutex, &bake_done, &bake_quit,
+                               &bake_running, &body_tex_key, seed_copy = *seed,
+                               system_copy, cell_copy, means_copy,
+                               civ_bodies]() {
+      struct Job {
+        int slot;
+        int moon;  // -1 = the planet itself
+        std::uint32_t size;
+      };
+      std::vector<Job> jobs;
+      for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+        const auto& entry = system_copy.planets[static_cast<std::size_t>(slot)];
+        if (!entry.occupied) {
+          continue;
+        }
+        // Giants get a coarse map only: their parameter lattice is ~200 km
+        // per cell, so extra texels buy nothing yet (T0015 section 13).
+        const bool giant = entry.phys.radius_m.to_double() > 2.0e6;
+        jobs.push_back({slot, -1, giant ? 128U : 256U});
+        // Moons ride right behind their planet (was: all moons last) — an
+        // early moon visit found a flat untextured ball otherwise.
+        for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
+          jobs.push_back({slot, static_cast<int>(mi), 192U});
+        }
       }
-      // Giants get a coarse map only: their parameter lattice is ~200 km
-      // per cell, so extra texels buy nothing yet (T0015 section 13).
-      const bool giant = entry.phys.radius_m.to_double() > 2.0e6;
-      jobs.push_back({slot, -1, giant ? 128U : 256U});
-      // Moons ride right behind their planet (was: all moons last) — an
-      // early moon visit found a flat untextured ball otherwise.
-      for (std::size_t mi = 0; mi < entry.moons.size(); ++mi) {
-        jobs.push_back({slot, static_cast<int>(mi), 192U});
-      }
-    }
-    for (const Job& job : jobs) {
-      if (bake_quit.load()) {
-        return;
-      }
-      BakeResult result;
-      result.key = body_tex_key(job.slot, job.moon);
-      const inf::app::CivBodyInputs* civ_inputs = nullptr;
-      for (const auto& b : civ_bodies) {
-        if (b.slot == job.slot && b.moon == job.moon) civ_inputs = &b;
-      }
-      if (job.moon < 0) {
-        const inf::gen::BodyHandle body =
-            inf::gen::body_for_system_slot(seed_copy, cell_copy, job.slot);
-        const auto& entry = system_copy.planets[static_cast<std::size_t>(job.slot)];
-        if (!entry.landable) {
-          // Giants: a banded gas ball, not rocky terrain (2026-09-01).
-          result.radius_m = entry.phys.radius_m.to_double();
-          result.texture =
-              inf::gen::bake_gas_texture(body.entity, entry.phys.cls, job.size);
+      for (const Job& job : jobs) {
+        if (bake_quit.load()) {
+          break;
+        }
+        BakeResult result;
+        result.key = body_tex_key(job.slot, job.moon);
+        const inf::app::CivBodyInputs* civ_inputs = nullptr;
+        for (const auto& b : civ_bodies) {
+          if (b.slot == job.slot && b.moon == job.moon) civ_inputs = &b;
+        }
+        if (job.moon < 0) {
+          const inf::gen::BodyHandle body =
+              inf::gen::body_for_system_slot(seed_copy, cell_copy, job.slot);
+          const auto& entry =
+              system_copy.planets[static_cast<std::size_t>(job.slot)];
+          if (!entry.landable) {
+            // Giants: a banded gas ball, not rocky terrain (2026-09-01).
+            result.radius_m = entry.phys.radius_m.to_double();
+            result.texture = inf::gen::bake_gas_texture(
+                body.entity, entry.phys.cls, job.size);
+          } else {
+            const inf::gen::PlanetParams planet =
+                inf::gen::planet_params_for_slot(system_copy, job.slot, body);
+            inf::gen::TerrainField field(body.entity, planet);
+            std::unique_ptr<inf::app::CivModifier> modifier;
+            if (civ_inputs != nullptr)
+              modifier = inf::app::build_civ_modifier(body.entity, &field,
+                                                      *civ_inputs);
+            result.radius_m = planet.radius_m.to_double();
+            result.texture = inf::gen::bake_planet_texture(field, job.size,
+                                                           means_copy.data());
+          }
         } else {
+          const inf::gen::BodyHandle body = inf::gen::body_for_system_moon(
+              seed_copy, cell_copy, job.slot, job.moon);
           const inf::gen::PlanetParams planet =
-              inf::gen::planet_params_for_slot(system_copy, job.slot, body);
+              inf::gen::planet_params_for_moon(system_copy, job.slot, job.moon,
+                                               body);
           inf::gen::TerrainField field(body.entity, planet);
           std::unique_ptr<inf::app::CivModifier> modifier;
-          if (civ_inputs != nullptr) modifier = inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
+          if (civ_inputs != nullptr)
+            modifier =
+                inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
           result.radius_m = planet.radius_m.to_double();
-          result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
+          result.texture =
+              inf::gen::bake_planet_texture(field, job.size, means_copy.data());
         }
-      } else {
-        const inf::gen::BodyHandle body =
-            inf::gen::body_for_system_moon(seed_copy, cell_copy, job.slot, job.moon);
-        const inf::gen::PlanetParams planet =
-            inf::gen::planet_params_for_moon(system_copy, job.slot, job.moon, body);
-        inf::gen::TerrainField field(body.entity, planet);
-        std::unique_ptr<inf::app::CivModifier> modifier;
-        if (civ_inputs != nullptr) modifier = inf::app::build_civ_modifier(body.entity, &field, *civ_inputs);
-        result.radius_m = planet.radius_m.to_double();
-        result.texture = inf::gen::bake_planet_texture(field, job.size, means_copy.data());
+        if (bake_quit.load()) break;
+        std::printf(
+            "bake: slot %d moon %d done%s\n", job.slot, job.moon,
+            civ_inputs != nullptr ? " (with civilization surface)" : "");
+        std::fflush(stdout);
+        const std::lock_guard<std::mutex> lock(bake_mutex);
+        bake_done.push_back(std::move(result));
       }
-      std::printf("bake: slot %d moon %d done%s\n", job.slot, job.moon,
-                  civ_inputs != nullptr ? " (with civilization surface)" : "");
-      std::fflush(stdout);
-      const std::lock_guard<std::mutex> lock(bake_mutex);
-      bake_done.push_back(std::move(result));
-    }
+      bake_running.store(false);
     });
   };
   const auto stop_bake_worker = [&] {
+    bake_restart_pending = false;
     bake_quit.store(true);
     if (bake_thread.joinable()) {
       bake_thread.join();
@@ -1564,31 +1549,42 @@ int main(int argc, char** argv) {
   };
 
   bool f6_was_down = false;
-  std::printf("F6: 120-second galaxy fly-through; F6/Esc: return to player\n");
+  inf::app::GalaxyFlight galaxy_flight;
+  bool flight_active = false, flight_profile_exit = false,
+       flight_final_frame = false;
+  bool scene_presented = false;
+  FlightClock::time_point flight_epoch;
+  double flight_elapsed = 0;
+  SVec3 flight_start_local{}, flight_start_planet{};
+  std::ofstream flight_csv;
+  std::printf("F6: continuous galaxy flight; F6/Esc: brake and resume here\n");
   long frame = 0;
   while (glfwWindowShouldClose(window) == GLFW_FALSE) {
+    const auto frame_started = FlightClock::now();
     glfwPollEvents();
+    flight_final_frame = false;
     const bool f6_down = glfwGetKey(window, GLFW_KEY_F6) == GLFW_PRESS;
-    if (galaxy_demo || (f6_down && !f6_was_down && map_phase == MapPhase::Off)) {
-      const bool scripted = galaxy_demo;
-      galaxy_demo = false;
-      rhi->set_ring_enabled(false);
-      inf::app::run_galaxy_flythrough(window, *rhi, *hud, glow_mesh, *seed,
-          galaxy_params, state.width, state.height, galaxy_profile, capture_text);
-      rhi->set_ring_enabled(!release_mode);
-      last_time = world_clock.now();
-      glfwGetCursorPos(window, &last_mx, &last_my);
-      esc_was_down = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
-      f6_was_down = glfwGetKey(window, GLFW_KEY_F6) == GLFW_PRESS;
-      if (scripted && galaxy_profile != nullptr) glfwSetWindowShouldClose(window, GLFW_TRUE);
-      continue;
-    }
+    const bool flight_toggle = f6_down && !f6_was_down;
+    // Automatic activation follows the first displayed scene, just as an F6
+    // press does. Initial scene uploads do not consume the departure ramp.
+    bool flight_requested =
+        (galaxy_demo && scene_presented) || (flight_toggle && !flight_active);
+    flight_profile_exit =
+        flight_profile_exit || (galaxy_demo && galaxy_profile != nullptr);
+    if (flight_requested) galaxy_demo = false;
     f6_was_down = f6_down;
     upload_finished_bakes();
     if (materials.poll(*rhi)) {
       // Every tile is resident: re-bake the far views with the measured
       // tile means so the planet from orbit matches the ground.
       materials_anchor = nullptr;
+      bake_quit.store(true);
+      bake_restart_pending = true;
+    }
+    // A material refresh must not join a body bake that is still computing.
+    // Keep displaying resident textures while cancellation completes
+    // off-thread.
+    if (bake_restart_pending && !bake_running.load()) {
       stop_bake_worker();
       start_bake_worker(system, current_cell);
     }
@@ -1615,7 +1611,7 @@ int main(int argc, char** argv) {
     const bool esc_down = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     const bool esc_pressed = esc_down && !esc_was_down;
     esc_was_down = esc_down;
-    if (esc_pressed && map_phase == MapPhase::Off) {
+    if (esc_pressed && map_phase == MapPhase::Off && !flight_active) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);  // prototype convenience
     }
     const inf::core::WorldTime now = world_clock.now();
@@ -1698,7 +1694,7 @@ int main(int argc, char** argv) {
       }
     }
 
-    player.update(input);
+    if (!flight_active) player.update(input);
 
     // --- live system state (ephemerides; the universe never pauses) -----
     const auto eval_pos = [&](const inf::core::OrbitalElements& orbit) {
@@ -1800,7 +1796,8 @@ int main(int argc, char** argv) {
     // --- anchor switching (T0014): re-anchor to the closest planet ------
     // once it is decisively closer than the current one. The altitude
     // governor then handles approach braking on its own.
-    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
+    if (!flight_active && map_phase == MapPhase::Off &&
+        player.mode() == inf::sim::PlayerMode::Flight) {
       const SVec3 at = player.position();
       const double anchor_gap = inf::sim::length(at) - anchor->radius;
       const ClosestBody candidate = closest_body();
@@ -1848,6 +1845,7 @@ int main(int argc, char** argv) {
     // nearest system; tap again to cycle. Turning the ship clears the
     // selection. HOLD J (0.75 s) to jump — a stray tap must never fling
     // anyone 20 light-years.
+    const SVec3 jump_observer = galactic_pos + planet_sys + player.position();
     bool j_down = glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS;
     bool jump_confirm_scripted = false;
     if (script_jump) {
@@ -1856,8 +1854,8 @@ int main(int argc, char** argv) {
       j_was_down = false;
       jump_confirm_scripted = true;  // ...that also confirms instantly
     }
-    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight &&
-        jump_timer <= 0.0) {
+    if (!flight_active && map_phase == MapPhase::Off &&
+        player.mode() == inf::sim::PlayerMode::Flight && jump_timer <= 0.0) {
       const SVec3 fwd = inf::sim::normalize(player.forward());
       if (jump_index >= 0 && inf::sim::dot(fwd, jump_sel_forward) < 0.9848) {
         jump_index = -1;  // turned away (> ~10 deg): selection cleared
@@ -1867,8 +1865,9 @@ int main(int argc, char** argv) {
           jump_candidates.clear();
           std::vector<inf::gen::GalaxyOctree::CellId> cells;
           galaxy_octree.systems_in_ball(
-              inf::gen::Dir3{inf::det::Real(galactic_pos.x), inf::det::Real(galactic_pos.y),
-                             inf::det::Real(galactic_pos.z)},
+              inf::gen::Dir3{inf::det::Real(jump_observer.x),
+                             inf::det::Real(jump_observer.y),
+                             inf::det::Real(jump_observer.z)},
               inf::det::Real(20.0 * inf::gen::kLightYearM), 512, &cells);
           for (const auto& cell : cells) {
             const inf::gen::SystemCell sys_cell{cell.x, cell.y, cell.z, cell.level};
@@ -1877,7 +1876,7 @@ int main(int argc, char** argv) {
             }
             const inf::gen::Dir3 p = galaxy_octree.system_position_m(cell);
             const SVec3 pos{p.x.to_double(), p.y.to_double(), p.z.to_double()};
-            const SVec3 rel = pos - galactic_pos;
+            const SVec3 rel = pos - jump_observer;
             const double dist = inf::sim::length(rel);
             if (dist < 0.01 * inf::gen::kLightYearM) {
               continue;
@@ -1987,9 +1986,12 @@ int main(int argc, char** argv) {
         rebuild_system_ui();
         recompute_bodies();
         start_bake_worker(system, current_cell);
-        // New vantage, new sky: rebake the band + star field while the
-        // transition still covers the screen (~0.5 s, deliberate).
-        rebuild_deep_sky(galactic_pos);
+        // The spatial sky follows this position immediately; request its stars.
+        stellar_stream.request(
+            galactic_pos, {},
+            std::clamp(
+                9.05 + 2.5 * std::log10(std::max(.01f, rhi->exposure()) / 35.0),
+                -4.0, 8.3));
         std::printf("jump: arrived at %s — %s (slot %d, %s, radius %.0f km)\n",
                     jump_sel_name.c_str(),
                     slot_names[static_cast<std::size_t>(arrival_slot)].c_str(),
@@ -2066,6 +2068,47 @@ int main(int argc, char** argv) {
           player.push_out(moon.pos, moon.radius * 1.02 + 5.0);
         }
       }
+    }
+
+    if (flight_requested && map_phase == MapPhase::Off &&
+        player.mode() == inf::sim::PlayerMode::Flight && jump_timer <= 0.0) {
+      flight_start_local = player.position();
+      flight_start_planet = planet_sys;
+      galaxy_flight.start(
+          galaxy_params,
+          {galactic_pos + planet_sys + player.position(), player.forward(),
+           player.up(), player.forward() * player.speed()});
+      flight_epoch = FlightClock::now();
+      flight_elapsed = 0;
+      flight_active = true;
+      if (galaxy_profile) {
+        flight_csv.close();
+        flight_csv.open(galaxy_profile);
+        flight_csv << std::setprecision(17);
+        flight_csv << "# adapter=" << rhi->adapter_info()
+                   << ";duration_s=120;center_s=" << galaxy_flight.center_time()
+                   << ";budget_ms=41.6667;prediction_s=1;volume_size="
+                   << sky_volume.size << '\n';
+        flight_csv << "elapsed_s,frame_ms,catalog_ms,presented,width,height,x_"
+                      "m,y_m,z_m\n";
+      }
+    }
+    if (flight_active) {
+      flight_elapsed =
+          flight_requested
+              ? 0.0
+              : std::chrono::duration<double>(FlightClock::now() - flight_epoch)
+                    .count();
+      if ((!flight_requested && flight_toggle) || esc_pressed)
+        galaxy_flight.stop(flight_elapsed);
+      flight_elapsed = std::min(flight_elapsed, galaxy_flight.end_time());
+      const auto pose = galaxy_flight.sample(flight_elapsed);
+      player.set_position(flight_start_local +
+                          galaxy_flight.displacement(flight_elapsed) +
+                          (flight_start_planet - planet_sys));
+      player.set_attitude(pose.forward, pose.up);
+      player.set_speed(inf::sim::length(pose.velocity));
+      flight_final_frame = galaxy_flight.finished(flight_elapsed);
     }
 
     // --- debug script step (--script) ------------------------------------
@@ -2145,6 +2188,27 @@ int main(int argc, char** argv) {
         }
       } else if (cmd.op == "land") {
         script_land = true;
+      } else if (cmd.op == "exposure-lock" && !cmd.args.empty()) {
+        script_exposure_locked = arg_d(0) != 0.0;
+      } else if (cmd.op == "attitude" && cmd.args.size() >= 6) {
+        player.set_attitude({arg_d(0), arg_d(1), arg_d(2)},
+                            {arg_d(3), arg_d(4), arg_d(5)});
+      } else if (cmd.op == "pose") {
+        const auto at = galactic_pos + planet_sys + player.position();
+        const auto f = player.forward();
+        const auto up = player.up();
+        std::printf(
+            "capture pose: %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+            "%.17g speed=%.17g\n",
+            at.x, at.y, at.z, f.x, f.y, f.z, up.x, up.y, up.z, player.speed());
+      } else if (cmd.op == "galaxy") {
+        galaxy_demo = true;
+      } else if (cmd.op == "galaxy-stop") {
+        if (flight_active) galaxy_flight.stop(flight_elapsed);
+      } else if (cmd.op == "galactic" && cmd.args.size() >= 3) {
+        const SVec3 target{arg_d(0), arg_d(1), arg_d(2)};
+        player.set_position((target - galactic_pos) - planet_sys);
+        stellar_stream.request(target, {});
       } else if (cmd.op == "map") {
         script_map = true;
       } else if (cmd.op == "jump") {
@@ -2207,9 +2271,11 @@ int main(int argc, char** argv) {
     }
 
     // --- map mode: enter / exit triggers ---------------------------------
-    const bool m_down = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
+    const bool m_down =
+        !flight_active && glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
     const bool m_pressed =
-        (m_down && !m_was_down) || (map_demo && frame == 100) || script_map;
+        (m_down && !m_was_down) ||
+        (!flight_active && ((map_demo && frame == 100) || script_map));
     script_map = false;
     const bool map_exit_scripted = map_demo && frame == 550;
     m_was_down = m_down;
@@ -2317,6 +2383,33 @@ int main(int argc, char** argv) {
       ++uploads;
     }
 
+    const double star_visibility = std::clamp(
+        8.3 + 2.5 * std::log10(std::max(.01f, rhi->exposure()) / 35.0), -4.0,
+        8.3);
+    const SVec3 observer_gal = galactic_pos + planet_sys + player.position();
+    if (std::chrono::duration<double>(FlightClock::now() - star_requested)
+            .count() >= 0.05) {
+      const SVec3 velocity = flight_active
+                                 ? galaxy_flight.sample(flight_elapsed).velocity
+                                 : player.forward() * player.speed();
+      stellar_stream.request(observer_gal, velocity,
+                             std::min(8.3, star_visibility + 0.75));
+      star_requested = FlightClock::now();
+    }
+    if (auto catalog = stellar_stream.take_ready()) {
+      const auto replacement =
+          catalog->vertices.empty()
+              ? 0
+              : rhi->create_mesh_mat(catalog->vertices.data(),
+                                     catalog->vertices.size());
+      if (replacement || catalog->vertices.empty()) {
+        if (star_field_mesh) rhi->destroy_mesh(star_field_mesh);
+        star_field_mesh = replacement;
+        star_catalog = std::move(*catalog);
+        star_catalog.vertices.clear();
+      }
+    }
+
     // --- camera (map-aware) ----------------------------------------------
     SVec3 cam_pos_local = player_pos;
     SVec3 cam_fwd_v = player.forward();
@@ -2414,6 +2507,9 @@ int main(int argc, char** argv) {
       }
       const double size = std::max(star.radius, dist * px_world_all * min_px * 0.5);
       const double apparent_px = size / (dist * px_world_all);
+      // Preserve integrated light below the minimum raster footprint. Without
+      // this factor the departure sun remains a glaring disc across the galaxy.
+      const double coverage = (star.radius / size) * (star.radius / size);
       // Distant suns get a disproportionally larger, brighter corona so
       // they stay spectacular as they shrink toward a point.
       const double far_boost = std::clamp(60.0 / std::max(apparent_px, 1.0), 1.0, 2.6);
@@ -2425,9 +2521,9 @@ int main(int argc, char** argv) {
         inf::render::Rhi::DrawItem item;
         item.mesh = star_mesh;
         std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
-        item.color[0] = star.tint[0];
-        item.color[1] = star.tint[1];
-        item.color[2] = star.tint[2];
+        item.color[0] = star.tint[0] * static_cast<float>(coverage);
+        item.color[1] = star.tint[1] * static_cast<float>(coverage);
+        item.color[2] = star.tint[2] * static_cast<float>(coverage);
         item.color[3] = 1.0f;
         item.mode = 1;
         const RVec3 view_dir = inf::render::normalize(rel);
@@ -2453,9 +2549,9 @@ int main(int argc, char** argv) {
         inf::render::Rhi::DrawItem item;
         item.mesh = glow_mesh;
         std::memcpy(item.mvp, mvp.m, sizeof(mvp.m));
-        item.color[0] = star.tint[0];
-        item.color[1] = star.tint[1];
-        item.color[2] = star.tint[2];
+        item.color[0] = star.tint[0] * static_cast<float>(coverage);
+        item.color[1] = star.tint[1] * static_cast<float>(coverage);
+        item.color[2] = star.tint[2] * static_cast<float>(coverage);
         item.color[3] = 1.0f;
         item.mode = 2;
         item.aux[3] = star.phase;
@@ -2482,7 +2578,7 @@ int main(int argc, char** argv) {
             ? (inf::sim::length(cam_pos_local) - anchor->radius) / atmosphere
             : 9.0;
     // T0018 WP3: the dome is ALWAYS drawn in flight — in space it carries
-    // the baked deep-sky cube map alone (density -> 0 in the shader), in
+    // the spatial deep sky alone (density -> 0 in the shader), in
     // an atmosphere it adds the scattered daylight on top.
     if (map_phase == MapPhase::Off) {
       inf::render::Rhi::DrawItem dome;
@@ -2501,16 +2597,45 @@ int main(int argc, char** argv) {
       dome.mode = 4;
       static const bool no_sky_tex = std::getenv("INF_NOSKY") != nullptr;
       dome.planet_texture = no_sky_tex ? 0 : sky_texture;
-      dome.extra[0] = 1.0f;  // band gain
+      dome.extra[0] = no_sky_tex ? 0.0f : 1.0f;
+      const auto sky_eye = (galactic_pos + planet_sys + cam_pos_local) *
+                           (1.0 / sky_volume.radius_m);
+      dome.aux[0] = static_cast<float>(sky_eye.x);
+      dome.aux[1] = static_cast<float>(sky_eye.y);
+      dome.aux[2] = static_cast<float>(sky_eye.z);
+      const auto& dust_orbit =
+          system.planets[static_cast<std::size_t>(anchor->slot)].orbit;
+      const double inclination = dust_orbit.i_rad.to_double();
+      const double ascending = dust_orbit.raan_rad.to_double();
+      dome.color[0] =
+          static_cast<float>(std::sin(ascending) * std::sin(inclination));
+      dome.color[1] =
+          static_cast<float>(-std::cos(ascending) * std::sin(inclination));
+      dome.color[2] = static_cast<float>(std::cos(inclination));
+      const double dust_scale =
+          dust_orbit.a_m.to_double() /
+          std::max(1.0, inf::sim::length(planet_sys + cam_pos_local));
+      dome.color[3] =
+          static_cast<float>(std::min(1.0, dust_scale * dust_scale));
       items.push_back(dome);
-      // WP2: the resolved-star field, one static mesh of billboards at
-      // infinity (rotation-only transform; the shader pins depth just
-      // above the dome so real geometry occludes stars).
-      if (star_field_mesh != 0) {
+      inf::app::draw_distant_galaxies(neighbour_galaxies,
+                                      galactic_pos + planet_sys + cam_pos_local,
+                                      view_projection, glow_mesh, items);
+      // Stable spatial stars: current-eye parallax and photometry in the
+      // shader, with ordinary scene geometry providing occlusion.
+      static const bool no_stars = std::getenv("INF_NOSTARS") != nullptr;
+      if (star_field_mesh != 0 && !no_stars) {
         inf::render::Rhi::DrawItem stars_item;
         stars_item.mesh = star_field_mesh;
         std::memcpy(stars_item.mvp, view_projection.m, sizeof(view_projection.m));
         stars_item.mode = 7;
+        stars_item.color[3] = static_cast<float>(star_visibility);
+        const SVec3 offset = (star_catalog.origin -
+                              (galactic_pos + planet_sys + cam_pos_local)) *
+                             (1.0 / inf::gen::kLightYearM);
+        stars_item.aux[0] = static_cast<float>(offset.x);
+        stars_item.aux[1] = static_cast<float>(offset.y);
+        stars_item.aux[2] = static_cast<float>(offset.z);
         const double star_half_px = 5.0;
         stars_item.extra[0] = static_cast<float>(2.0 * star_half_px / state.width);
         stars_item.extra[1] = static_cast<float>(2.0 * star_half_px / state.height);
@@ -3255,7 +3380,8 @@ int main(int argc, char** argv) {
     // the crosshair rests on — name, surface distance, and an ETA while
     // actually closing on it.
     inf::app::TargetInfo target;
-    if (map_phase == MapPhase::Off && player.mode() == inf::sim::PlayerMode::Flight) {
+    if (!flight_active && map_phase == MapPhase::Off &&
+        player.mode() == inf::sim::PlayerMode::Flight) {
       const SVec3 fwd = inf::sim::normalize(player.forward());
       double best_margin = 0.03;  // radians of grace beyond the disc edge
       for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
@@ -3567,8 +3693,40 @@ int main(int argc, char** argv) {
     }
     frame_params.city_ranges = city_ranges.data();
     frame_params.city_range_count = city_ranges.size();
-    frame_params.lock_exposure = sweep_frames > 0 && frame >= sweep_warmup - 8;
-    rhi->render_frame(frame_params, items.data(), items.size());
+    frame_params.lock_exposure =
+        script_exposure_locked ||
+        (sweep_frames > 0 && frame >= sweep_warmup - 8);
+    if (flight_active && script_hud) {
+      char status[120];
+      std::snprintf(status, sizeof(status),
+                    "GALAXY FLIGHT %.1f / %.0f s | F6 / Esc: brake",
+                    flight_elapsed, galaxy_flight.end_time());
+      const auto first = items.size();
+      hud->build_map_card(&items, {status}, -0.95, 0.94,
+                          static_cast<double>(state.width) / state.height,
+                          state.height);
+      for (auto i = first; i < items.size(); ++i) items[i].overlay = true;
+    }
+    const bool presented =
+        rhi->render_frame(frame_params, items.data(), items.size());
+    scene_presented = scene_presented || presented;
+    if (flight_active && flight_csv) {
+      const double ms = std::chrono::duration<double, std::milli>(
+                            FlightClock::now() - frame_started)
+                            .count();
+      flight_csv << flight_elapsed << ',' << ms << ',' << star_catalog.build_ms
+                 << ',' << presented << ',' << state.width << ','
+                 << state.height << ',' << observer_gal.x << ','
+                 << observer_gal.y << ',' << observer_gal.z << '\n';
+    }
+    if (flight_final_frame && presented) {
+      flight_active = false;
+      player.set_speed(0);
+      flight_csv << "# complete=" << (!galaxy_flight.cancelled())
+                 << ";cancelled=" << galaxy_flight.cancelled() << '\n';
+      flight_csv.close();
+      if (flight_profile_exit) glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
     if (stress_frames > 0 && frame >= static_cast<long>(stress_frames)) {
       std::printf("stress: %d target recreations survived\n", stress_frames);
       std::fflush(stdout);

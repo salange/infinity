@@ -356,24 +356,20 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     return out;
   }
   if (mode == 7u) {
-    // Resolved star billboard (T0018 WP2): one static mesh carries the
-    // whole field. position = unit direction (galactic frame), normal.xy
-    // = quad corner scaled by the star's size, normal.z = HDR peak flux,
-    // mat_pack = packed 8-bit rgb, mat_blend = twinkle phase. w = 0
-    // makes the transform rotation-only (the field sits at infinity);
+    // Resolved star billboard: position = catalog-relative light-years,
+    // normal.xy = unit corner, normal.z = flux at one light-year,
+    // mat_pack = packed 8-bit rgb. w = 0 makes the transform rotation-only;
     // depth is forced just above the sky dome so terrain and planets
     // occlude stars but the dome never does. extra.xy = NDC per corner
     // unit (from the viewport size).
     // Moving catalog positions are sample-relative light-years. Subtract the
     // observer on the CPU in f64, then pass the small relative offset in aux.
-    var direction = position;
-    var flux = normal.z;
-    if (u.extra.z > 0.5) {
-      direction += u.aux.xyz;
-      flux *= min(dot(position, position) / max(dot(direction, direction), 0.01), 100.0) * u.color.a;
-    }
+    let direction = position + u.aux.xyz;
+    var flux = normal.z / max(dot(direction, direction), 0.00000001);
+    let magnitude = -2.5 * log(max(flux / 0.5, 1e-20)) / log(10.0);
+    flux *= 1.0 - smoothstep(u.color.a - 0.75, u.color.a, magnitude);
     var clip = u.mvp * vec4<f32>(direction, 0.0);
-    let corner = normal.xy;
+    let corner = normal.xy * clamp(1.55 + 0.275 * log(max(flux / 0.5, 1e-20)) / log(10.0), 0.7, 2.4);
     let half_len = max(max(abs(corner.x), abs(corner.y)), 1.0e-4);
     out.pos = vec4<f32>(clip.xy + corner * vec2<f32>(u.extra.x, u.extra.y) * clip.w,
                         clip.w * 3.0e-22, clip.w);
@@ -530,6 +526,60 @@ fn corona(opos: vec2<f32>, tint: vec3<f32>, phase: f32, intensity: f32,
 // atmosphere-rendering.md): Rayleigh-ish zenith/horizon ramp, Mie
 // forward lobe around the sun, sunset band at low sun elevation,
 // day/night from the sun-up dot, altitude fade to space.
+// The volume samples stellar emission and dust extinction in
+// galactocentric radius units. Nonlinear coordinates resolve the thin disc and
+// core without a camera-dependent LOD or changing the field while travelling.
+fn galaxy_field(p: vec3<f32>) -> vec4<f32> {
+  let warp = vec3<f32>(4.0, 4.0, 7.0);
+  let q = 0.5 + 0.5 * sign(p) * log(abs(p) / 2.0 * sinh(warp) + sqrt(vec3<f32>(1.0) + pow(p / 2.0 * sinh(warp), vec3<f32>(2.0)))) / warp;
+  if (any(q < vec3<f32>(0.0)) || any(q > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  let size = f32(textureNumLayers(planet_material));
+  let z = clamp(q.z * (size - 1.0), 0.0, size - 1.0);
+  let uv = (q.xy * (size - 1.0) + 0.5) / size;
+  let lo = textureSampleLevel(planet_material, planet_sampler, uv, i32(floor(z)), 0.0);
+  let hi = textureSampleLevel(planet_material, planet_sampler, uv, min(i32(floor(z)) + 1, i32(size) - 1), 0.0);
+  return mix(lo, hi, fract(z));
+}
+fn galaxy_radiance(direction: vec3<f32>) -> vec3<f32> {
+  let eye = u.aux.xyz;
+  // Integrate from the actual eye, including the near field. A fixed spatial
+  // field, rather than crossfading views, gives immediate translational parallax.
+  let far_t = 2.0 + length(eye);
+  let step_ratio = exp(log(1.0 + far_t / 0.0001) / 96.0);
+  var t = 0.0;
+  var result = vec3<f32>(0.0);
+  var transmission = vec3<f32>(1.0);
+  for (var i = 0; i < 96; i += 1) {
+    let next = (t + 0.0001) * step_ratio - 0.0001;
+    let dl = next - t;
+    let field = galaxy_field(eye + direction * (0.5 * (t + next)));
+    let optical = field.a * vec3<f32>(0.72, 1.0, 1.42);
+    // Integrate a constant segment analytically: bright dusty central segments
+    // cannot emit an unattenuated flash as a march sample crosses the center.
+    let attenuation = exp(-optical * dl);
+    let segment = select((vec3<f32>(1.0) - attenuation) / max(optical, vec3<f32>(0.000001)), vec3<f32>(dl), optical * dl < vec3<f32>(0.0001));
+    result += field.rgb * transmission * segment;
+    transmission *= attenuation;
+    t = next;
+  }
+  // Interplanetary dust retains its ecliptic wedge and antisolar glow. Its
+  // density follows actual distance from the local system, in every mode.
+  let cs = dot(direction, normalize(frame.sun_dir.xyz));
+  let plane = exp(-5.0 * abs(dot(direction, u.color.xyz)));
+  let g = clamp(0.5 * (1.0 + cs), 0.0, 1.0);
+  let zodiacal = 0.005 * (0.12 * g * g + 1.6 * pow(g, 7.0));
+  let gegenschein = 0.0004 * pow(max(-cs, 0.0), 14.0);
+  result += vec3<f32>(1.0, 0.94, 0.82) * ((zodiacal + gegenschein) * plane * u.color.a);
+  let peak = max(max(result.r, result.g), result.b);
+  if (peak > 0.0) {
+    let ratio = peak / 0.006;
+    var value = 0.006 * pow(ratio, select(1.25, 1.55, ratio < 1.0));
+    value /= 1.0 + value / 1.5;
+    result *= value / peak;
+  }
+  return result;
+}
+
 fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
   let view = normalize(frame.cam_right.xyz * (ndc.x * frame.cam_right.w) +
                        frame.cam_up.xyz * (ndc.y * frame.cam_up.w) +
@@ -559,24 +609,12 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
   var c = sky * day + frame.sun_color.rgb * mie * (0.25 + 0.75 * day);
   // Night floor: faint cold airglow instead of dead black.
   c += tint * 0.004 * (1.0 - day);
-  // T0018 WP3: the deep sky behind everything — the baked galaxy band
-  // cube map (luminance in the height plane, chromaticity in the
-  // material plane; extra.x = gain). The atmosphere ADDS scattered light
+  // The shared spatial sky behind everything (extra.x = gain).
+  // The atmosphere adds scattered light
   // on top instead of replacing space: at night the band shines through,
   // by day the scattered blue washes it out via exposure, and in space
-  // (density -> 0) the bake stands alone.
-  let fuv = cube_face_uv(view);
-  let layer = i32(fuv.z) + i32(u.aux.x);
-  var deep = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb *
-             textureSampleLevel(planet_height, planet_sampler, fuv.xy, layer, 0.0).r *
-             u.extra.x;
-  // Mode 4: aux.xy select cube bases, extra.y blends decoded linear radiance.
-  if (u.extra.y > 0.0) {
-    let next_layer = i32(fuv.z) + i32(u.aux.y);
-    let next = textureSampleLevel(planet_material, planet_sampler, fuv.xy, next_layer, 0.0).rgb *
-               textureSampleLevel(planet_height, planet_sampler, fuv.xy, next_layer, 0.0).r * u.extra.x;
-    deep = mix(deep, next, u.extra.y);
-  }
+  // (density -> 0) the galaxy stands alone.
+  let deep = galaxy_radiance(view) * u.extra.x;
   let space = vec3<f32>(0.00004, 0.00005, 0.0001);
   return deep + space + c * density;
 }
@@ -585,6 +623,19 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let mode = u32(u.extra.w + 0.5);
   let time = frame.sun_color.a;
+  if (mode == 10u) {
+    let q = dot(in.opos.xy, in.opos.xy);
+    let r = sqrt(q);
+    let edge = 1.0 - smoothstep(0.85, 1.0, r);
+    var body = exp(-r * 2.0);
+    var bulge = exp(-q * 8.0) * 1.2;
+    if (u.extra.y == 2.0) { body = exp(-pow(r, 0.7) * 3.0); bulge = 0.0; }
+    if (u.extra.y == 4.0) {
+      body = exp(-q * 2.2) * (0.35 + 1.5 * fbm(vec3<f32>(in.opos.xy * 5.0, u.extra.z)));
+      bulge = 0.0;
+    }
+    return vec4<f32>((u.color.rgb * body + vec3<f32>(1.0,.87,.70)*bulge) * (u.extra.x * edge), 1.0);
+  }
   if (mode == 9u) {
     let h = clamp(in.weights.x, 0.0, 1.0);
     let fade = pow(h, 2.2) * (0.6 + 0.4 * h);
@@ -938,7 +989,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(color, 1.0);
 }
 )";
-
 
 // T0018 WP1: the post chain. The scene renders LINEAR HDR into an
 // RGBA16F target; this shader owns the single tonemap point. Passes:
@@ -1424,10 +1474,12 @@ struct Rhi::Impl {
   std::unordered_map<std::uint32_t, PlanetTexEntry> planet_textures;
   std::uint32_t next_planet_tex_id = 1;
 
-  PlanetTexEntry make_planet_tex(std::uint32_t face_size, std::uint32_t cube_count = 1) {
+  PlanetTexEntry make_planet_tex(std::uint32_t face_size,
+                                 std::uint32_t layers = 6,
+                                 bool volume = false) {
     PlanetTexEntry entry;
     entry.size = face_size;
-    entry.layers = 6 * cube_count;
+    entry.layers = layers;
     WGPUTextureDescriptor desc{};
     desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
     desc.dimension = WGPUTextureDimension_2D;
@@ -1438,7 +1490,8 @@ struct Rhi::Impl {
     desc.format = WGPUTextureFormat_R16Float;
     entry.height = wgpuDeviceCreateTexture(device, &desc);
     desc.label = sv("planet-material");
-    desc.format = WGPUTextureFormat_RGBA8Unorm;
+    desc.format =
+        (volume ? WGPUTextureFormat_RGBA16Float : WGPUTextureFormat_RGBA8Unorm);
     entry.material = wgpuDeviceCreateTexture(device, &desc);
     WGPUTextureViewDescriptor view_desc{};
     view_desc.dimension = WGPUTextureViewDimension_2DArray;
@@ -1449,7 +1502,8 @@ struct Rhi::Impl {
     view_desc.format = WGPUTextureFormat_R16Float;
     view_desc.aspect = WGPUTextureAspect_All;
     entry.height_view = wgpuTextureCreateView(entry.height, &view_desc);
-    view_desc.format = WGPUTextureFormat_RGBA8Unorm;
+    view_desc.format =
+        (volume ? WGPUTextureFormat_RGBA16Float : WGPUTextureFormat_RGBA8Unorm);
     entry.material_view = wgpuTextureCreateView(entry.material, &view_desc);
     WGPUBindGroupEntry entries[3] = {};
     entries[0].binding = 0;
@@ -3455,11 +3509,35 @@ void Rhi::set_city_lights(const CityLight* lights, std::size_t count) {
 
 void Rhi::set_city_settings(const CitySettings& settings) { impl_->city_settings = settings; }
 
-std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size, std::uint32_t cube_count) {
+std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size) {
   impl_->ensure_mesh_pipeline();  // layouts + sampler exist from here on
   const std::uint32_t id = impl_->next_planet_tex_id++;
-  impl_->planet_textures.emplace(id, impl_->make_planet_tex(face_size, std::clamp(cube_count, 1U, 4U)));
+  impl_->planet_textures.emplace(id, impl_->make_planet_tex(face_size));
   return id;
+}
+
+std::uint32_t Rhi::create_sky_volume(std::uint32_t size) {
+  impl_->ensure_mesh_pipeline();
+  const auto id = impl_->next_planet_tex_id++;
+  impl_->planet_textures.emplace(id, impl_->make_planet_tex(size, size, true));
+  return id;
+}
+void Rhi::update_sky_slice(std::uint32_t handle, std::uint32_t slice,
+                           const std::uint16_t* rgba_half) {
+  const auto it = impl_->planet_textures.find(handle);
+  if (it == impl_->planet_textures.end() || slice >= it->second.layers) return;
+  const auto& tex = it->second;
+  WGPUTexelCopyTextureInfo destination{};
+  destination.texture = tex.material;
+  destination.origin = WGPUOrigin3D{0, 0, slice};
+  destination.aspect = WGPUTextureAspect_All;
+  WGPUTexelCopyBufferLayout layout{};
+  layout.bytesPerRow = tex.size * 8;
+  layout.rowsPerImage = tex.size;
+  const WGPUExtent3D extent{tex.size, tex.size, 1};
+  wgpuQueueWriteTexture(impl_->queue, &destination, rgba_half,
+                        static_cast<std::size_t>(tex.size) * tex.size * 8,
+                        &layout, &extent);
 }
 
 void Rhi::update_planet_face(std::uint32_t handle, std::uint32_t face,
@@ -3525,6 +3603,8 @@ void Rhi::set_material_params(std::uint32_t layer, const MaterialParams& params)
   row[11] = 0.0f;
   impl_->material_dirty = true;
 }
+
+float Rhi::exposure() const { return impl_->exposure; }
 
 bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                        std::size_t item_count) {
@@ -3957,7 +4037,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         continue;  // city meshes: their own pipeline (draw_city)
       }
       const Pass item_pass = items[i].mode == 2 || items[i].mode == 3 ||
-                                     items[i].mode == 7 || items[i].mode == 9
+                                     items[i].mode == 7 || items[i].mode == 9 ||
+                                     items[i].mode == 10
                                  ? Pass::Additive
                              : items[i].translucent ? Pass::Blend
                                                     : Pass::Opaque;

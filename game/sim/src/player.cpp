@@ -134,7 +134,7 @@ void Player::exit_map() {
 
 void Player::rebase(const gen::EffectiveField& field, const Vec3& position) {
   field_ = &field;
-  position_ = position;
+  set_position(position);
   beams_.clear();      // beam positions were in the old body's frame
   has_nearest_ = false;  // so was the nearest-body feed; re-fed next frame
 }
@@ -143,7 +143,7 @@ void Player::push_out(const Vec3& center, double min_dist) {
   const Vec3 rel = position_ - center;
   const double dist = length(rel);
   if (dist < min_dist) {
-    position_ = center + normalize(rel) * min_dist;
+    set_position(center + normalize(rel) * min_dist);
   }
 }
 
@@ -203,7 +203,12 @@ void Player::update_flight(const InputFrame& input) {
   }
   speed_ = std::clamp(speed_, 0.0, cap);
 
-  position_ = position_ + forward_ * (speed_ * dt);
+  // Compensated addition keeps sub-ULP steps after interstellar travel. Without
+  // it a low-speed ship can remain stuck at a large coordinate indefinitely.
+  const Vec3 step = forward_ * (speed_ * dt) - position_error_;
+  const Vec3 moved = position_ + step;
+  position_error_ = (moved - position_) - step;
+  position_ = moved;
   clamp_to_ground_flight();
 
   try_fire(input);

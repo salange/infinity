@@ -2,6 +2,8 @@ add_executable(game_tests
   main.cpp
   test_galaxy.cpp
   test_galaxy_route.cpp
+  ../app/src/galaxy_flythrough.cpp
+  ../app/src/stellar_stream.cpp
   ../app/src/deep_sky_render.cpp
   test_names.cpp
   test_planet.cpp

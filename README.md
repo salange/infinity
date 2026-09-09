@@ -109,6 +109,8 @@ GPU, or engine. Rendering is a view of the world, not part of it.
 ### Galaxy traversal
 
 Press **F6** in flight mode for a live 120-second tour through the current galaxy
-center. **F6** or **Escape** returns to the player. High-resolution views and
-resolved stars are generated ahead in a RAM buffer; a cancellable preparation
-view appears before departure. See [route, controls, and profiling](docs/galaxy-flythrough.md).
+center, starting at your current pose. **F6** or **Escape** brakes and returns
+control where you have reached. The shared sky follows the actual observer every
+frame, with short, cancellable preparation for nearby stars. Use
+`--render-width 1280` for a 1280×720 window, including on Retina displays.
+See [route, controls, and profiling](docs/galaxy-flythrough.md).

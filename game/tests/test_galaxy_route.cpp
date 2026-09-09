@@ -6,6 +6,7 @@
 #include <set>
 
 #include "../app/src/galaxy_flythrough.hpp"
+#include "../app/src/distant_galaxies.hpp"
 #include "../app/src/stellar_stream.hpp"
 #include "gen/universe.hpp"
 using namespace inf;
@@ -148,4 +149,50 @@ TEST_CASE("galaxy flight clears a departure body that blocks the center") {
               std::max(1.0, sim::length(measured)) <
           1e-5);
   }
+}
+
+TEST_CASE("background galaxies use canonical cluster and companion positions") {
+  const auto seed = *core::parse_seed("83");
+  const auto galaxies = app::distant_galaxies(seed);
+  const auto satellite = gen::satellite_galaxy(gen::home_galaxy_key(seed), parameters(), 0);
+  const sim::Vec3 satellite_position{satellite.offset_m.x.to_double(),
+                                     satellite.offset_m.y.to_double(),
+                                     satellite.offset_m.z.to_double()};
+  bool companion = false, adjacent_cluster = false;
+  std::size_t local = 0;
+  for (const auto& galaxy : galaxies) {
+    CHECK(galaxy.radius > 0);
+    CHECK(std::isfinite(galaxy.radius));
+    CHECK(sim::length(galaxy.position) > 0);  // home volume is not duplicated
+    if (galaxy.local_cluster) ++local;
+    if (sim::length(galaxy.position - satellite_position) == 0) {
+      companion = true;
+      CHECK(galaxy.local_cluster);
+      CHECK(galaxy.params.diameter_ly == satellite.params.diameter_ly);
+    }
+    if (sim::length(galaxy.position - sim::Vec3{gen::kClusterCellM, 0, 0}) == 0) {
+      adjacent_cluster = true;
+      const auto expected = gen::derive_galaxy_params(
+          gen::galaxy_key_in_cluster(seed, 1, 0, 0, 0));
+      CHECK(galaxy.params.diameter_ly == expected.diameter_ly);
+      CHECK(galaxy.params.type == expected.type);
+    }
+  }
+  CHECK(companion);
+  CHECK(adjacent_cluster);
+  CHECK(local >= gen::galaxy_count_in_cluster(gen::home_cluster_key(seed)));
+  CHECK(galaxies.size() > local * 10);
+}
+
+TEST_CASE("external galaxy macro fields retain generated morphology and dust") {
+  const auto seed = *core::parse_seed("83");
+  auto params = gen::derive_galaxy_params(gen::galaxy_key_in_cluster(seed, 0, 0, 0, 1));
+  const auto first = app::build_macro_galaxy_volume(params, 24);
+  CHECK(first.rgba_half == app::build_macro_galaxy_volume(params, 24).rgba_half);
+  params.dust_opacity = det::Real(0);
+  const auto clear = app::build_macro_galaxy_volume(params, 24);
+  for (std::size_t i = 3; i < clear.rgba_half.size(); i += 4)
+    CHECK(clear.rgba_half[i] == 0);
+  CHECK(first.radius_m == params.diameter_ly.to_double() * .5 * gen::kLightYearM);
+  for (auto half : first.rgba_half) CHECK((half & 0x7c00U) != 0x7c00U);
 }

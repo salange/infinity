@@ -901,7 +901,10 @@ int main(int argc, char** argv) {
                                   sky_volume.size * 4);
   sky_volume.rgba_half.clear();
   sky_volume.rgba_half.shrink_to_fit();
-  const auto neighbour_galaxies = inf::app::distant_galaxies(*seed);
+  auto neighbour_galaxies = inf::app::distant_galaxies(*seed);
+  inf::app::prepare_distant_galaxies(neighbour_galaxies, *rhi);
+  std::printf("sky: %zu generated neighbouring galaxies across 27 clusters\n",
+               neighbour_galaxies.size());
   inf::app::StellarStream stellar_stream(*seed, galaxy_params);
   auto star_catalog = inf::app::build_stellar_catalog(
       galaxy_octree, galactic_pos, {}, nullptr, 5.5);

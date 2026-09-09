@@ -36,7 +36,7 @@ namespace {
 
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
-constexpr std::uint64_t kItemUniformSize = 128;  // mvp + color + aux + extra + palette
+constexpr std::uint64_t kItemUniformSize = 176;  // base material + spatial-volume rotation
 constexpr std::uint64_t kFrameUniformSize = 160;  // 10 vec4s (see Frame in WGSL)
 
 constexpr const char* kMeshShader = R"(
@@ -63,6 +63,9 @@ struct Uniforms {
   aux: vec4<f32>,
   extra: vec4<f32>,
   palette: vec4<f32>,  // lit terrain: four material ids (0 = unused)
+  volume_x: vec4<f32>,
+  volume_y: vec4<f32>,
+  volume_z: vec4<f32>,
 };
 // Per-frame globals (frame of the meshes = anchor-planet-local):
 //   sun_dir.xyz light direction; sun_color.rgb light tint, .a time (s);
@@ -384,6 +387,15 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
   out.normal = normal;
   out.opos = position;
   out.weights = weights;
+  if (mode == 10u && u.color.a > 0.5) {
+    let ndc = out.pos.xy / out.pos.w;
+    let ray = frame.cam_right.xyz * (ndc.x * frame.cam_right.w) +
+              frame.cam_up.xyz * (ndc.y * frame.cam_up.w) + frame.cam_fwd.xyz;
+    // Cancel perspective interpolation's division by clip.w: after fragment
+    // normalization this is the actual screen ray, even for a tilted quad.
+    out.normal = vec3<f32>(dot(ray, u.volume_x.xyz), dot(ray, u.volume_y.xyz), dot(ray, u.volume_z.xyz)) * out.pos.w;
+    out.pos.z = out.pos.w * 2.0e-22;
+  }
   return out;
 }
 
@@ -624,6 +636,39 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let mode = u32(u.extra.w + 0.5);
   let time = frame.sun_color.a;
   if (mode == 10u) {
+    if (u.color.a > 0.5) {
+      // Object-space density, shared with the generator. An actual ray/box
+      // interval works outside AND inside a galaxy; no enlarged flat sprite.
+      let ray = normalize(in.normal);
+      let safe_ray = select(vec3<f32>(1e-12), ray, abs(ray) > vec3<f32>(1e-12));
+      let a = (vec3<f32>(-2.0) - u.aux.xyz) / safe_ray;
+      let b = (vec3<f32>(2.0) - u.aux.xyz) / safe_ray;
+      let lo = min(a, b);
+      let hi = max(a, b);
+      let entry = max(0.0, max(max(lo.x, lo.y), lo.z));
+      let exit = min(min(hi.x, hi.y), hi.z);
+      if (exit <= entry) { return vec4<f32>(0.0); }
+      // Concentrate samples around the nearest point to the core. The fixed
+      // object field is independent of approach speed, direction and route.
+      let mid = clamp(-dot(u.aux.xyz, ray), entry, exit);
+      var result = vec3<f32>(0.0);
+      var transmission = vec3<f32>(1.0);
+      var t = entry;
+      for (var i = 1; i <= 64; i += 1) {
+        let ustep = f32(i) / 32.0 - 1.0;
+        let offset = sign(ustep) * (exp(abs(ustep) * 5.0) - 1.0) / (exp(5.0) - 1.0);
+        let next = mid + offset * select(mid - entry, exit - mid, ustep >= 0.0);
+        let dl = next - t;
+        let field = galaxy_field(u.aux.xyz + ray * (0.5 * (t + next)));
+        let optical = field.a * vec3<f32>(0.72, 1.0, 1.42);
+        let attenuation = exp(-optical * dl);
+        let segment = select((vec3<f32>(1.0) - attenuation) / max(optical, vec3<f32>(0.000001)), vec3<f32>(dl), optical * dl < vec3<f32>(0.0001));
+        result += field.rgb * transmission * segment;
+        transmission *= attenuation;
+        t = next;
+      }
+      return vec4<f32>(result * u.extra.x, 1.0);
+    }
     let q = dot(in.opos.xy, in.opos.xy);
     let r = sqrt(q);
     let edge = 1.0 - smoothstep(0.85, 1.0, r);
@@ -679,8 +724,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                sin(time * 13.7 + in.weights.y * 617.0);
       flux *= 1.0 - 0.45 * atmo_depth * (0.5 + 0.5 * tw);
     }
-    let shape = exp(-r2 * 9.0) + exp(-r2 * 2.2) * 0.06;
-    return vec4<f32>(tint * flux * shape, 1.0);
+    // Compact radial support: even a saturated nearby point can never reveal
+    // the billboard corners. These stars remain unresolved at interstellar
+    // distances; a bright optical glow is not a galaxy or a larger star body.
+    let window = 1.0 - smoothstep(0.64, 1.0, r2);
+    let shape = (exp(-r2 * 9.0) + exp(-r2 * 2.2) * 0.06) * window;
+    // Preserve photometry below saturation while keeping the half-float HDR
+    // target finite on arbitrarily close approaches. Inf would propagate
+    // through bloom as the rectangular footprint of its separable kernel.
+    let radiance = flux * shape;
+    return vec4<f32>(tint * (radiance / (1.0 + radiance / 6000.0)), 1.0);
   }
   if (mode == 6u) {
     // Textured planet impostor: albedo from the material map, shading
@@ -1046,7 +1099,12 @@ fn fs_lum(in: FSIn) -> @location(0) vec4<f32> {
 fn fs_bright(in: FSIn) -> @location(0) vec4<f32> {
   let c = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb * pp.a.x;
   let bright = max(c - vec3<f32>(pp.a.w), vec3<f32>(0.0));
-  return vec4<f32>(bright, 1.0);
+  // A continuous highlight shoulder for scattered light, in exposed units.
+  // Unbounded inverse-square points can overflow this half-float target and
+  // turn the finite blur footprint into a white square. Direct HDR radiance
+  // is retained for tone mapping; only its optical bloom has this shoulder.
+  let peak = max(max(bright.r, bright.g), bright.b);
+  return vec4<f32>(bright / (1.0 + peak / 64.0), 1.0);
 }
 
 @fragment
@@ -3644,11 +3702,12 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // Upload all uniforms before the command buffer executes.
   const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
   for (std::size_t i = 0; i < count; ++i) {
-    float block[32];
+    float block[44];
     std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
     std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
     std::memcpy(block + 20, items[i].aux, sizeof(items[i].aux));
     std::memcpy(block + 24, items[i].extra, sizeof(items[i].extra));
+    std::memcpy(block + 32, items[i].volume_rotation, sizeof(items[i].volume_rotation));
     block[27] = static_cast<float>(items[i].mode);
     for (int k = 0; k < 4; ++k) {
       block[28 + k] = static_cast<float>(items[i].material_palette[k]);

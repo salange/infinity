@@ -198,6 +198,8 @@ class Rhi {
     // an object whose fine level is on screen).
     bool shadow_only = false;
     float extra[4]{};
+    // Mode 10 spatial emission volume: world-to-object rotation rows.
+    float volume_rotation[12]{};
     // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow,
     // 3 = additive glow sprite (lens flare / veil / limb halo; extra.x
     // intensity, extra.y falloff, extra.z rim radius or 0 for a disc),

@@ -13,16 +13,10 @@ namespace {
 struct V3 {
   double x{0.0}, y{0.0}, z{0.0};
 };
-V3 operator-(const V3& a, const V3& b) {
-  return {a.x - b.x, a.y - b.y, a.z - b.z};
-}
-V3 operator+(const V3& a, const V3& b) {
-  return {a.x + b.x, a.y + b.y, a.z + b.z};
-}
+V3 operator-(const V3& a, const V3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+V3 operator+(const V3& a, const V3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 V3 operator*(const V3& a, double s) { return {a.x * s, a.y * s, a.z * s}; }
-double dot(const V3& a, const V3& b) {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
+double dot(const V3& a, const V3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 double length(const V3& a) { return std::sqrt(dot(a, a)); }
 V3 normalize(const V3& a) {
   const double l = length(a);
@@ -111,8 +105,7 @@ std::uint16_t to_half(float value) {
   std::uint32_t bits;
   std::memcpy(&bits, &value, sizeof(bits));
   const std::uint32_t sign = (bits >> 16) & 0x8000U;
-  std::int32_t exponent =
-      static_cast<std::int32_t>((bits >> 23) & 0xFF) - 127 + 15;
+  std::int32_t exponent = static_cast<std::int32_t>((bits >> 23) & 0xFF) - 127 + 15;
   std::uint32_t mantissa = bits & 0x7FFFFFU;
   if (exponent <= 0) {
     if (exponent < -10) {
@@ -125,8 +118,8 @@ std::uint16_t to_half(float value) {
   if (exponent >= 31) {
     return static_cast<std::uint16_t>(sign | 0x7BFFU);  // clamp to max half
   }
-  return static_cast<std::uint16_t>(
-      sign | (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13));
+  return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10) |
+                                    (mantissa >> 13));
 }
 
 }  // namespace
@@ -136,22 +129,21 @@ void stellar_tint(double temperature, float rgb[3]) {
   saturate_tint(rgb, 1.5f);
 }
 
-GalaxyVolume build_galaxy_volume(const core::Seed128& seed,
-                                 const gen::GalaxyParams& galaxy,
-                                 std::uint32_t size) {
+namespace {
+GalaxyVolume build_volume(const gen::GalaxyParams& galaxy, std::uint32_t size,
+                          const core::Key* key) {
   GalaxyVolume result;
   result.size = size;
   const gen::GalaxyDensity density(galaxy);
   result.radius_m = density.radius_m().to_double();
   const double radius = result.radius_m;
   const auto coordinate = [size](int index, double warp) {
-    return 2.0 * std::sinh((2.0 * index / (size - 1.0) - 1.0) * warp) /
-           std::sinh(warp);
+    return 2.0 * std::sinh((2.0 * index / (size - 1.0) - 1.0) * warp) / std::sinh(warp);
   };
   const auto index_at = [size](double coordinate, double warp) {
-    return static_cast<int>(std::floor(
-        (0.5 + 0.5 * std::asinh(coordinate * 0.5 * std::sinh(warp)) / warp) *
-        (size - 1)));
+    return static_cast<int>(
+        std::floor((0.5 + 0.5 * std::asinh(coordinate * 0.5 * std::sinh(warp)) / warp) *
+                   (size - 1)));
   };
   const V3 home = to_v3(gen::home_system_position_m(galaxy));
   const V3 inward = normalize(home * -1.0);
@@ -164,14 +156,10 @@ GalaxyVolume build_galaxy_volume(const core::Seed128& seed,
   for (int i = 0; i < steps; ++i) {
     const V3 p = home + inward * ((i + 0.5) * dl);
     dust_column +=
-        density.dust({det::Real(p.x), det::Real(p.y), det::Real(p.z)})
-            .to_double() *
-        dl;
+        density.dust({det::Real(p.x), det::Real(p.y), det::Real(p.z)}).to_double() * dl;
   }
   const double dust_gain =
-      dust_column > 0
-          ? 6.0 * (galaxy.dust_opacity.to_double() / 0.9) / dust_column
-          : 0;
+      dust_column > 0 ? 6.0 * (galaxy.dust_opacity.to_double() / 0.9) / dust_column : 0;
   double reference = 0, trans = 1;
   for (int i = 0; i < steps; ++i) {
     const V3 p = home + tangent * ((i + 0.5) * dl);
@@ -195,14 +183,12 @@ GalaxyVolume build_galaxy_volume(const core::Seed128& seed,
           float tint[3];
           blackbody_tint(density.population(p).temperature_k.to_double(), tint);
           saturate_tint(tint, 1.7f);
-          const double emission =
-              density.stars(p).to_double() * emission_gain * radius;
-          const auto offset =
-              ((static_cast<std::size_t>(z) * size + y) * size + x) * 4;
+          const double emission = density.stars(p).to_double() * emission_gain * radius;
+          const auto offset = ((static_cast<std::size_t>(z) * size + y) * size + x) * 4;
           for (int c = 0; c < 3; ++c)
             field[offset + c] = static_cast<float>(emission * tint[c]);
-          field[offset + 3] = static_cast<float>(density.dust(p).to_double() *
-                                                 dust_gain * radius);
+          field[offset + 3] =
+              static_cast<float>(density.dust(p).to_double() * dust_gain * radius);
         }
       }
     }
@@ -215,100 +201,101 @@ GalaxyVolume build_galaxy_volume(const core::Seed128& seed,
   // Embed bounded nebulae in the spatial field. The profile is tied to the
   // entity's world position, so it remains present when the observer enters it.
   // Their generator and addresses are shared with the normal system sky.
-  gen::NebulaField nebulae(gen::home_galaxy_key(seed), galaxy);
-  std::vector<gen::Nebula> clouds;
-  nebulae.nebulae_in_ball({}, det::Real(2.0 * radius), &clouds);
-  for (const auto& cloud : clouds) {
-    const V3 center = to_v3(cloud.center_m) * (1.0 / radius);
-    const double r = cloud.radius_m.to_double() / radius;
-    if (r <= 0) continue;
-    const int lo[3] = {std::max(0, index_at(center.x - r * 2, 4)),
-                       std::max(0, index_at(center.y - r * 2, 4)),
-                       std::max(0, index_at(center.z - r * 2, 7))};
-    const int hi[3] = {
-        std::min(static_cast<int>(size) - 1, index_at(center.x + r * 2, 4) + 1),
-        std::min(static_cast<int>(size) - 1, index_at(center.y + r * 2, 4) + 1),
-        std::min(static_cast<int>(size) - 1,
-                 index_at(center.z + r * 2, 7) + 1)};
-    for (int z = lo[2]; z <= hi[2]; ++z)
-      for (int y = lo[1]; y <= hi[1]; ++y)
-        for (int x = lo[0]; x <= hi[0]; ++x) {
-          const V3 local =
-              (V3{coordinate(x, 4), coordinate(y, 4), coordinate(z, 7)} -
-               center) *
-              (1.0 / r);
-          const double q = dot(local, local);
-          if (q >= 4.0) continue;
-          const double edge = std::clamp((4.0 - q) / 1.0, 0.0, 1.0);
-          const double phase = static_cast<double>(cloud.shape_seed % 8192U);
-          const double noise =
-              fbm(local * 5.0 + V3{phase, phase * 1.7, phase * .6}, 4);
-          double profile = std::exp(-q * 2.6) * (0.5 + 1.2 * noise);
-          if (cloud.type == gen::NebulaType::Reflection)
-            profile = std::exp(-q * 4.5) * (0.5 + .9 * noise);
-          if (cloud.type == gen::NebulaType::Planetary)
-            profile = std::exp(-std::pow(std::sqrt(q) - .72, 2) * 40) +
-                      .7 * std::exp(-q * 30);
-          if (cloud.type == gen::NebulaType::SupernovaRemnant)
-            profile = std::exp(-std::pow(std::sqrt(q) - .85, 2) * 24) *
-                      (.3 + 2.2 * noise * noise);
-          const double shape = profile * edge * edge;
-          const auto offset =
-              ((static_cast<std::size_t>(z) * size + y) * size + x) * 4;
-          const double opacity = cloud.opacity.to_double();
-          if (static_cast<int>(cloud.type) == 2) {
-            field[offset + 3] +=
-                static_cast<float>(shape * (0.5 + 0.6 * opacity) / r);
-          } else {
+  if (key != nullptr) {
+    gen::NebulaField nebulae(*key, galaxy);
+    std::vector<gen::Nebula> clouds;
+    nebulae.nebulae_in_ball({}, det::Real(2.0 * radius), &clouds);
+    for (const auto& cloud : clouds) {
+      const V3 center = to_v3(cloud.center_m) * (1.0 / radius);
+      const double r = cloud.radius_m.to_double() / radius;
+      if (r <= 0) continue;
+      const int lo[3] = {std::max(0, index_at(center.x - r * 2, 4)),
+                         std::max(0, index_at(center.y - r * 2, 4)),
+                         std::max(0, index_at(center.z - r * 2, 7))};
+      const int hi[3] = {
+          std::min(static_cast<int>(size) - 1, index_at(center.x + r * 2, 4) + 1),
+          std::min(static_cast<int>(size) - 1, index_at(center.y + r * 2, 4) + 1),
+          std::min(static_cast<int>(size) - 1, index_at(center.z + r * 2, 7) + 1)};
+      for (int z = lo[2]; z <= hi[2]; ++z)
+        for (int y = lo[1]; y <= hi[1]; ++y)
+          for (int x = lo[0]; x <= hi[0]; ++x) {
+            const V3 local =
+                (V3{coordinate(x, 4), coordinate(y, 4), coordinate(z, 7)} - center) *
+                (1.0 / r);
+            const double q = dot(local, local);
+            if (q >= 4.0) continue;
+            const double edge = std::clamp((4.0 - q) / 1.0, 0.0, 1.0);
+            const double phase = static_cast<double>(cloud.shape_seed % 8192U);
+            const double noise = fbm(local * 5.0 + V3{phase, phase * 1.7, phase * .6}, 4);
+            double profile = std::exp(-q * 2.6) * (0.5 + 1.2 * noise);
+            if (cloud.type == gen::NebulaType::Reflection)
+              profile = std::exp(-q * 4.5) * (0.5 + .9 * noise);
+            if (cloud.type == gen::NebulaType::Planetary)
+              profile = std::exp(-std::pow(std::sqrt(q) - .72, 2) * 40) +
+                        .7 * std::exp(-q * 30);
+            if (cloud.type == gen::NebulaType::SupernovaRemnant)
+              profile = std::exp(-std::pow(std::sqrt(q) - .85, 2) * 24) *
+                        (.3 + 2.2 * noise * noise);
+            const double shape = profile * edge * edge;
+            const auto offset = ((static_cast<std::size_t>(z) * size + y) * size + x) * 4;
+            const double opacity = cloud.opacity.to_double();
+            if (static_cast<int>(cloud.type) == 2) {
+              field[offset + 3] += static_cast<float>(shape * (0.5 + 0.6 * opacity) / r);
+            } else {
+              for (int c = 0; c < 3; ++c)
+                field[offset + c] += static_cast<float>(shape * 0.0024 * (0.4 + opacity) *
+                                                        cloud.color[c].to_double() / r);
+            }
+          }
+    }
+    gen::StarClusterField cluster_field(*key, galaxy);
+    std::vector<gen::StarCluster> clusters;
+    cluster_field.clusters_in_ball({}, det::Real(2.0 * radius), &clusters);
+    for (const auto& cluster : clusters) {
+      const V3 center = to_v3(cluster.center_m) * (1.0 / radius);
+      const double r = cluster.radius_m.to_double() / radius;
+      const int lo[3] = {std::max(0, index_at(center.x - r * 2, 4)),
+                         std::max(0, index_at(center.y - r * 2, 4)),
+                         std::max(0, index_at(center.z - r * 2, 7))};
+      const int hi[3] = {
+          std::min(static_cast<int>(size) - 1, index_at(center.x + r * 2, 4) + 1),
+          std::min(static_cast<int>(size) - 1, index_at(center.y + r * 2, 4) + 1),
+          std::min(static_cast<int>(size) - 1, index_at(center.z + r * 2, 7) + 1)};
+      const double intensity =
+          6e-5 * std::sqrt(std::max(cluster.star_count.to_double(), 20.0)) / r;
+      const double tint[3] = {cluster.globular ? 1.0 : .92, cluster.globular ? .93 : .96,
+                              cluster.globular ? .78 : 1.0};
+      for (int z = lo[2]; z <= hi[2]; ++z)
+        for (int y = lo[1]; y <= hi[1]; ++y)
+          for (int x = lo[0]; x <= hi[0]; ++x) {
+            const V3 local =
+                (V3{coordinate(x, 4), coordinate(y, 4), coordinate(z, 7)} - center) *
+                (1.0 / r);
+            const double q = dot(local, local);
+            if (q >= 4) continue;
+            const double edge = std::clamp(4.0 - q, 0.0, 1.0);
+            const double shape = cluster.globular
+                                     ? 3 * std::exp(-q * 30) + .6 * std::exp(-q * 5)
+                                     : std::exp(-q * 4);
+            const auto offset = ((static_cast<std::size_t>(z) * size + y) * size + x) * 4;
             for (int c = 0; c < 3; ++c)
               field[offset + c] +=
-                  static_cast<float>(shape * 0.0024 * (0.4 + opacity) *
-                                     cloud.color[c].to_double() / r);
+                  static_cast<float>(shape * intensity * tint[c] * edge * edge);
           }
-        }
-  }
-  gen::StarClusterField cluster_field(gen::home_galaxy_key(seed), galaxy);
-  std::vector<gen::StarCluster> clusters;
-  cluster_field.clusters_in_ball({}, det::Real(2.0 * radius), &clusters);
-  for (const auto& cluster : clusters) {
-    const V3 center = to_v3(cluster.center_m) * (1.0 / radius);
-    const double r = cluster.radius_m.to_double() / radius;
-    const int lo[3] = {std::max(0, index_at(center.x - r * 2, 4)),
-                       std::max(0, index_at(center.y - r * 2, 4)),
-                       std::max(0, index_at(center.z - r * 2, 7))};
-    const int hi[3] = {
-        std::min(static_cast<int>(size) - 1, index_at(center.x + r * 2, 4) + 1),
-        std::min(static_cast<int>(size) - 1, index_at(center.y + r * 2, 4) + 1),
-        std::min(static_cast<int>(size) - 1,
-                 index_at(center.z + r * 2, 7) + 1)};
-    const double intensity =
-        6e-5 * std::sqrt(std::max(cluster.star_count.to_double(), 20.0)) / r;
-    const double tint[3] = {cluster.globular ? 1.0 : .92,
-                            cluster.globular ? .93 : .96,
-                            cluster.globular ? .78 : 1.0};
-    for (int z = lo[2]; z <= hi[2]; ++z)
-      for (int y = lo[1]; y <= hi[1]; ++y)
-        for (int x = lo[0]; x <= hi[0]; ++x) {
-          const V3 local =
-              (V3{coordinate(x, 4), coordinate(y, 4), coordinate(z, 7)} -
-               center) *
-              (1.0 / r);
-          const double q = dot(local, local);
-          if (q >= 4) continue;
-          const double edge = std::clamp(4.0 - q, 0.0, 1.0);
-          const double shape =
-              cluster.globular ? 3 * std::exp(-q * 30) + .6 * std::exp(-q * 5)
-                               : std::exp(-q * 4);
-          const auto offset =
-              ((static_cast<std::size_t>(z) * size + y) * size + x) * 4;
-          for (int c = 0; c < 3; ++c)
-            field[offset + c] +=
-                static_cast<float>(shape * intensity * tint[c] * edge * edge);
-        }
+    }
   }
   result.rgba_half.resize(field.size());
-  for (std::size_t i = 0; i < field.size(); ++i)
-    result.rgba_half[i] = to_half(field[i]);
+  for (std::size_t i = 0; i < field.size(); ++i) result.rgba_half[i] = to_half(field[i]);
   return result;
+}
+}  // namespace
+GalaxyVolume build_galaxy_volume(const core::Seed128& seed,
+                                 const gen::GalaxyParams& galaxy, std::uint32_t size) {
+  const auto key = gen::home_galaxy_key(seed);
+  return build_volume(galaxy, size, &key);
+}
+GalaxyVolume build_macro_galaxy_volume(const gen::GalaxyParams& galaxy,
+                                       std::uint32_t size) {
+  return build_volume(galaxy, size, nullptr);
 }
 }  // namespace inf::app

@@ -1,6 +1,7 @@
 add_executable(game_app
   src/main.cpp
   src/distant_galaxies.cpp
+  src/distant_catalog.cpp
   src/stellar_stream.cpp
   src/galaxy_flythrough.cpp
   src/civ_view.cpp

@@ -18,4 +18,8 @@ struct GalaxyVolume {
 GalaxyVolume build_galaxy_volume(const core::Seed128& seed,
                                  const gen::GalaxyParams& galaxy,
                                  std::uint32_t size = 192);
+// Macro representation of an external galaxy, using the same density and dust
+// model. It contains no observer-dependent images or invented star systems.
+GalaxyVolume build_macro_galaxy_volume(const gen::GalaxyParams& galaxy,
+                                       std::uint32_t size = 48);
 }  // namespace inf::app

@@ -49,7 +49,21 @@ the same seeded positions, luminosities and colors across catalog changes.
 Actual distance, inverse-square flux, angular size and a smooth photometric
 visibility window are evaluated on the GPU every frame. Preparation includes a
 fainter visibility guard and follows continuously adapting exposure. Neighboring
-galaxies also retain fixed positions, with continuously projected footprints.
+galaxies also retain fixed positions. The macro background includes the home
+cluster and its 26 adjacent clusters, with all of their generated companions.
+Home-cluster galaxies use up to 48³ spatial density/dust fields (96³ for large nearby
+companions), marched from the actual eye. More distant cluster objects use
+unresolved morphology profiles. Neither level changes during this tour, and
+objects are never moved or brightened to fill an empty part of the sky.
+The external volumes share a 64 MiB texture budget, including their companion
+height textures. Populous seeds use a smaller, fixed macro sampling grid.
+
+Bright stellar points have round, compact optical profiles. Continuous HDR and
+bloom highlight shoulders prevent saturated points from exposing either their
+billboard or the blur kernel as white squares. These optical glows do not imply
+large physical bodies: at interstellar distances the stellar discs usually
+remain far below a pixel. This representation does not invent detailed systems
+for the statistical luminosity samples.
 
 Dark bands toward the center come primarily from modeled **dust extinction**,
 including dark nebulae: they obscure light behind them. Low stellar density can

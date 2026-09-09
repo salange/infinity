@@ -205,8 +205,9 @@ bool MaterialLibrary::poll(render::Rhi& rhi) {
   std::vector<Impl::Done> ready;
   {
     const std::lock_guard<std::mutex> lock(impl_->mutex);
-    // A few per frame: each upload also builds a mip chain on the CPU.
-    const std::size_t take = impl_->done.size() < 3 ? impl_->done.size() : 3;
+    // One per frame: each upload also builds a mip chain on the CPU. Batching
+    // several can stall a moving observer even when generation is asynchronous.
+    const std::size_t take = impl_->done.empty() ? 0 : 1;
     ready.assign(std::make_move_iterator(impl_->done.begin()),
                  std::make_move_iterator(impl_->done.begin() + static_cast<std::ptrdiff_t>(take)));
     impl_->done.erase(impl_->done.begin(), impl_->done.begin() + static_cast<std::ptrdiff_t>(take));

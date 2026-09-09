@@ -247,3 +247,17 @@ TEST_CASE("player: flight A and D use opposite roll directions at the original r
     REQUIRE(player.mode() == PlayerMode::Flight);
   }
 }
+
+TEST_CASE("player: small flight steps accumulate at interstellar coordinates") {
+  const auto body = body_for(0xBEEF);
+  const auto planet =
+      gen::derive_planet_params(body, gen::PlanetType::EarthLike);
+  const gen::TerrainField field(body.entity, planet);
+  const gen::EffectiveField effective(field);
+  constexpr double origin = 5e18;
+  Player player(effective, {origin, 0, 0});
+  player.set_attitude({1, 0, 0}, {0, 0, 1});
+  player.set_speed(1000);
+  for (int i = 0; i < 600; ++i) player.update(tick(1.0 / 60.0));
+  CHECK(std::abs(player.position().x - origin - 10000) <= 512);
+}

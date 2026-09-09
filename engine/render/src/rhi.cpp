@@ -1,4 +1,5 @@
 #include "render/rhi.hpp"
+#include "core/time/world_clock.hpp"
 
 #include "city_passes.hpp"
 #include "city_shader.hpp"
@@ -36,7 +37,7 @@ namespace {
 
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
 constexpr std::uint32_t kMaxDrawItems = 4096;
-constexpr std::uint64_t kItemUniformSize = 128;  // mvp + color + aux + extra + palette
+constexpr std::uint64_t kItemUniformSize = 176;  // base material + spatial-volume rotation
 constexpr std::uint64_t kFrameUniformSize = 160;  // 10 vec4s (see Frame in WGSL)
 
 constexpr const char* kMeshShader = R"(
@@ -63,6 +64,9 @@ struct Uniforms {
   aux: vec4<f32>,
   extra: vec4<f32>,
   palette: vec4<f32>,  // lit terrain: four material ids (0 = unused)
+  volume_x: vec4<f32>,
+  volume_y: vec4<f32>,
+  volume_z: vec4<f32>,
 };
 // Per-frame globals (frame of the meshes = anchor-planet-local):
 //   sun_dir.xyz light direction; sun_color.rgb light tint, .a time (s);
@@ -356,30 +360,47 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     return out;
   }
   if (mode == 7u) {
-    // Resolved star billboard (T0018 WP2): one static mesh carries the
-    // whole field. position = unit direction (galactic frame), normal.xy
-    // = quad corner scaled by the star's size, normal.z = HDR peak flux,
-    // mat_pack = packed 8-bit rgb, mat_blend = twinkle phase. w = 0
-    // makes the transform rotation-only (the field sits at infinity);
+    // Resolved star billboard: position = catalog-relative light-years,
+    // normal.xy = unit corner, normal.z = flux at one light-year,
+    // mat_pack = packed 8-bit rgb. w = 0 makes the transform rotation-only;
     // depth is forced just above the sky dome so terrain and planets
     // occlude stars but the dome never does. extra.xy = NDC per corner
     // unit (from the viewport size).
-    var clip = u.mvp * vec4<f32>(position, 0.0);
-    let corner = normal.xy;
-    let half_len = max(max(abs(corner.x), abs(corner.y)), 1.0e-4);
-    out.pos = vec4<f32>(clip.xy + corner * vec2<f32>(u.extra.x, u.extra.y) * clip.w,
+    // Moving catalog positions are sample-relative light-years. Subtract the
+    // observer on the CPU in f64, then pass the small relative offset in aux.
+    let direction = position + u.aux.xyz;
+    var flux = normal.z / max(dot(direction, direction), 0.00000001);
+    let magnitude = -2.5 * log(max(flux / 0.5, 1e-20)) / log(10.0);
+    flux *= 1.0 - smoothstep(u.color.a - 0.75, u.color.a, magnitude);
+    var clip = u.mvp * vec4<f32>(direction, 0.0);
+    // A fixed optical core with flux-dependent SUPPORT, not a ballooning
+    // white disc. At the support edge the Gaussian is already below 1e-5 HDR.
+    let radius = max(1.0, 1.1 * sqrt(2.0 * log(1.0 + flux / 0.00001)));
+    let corner = normal.xy * radius;
+    out.pos = vec4<f32>(clip.xy + corner * u.extra.xy * clip.w,
                         clip.w * 3.0e-22, clip.w);
-    out.opos = vec3<f32>(corner.x / half_len, corner.y / half_len, 0.0);
-    out.normal = vec3<f32>(normal.z, 0.0, 0.0);
+    out.opos = vec3<f32>(corner, 0.0);
+    out.normal = vec3<f32>(flux, radius, 0.0);
     out.weights = weights;
     return out;
   }
   out.pos = u.mvp * vec4<f32>(position, 1.0);
-  out.pos.x += frame.jitter.x * out.pos.w;
-  out.pos.y += frame.jitter.y * out.pos.w;
+  if (u.volume_x.w < 0.5) {
+    out.pos.x += frame.jitter.x * out.pos.w;
+    out.pos.y += frame.jitter.y * out.pos.w;
+  }
   out.normal = normal;
   out.opos = position;
   out.weights = weights;
+  if (mode == 10u && u.color.a > 0.5) {
+    let ndc = out.pos.xy / out.pos.w;
+    let ray = frame.cam_right.xyz * (ndc.x * frame.cam_right.w) +
+              frame.cam_up.xyz * (ndc.y * frame.cam_up.w) + frame.cam_fwd.xyz;
+    // Cancel perspective interpolation's division by clip.w: after fragment
+    // normalization this is the actual screen ray, even for a tilted quad.
+    out.normal = vec3<f32>(dot(ray, u.volume_x.xyz), dot(ray, u.volume_y.xyz), dot(ray, u.volume_z.xyz)) * out.pos.w;
+    out.pos.z = out.pos.w * 2.0e-22;
+  }
   return out;
 }
 
@@ -522,6 +543,60 @@ fn corona(opos: vec2<f32>, tint: vec3<f32>, phase: f32, intensity: f32,
 // atmosphere-rendering.md): Rayleigh-ish zenith/horizon ramp, Mie
 // forward lobe around the sun, sunset band at low sun elevation,
 // day/night from the sun-up dot, altitude fade to space.
+// The volume samples stellar emission and dust extinction in
+// galactocentric radius units. Nonlinear coordinates resolve the thin disc and
+// core without a camera-dependent LOD or changing the field while travelling.
+fn galaxy_field(p: vec3<f32>) -> vec4<f32> {
+  let warp = vec3<f32>(4.0, 4.0, 7.0);
+  let q = 0.5 + 0.5 * sign(p) * log(abs(p) / 2.0 * sinh(warp) + sqrt(vec3<f32>(1.0) + pow(p / 2.0 * sinh(warp), vec3<f32>(2.0)))) / warp;
+  if (any(q < vec3<f32>(0.0)) || any(q > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  let size = f32(textureNumLayers(planet_material));
+  let z = clamp(q.z * (size - 1.0), 0.0, size - 1.0);
+  let uv = (q.xy * (size - 1.0) + 0.5) / size;
+  let lo = textureSampleLevel(planet_material, planet_sampler, uv, i32(floor(z)), 0.0);
+  let hi = textureSampleLevel(planet_material, planet_sampler, uv, min(i32(floor(z)) + 1, i32(size) - 1), 0.0);
+  return mix(lo, hi, fract(z));
+}
+fn galaxy_radiance(direction: vec3<f32>) -> vec3<f32> {
+  let eye = u.aux.xyz;
+  // Integrate from the actual eye, including the near field. A fixed spatial
+  // field, rather than crossfading views, gives immediate translational parallax.
+  let far_t = 2.0 + length(eye);
+  let step_ratio = exp(log(1.0 + far_t / 0.0001) / 96.0);
+  var t = 0.0;
+  var result = vec3<f32>(0.0);
+  var transmission = vec3<f32>(1.0);
+  for (var i = 0; i < 96; i += 1) {
+    let next = (t + 0.0001) * step_ratio - 0.0001;
+    let dl = next - t;
+    let field = galaxy_field(eye + direction * (0.5 * (t + next)));
+    let optical = field.a * vec3<f32>(0.72, 1.0, 1.42);
+    // Integrate a constant segment analytically: bright dusty central segments
+    // cannot emit an unattenuated flash as a march sample crosses the center.
+    let attenuation = exp(-optical * dl);
+    let segment = select((vec3<f32>(1.0) - attenuation) / max(optical, vec3<f32>(0.000001)), vec3<f32>(dl), optical * dl < vec3<f32>(0.0001));
+    result += field.rgb * transmission * segment;
+    transmission *= attenuation;
+    t = next;
+  }
+  // Interplanetary dust retains its ecliptic wedge and antisolar glow. Its
+  // density follows actual distance from the local system, in every mode.
+  let cs = dot(direction, normalize(frame.sun_dir.xyz));
+  let plane = exp(-5.0 * abs(dot(direction, u.color.xyz)));
+  let g = clamp(0.5 * (1.0 + cs), 0.0, 1.0);
+  let zodiacal = 0.005 * (0.12 * g * g + 1.6 * pow(g, 7.0));
+  let gegenschein = 0.0004 * pow(max(-cs, 0.0), 14.0);
+  result += vec3<f32>(1.0, 0.94, 0.82) * ((zodiacal + gegenschein) * plane * u.color.a);
+  let peak = max(max(result.r, result.g), result.b);
+  if (peak > 0.0) {
+    let ratio = peak / 0.006;
+    var value = 0.006 * pow(ratio, select(1.25, 1.55, ratio < 1.0));
+    value /= 1.0 + value / 1.5;
+    result *= value / peak;
+  }
+  return result;
+}
+
 fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
   let view = normalize(frame.cam_right.xyz * (ndc.x * frame.cam_right.w) +
                        frame.cam_up.xyz * (ndc.y * frame.cam_up.w) +
@@ -551,17 +626,12 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
   var c = sky * day + frame.sun_color.rgb * mie * (0.25 + 0.75 * day);
   // Night floor: faint cold airglow instead of dead black.
   c += tint * 0.004 * (1.0 - day);
-  // T0018 WP3: the deep sky behind everything — the baked galaxy band
-  // cube map (luminance in the height plane, chromaticity in the
-  // material plane; extra.x = gain). The atmosphere ADDS scattered light
+  // The shared spatial sky behind everything (extra.x = gain).
+  // The atmosphere adds scattered light
   // on top instead of replacing space: at night the band shines through,
   // by day the scattered blue washes it out via exposure, and in space
-  // (density -> 0) the bake stands alone.
-  let fuv = cube_face_uv(view);
-  let layer = i32(fuv.z);
-  let deep = textureSampleLevel(planet_material, planet_sampler, fuv.xy, layer, 0.0).rgb *
-             textureSampleLevel(planet_height, planet_sampler, fuv.xy, layer, 0.0).r *
-             u.extra.x;
+  // (density -> 0) the galaxy stands alone.
+  let deep = galaxy_radiance(view) * u.extra.x;
   let space = vec3<f32>(0.00004, 0.00005, 0.0001);
   return deep + space + c * density;
 }
@@ -570,6 +640,52 @@ fn sky_dome(ndc: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let mode = u32(u.extra.w + 0.5);
   let time = frame.sun_color.a;
+  if (mode == 10u) {
+    if (u.color.a > 0.5) {
+      // Object-space density, shared with the generator. An actual ray/box
+      // interval works outside AND inside a galaxy; no enlarged flat sprite.
+      let ray = normalize(in.normal);
+      let safe_ray = select(vec3<f32>(1e-12), ray, abs(ray) > vec3<f32>(1e-12));
+      let a = (vec3<f32>(-2.0) - u.aux.xyz) / safe_ray;
+      let b = (vec3<f32>(2.0) - u.aux.xyz) / safe_ray;
+      let lo = min(a, b);
+      let hi = max(a, b);
+      let entry = max(0.0, max(max(lo.x, lo.y), lo.z));
+      let exit = min(min(hi.x, hi.y), hi.z);
+      if (exit <= entry) { return vec4<f32>(0.0); }
+      // Concentrate samples around the nearest point to the core. The fixed
+      // object field is independent of approach speed, direction and route.
+      let mid = clamp(-dot(u.aux.xyz, ray), entry, exit);
+      var result = vec3<f32>(0.0);
+      var transmission = vec3<f32>(1.0);
+      var t = entry;
+      for (var i = 1; i <= 64; i += 1) {
+        let ustep = f32(i) / 32.0 - 1.0;
+        let offset = sign(ustep) * (exp(abs(ustep) * 5.0) - 1.0) / (exp(5.0) - 1.0);
+        let next = mid + offset * select(mid - entry, exit - mid, ustep >= 0.0);
+        let dl = next - t;
+        let field = galaxy_field(u.aux.xyz + ray * (0.5 * (t + next)));
+        let optical = field.a * vec3<f32>(0.72, 1.0, 1.42);
+        let attenuation = exp(-optical * dl);
+        let segment = select((vec3<f32>(1.0) - attenuation) / max(optical, vec3<f32>(0.000001)), vec3<f32>(dl), optical * dl < vec3<f32>(0.0001));
+        result += field.rgb * transmission * segment;
+        transmission *= attenuation;
+        t = next;
+      }
+      return vec4<f32>(result * u.extra.x, 1.0);
+    }
+    let q = dot(in.opos.xy, in.opos.xy);
+    let r = sqrt(q);
+    let edge = 1.0 - smoothstep(0.85, 1.0, r);
+    var body = exp(-r * 2.0);
+    var bulge = exp(-q * 8.0) * 1.2;
+    if (u.extra.y == 2.0) { body = exp(-pow(r, 0.7) * 3.0); bulge = 0.0; }
+    if (u.extra.y == 4.0) {
+      body = exp(-q * 2.2) * (0.35 + 1.5 * fbm(vec3<f32>(in.opos.xy * 5.0, u.extra.z)));
+      bulge = 0.0;
+    }
+    return vec4<f32>((u.color.rgb * body + vec3<f32>(1.0,.87,.70)*bulge) * (u.extra.x * edge), 1.0);
+  }
   if (mode == 9u) {
     let h = clamp(in.weights.x, 0.0, 1.0);
     let fade = pow(h, 2.2) * (0.6 + 0.4 * h);
@@ -613,8 +729,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                sin(time * 13.7 + in.weights.y * 617.0);
       flux *= 1.0 - 0.45 * atmo_depth * (0.5 + 0.5 * tw);
     }
-    let shape = exp(-r2 * 9.0) + exp(-r2 * 2.2) * 0.06;
-    return vec4<f32>(tint * flux * shape, 1.0);
+    // Compact radial support: even a saturated nearby point can never reveal
+    // the billboard corners. These stars remain unresolved at interstellar
+    // distances; a bright optical glow is not a galaxy or a larger star body.
+    let window = 1.0 - smoothstep(0.81, 1.0, r2 / (in.normal.y * in.normal.y));
+    let shape = exp(-r2 / 2.42) * window;
+    // Preserve photometry below saturation while keeping the half-float HDR
+    // target finite on arbitrarily close approaches. Inf would propagate
+    // through bloom as the rectangular footprint of its separable kernel.
+    let radiance = flux * shape;
+    return vec4<f32>(tint * (radiance / (1.0 + radiance / 6000.0)), 1.0);
   }
   if (mode == 6u) {
     // Textured planet impostor: albedo from the material map, shading
@@ -924,13 +1048,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 )";
 
-
 // T0018 WP1: the post chain. The scene renders LINEAR HDR into an
 // RGBA16F target; this shader owns the single tonemap point. Passes:
-// luminance reduction (auto-exposure input), bright extract, separable
+// luminance reduction (auto-exposure input), bright extract, circular
 // blur (bloom), and the composite: exposure -> Purkinje rod
 // desaturation -> bloom add -> ACES. params.a = (exposure, scotopic,
-// bloom_amount, threshold); params.b = (texel_x, texel_y, dir_x, dir_y).
+// bloom_amount, threshold); params.b.xy = the input texel size.
 constexpr const char* kPostShader = R"(
 struct PostParams {
   a: vec4<f32>,
@@ -981,20 +1104,31 @@ fn fs_lum(in: FSIn) -> @location(0) vec4<f32> {
 fn fs_bright(in: FSIn) -> @location(0) vec4<f32> {
   let c = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb * pp.a.x;
   let bright = max(c - vec3<f32>(pp.a.w), vec3<f32>(0.0));
-  return vec4<f32>(bright, 1.0);
+  // A continuous highlight shoulder for scattered light, in exposed units.
+  // Unbounded inverse-square points can overflow this half-float target and
+  // turn the finite blur footprint into a white square. Direct HDR radiance
+  // is retained for tone mapping; only its optical bloom has this shoulder.
+  let peak = max(max(bright.r, bright.g), bright.b);
+  return vec4<f32>(bright / (1.0 + peak / 64.0), 1.0);
 }
 
 @fragment
 fn fs_blur(in: FSIn) -> @location(0) vec4<f32> {
-  let step_uv = pp.b.zw * pp.b.xy;
-  var c = textureSampleLevel(src_a, samp, in.uv, 0.0).rgb * 0.227027;
-  let w = array<f32, 4>(0.194594, 0.121621, 0.054054, 0.016216);
-  for (var i = 1; i <= 4; i++) {
-    let offset = step_uv * f32(i) * 1.5;
-    c += textureSampleLevel(src_a, samp, in.uv + offset, 0.0).rgb * w[i - 1];
-    c += textureSampleLevel(src_a, samp, in.uv - offset, 0.0).rgb * w[i - 1];
+  // One circular kernel with a smooth zero boundary. A separable truncated
+  // filter exposes its square support around heavily saturated highlights.
+  var c = vec3<f32>(0.0);
+  var total = 0.0;
+  for (var y = -3; y <= 3; y += 1) {
+    for (var x = -3; x <= 3; x += 1) {
+      let r2 = f32(x * x + y * y);
+      if (r2 < 12.25) {
+        let weight = exp(-r2 * 0.5) * (1.0 - smoothstep(6.25, 12.25, r2));
+        c += textureSampleLevel(src_a, samp, in.uv + vec2<f32>(f32(x), f32(y)) * pp.b.xy * 1.5, 0.0).rgb * weight;
+        total += weight;
+      }
+    }
   }
-  return vec4<f32>(c, 1.0);
+  return vec4<f32>(c / total, 1.0);
 }
 
 @fragment
@@ -1146,6 +1280,8 @@ std::uint16_t float_to_half(float f) {
 }  // namespace
 
 struct Rhi::Impl {
+  FrameTiming frame_timing;
+
   WGPUInstance instance = nullptr;
   WGPUSurface surface = nullptr;
   WGPUAdapter adapter = nullptr;
@@ -1175,6 +1311,7 @@ struct Rhi::Impl {
     WGPUTextureView material_view = nullptr;
     WGPUBindGroup group = nullptr;
     std::uint32_t size = 0;
+    std::uint32_t layers = 6;
   };
   WGPUBindGroupLayout tex_layout = nullptr;
   WGPUSampler planet_sampler = nullptr;
@@ -1333,10 +1470,9 @@ struct Rhi::Impl {
     WGPUTextureView bloom_view[2] = {nullptr, nullptr};
     // grp_hdr_only: t0 = t1 = hdr (bright/lum — must not reference the
     // bloom target it writes); grp_hdr: t0 = hdr, t1 = bloom[0]
-    // (composite); grp_b0/b1: the blur legs.
+    // (composite); grp_b1: the circular bloom input.
     WGPUBindGroup grp_hdr_only = nullptr;
     WGPUBindGroup grp_hdr = nullptr;
-    WGPUBindGroup grp_b0 = nullptr;
     WGPUBindGroup grp_b1 = nullptr;
     std::uint32_t w = 0;
     std::uint32_t h = 0;
@@ -1347,7 +1483,6 @@ struct Rhi::Impl {
   void release_post_set(PostSet& set) {
     if (set.grp_hdr_only != nullptr) wgpuBindGroupRelease(set.grp_hdr_only);
     if (set.grp_hdr != nullptr) wgpuBindGroupRelease(set.grp_hdr);
-    if (set.grp_b0 != nullptr) wgpuBindGroupRelease(set.grp_b0);
     if (set.grp_b1 != nullptr) wgpuBindGroupRelease(set.grp_b1);
     for (int i = 0; i < 2; ++i) {
       if (set.bloom_view[i] != nullptr) wgpuTextureViewRelease(set.bloom_view[i]);
@@ -1401,38 +1536,42 @@ struct Rhi::Impl {
     }
     set.grp_hdr_only = make_post_group(set.hdr_view, set.hdr_view);
     set.grp_hdr = make_post_group(set.hdr_view, set.bloom_view[0]);
-    set.grp_b0 = make_post_group(set.bloom_view[0], set.bloom_view[0]);
     set.grp_b1 = make_post_group(set.bloom_view[1], set.bloom_view[1]);
   }
   PlanetTexEntry default_tex;
   std::unordered_map<std::uint32_t, PlanetTexEntry> planet_textures;
   std::uint32_t next_planet_tex_id = 1;
 
-  PlanetTexEntry make_planet_tex(std::uint32_t face_size) {
+  PlanetTexEntry make_planet_tex(std::uint32_t face_size,
+                                 std::uint32_t layers = 6,
+                                 bool volume = false) {
     PlanetTexEntry entry;
     entry.size = face_size;
+    entry.layers = layers;
     WGPUTextureDescriptor desc{};
     desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
     desc.dimension = WGPUTextureDimension_2D;
-    desc.size = WGPUExtent3D{face_size, face_size, 6};
+    desc.size = WGPUExtent3D{face_size, face_size, entry.layers};
     desc.mipLevelCount = 1;
     desc.sampleCount = 1;
     desc.label = sv("planet-height");
     desc.format = WGPUTextureFormat_R16Float;
     entry.height = wgpuDeviceCreateTexture(device, &desc);
     desc.label = sv("planet-material");
-    desc.format = WGPUTextureFormat_RGBA8Unorm;
+    desc.format =
+        (volume ? WGPUTextureFormat_RGBA16Float : WGPUTextureFormat_RGBA8Unorm);
     entry.material = wgpuDeviceCreateTexture(device, &desc);
     WGPUTextureViewDescriptor view_desc{};
     view_desc.dimension = WGPUTextureViewDimension_2DArray;
     view_desc.baseArrayLayer = 0;
-    view_desc.arrayLayerCount = 6;
+    view_desc.arrayLayerCount = entry.layers;
     view_desc.baseMipLevel = 0;
     view_desc.mipLevelCount = 1;
     view_desc.format = WGPUTextureFormat_R16Float;
     view_desc.aspect = WGPUTextureAspect_All;
     entry.height_view = wgpuTextureCreateView(entry.height, &view_desc);
-    view_desc.format = WGPUTextureFormat_RGBA8Unorm;
+    view_desc.format =
+        (volume ? WGPUTextureFormat_RGBA16Float : WGPUTextureFormat_RGBA8Unorm);
     entry.material_view = wgpuTextureCreateView(entry.material, &view_desc);
     WGPUBindGroupEntry entries[3] = {};
     entries[0].binding = 0;
@@ -3445,10 +3584,34 @@ std::uint32_t Rhi::create_planet_texture(std::uint32_t face_size) {
   return id;
 }
 
+std::uint32_t Rhi::create_sky_volume(std::uint32_t size) {
+  impl_->ensure_mesh_pipeline();
+  const auto id = impl_->next_planet_tex_id++;
+  impl_->planet_textures.emplace(id, impl_->make_planet_tex(size, size, true));
+  return id;
+}
+void Rhi::update_sky_slice(std::uint32_t handle, std::uint32_t slice,
+                           const std::uint16_t* rgba_half) {
+  const auto it = impl_->planet_textures.find(handle);
+  if (it == impl_->planet_textures.end() || slice >= it->second.layers) return;
+  const auto& tex = it->second;
+  WGPUTexelCopyTextureInfo destination{};
+  destination.texture = tex.material;
+  destination.origin = WGPUOrigin3D{0, 0, slice};
+  destination.aspect = WGPUTextureAspect_All;
+  WGPUTexelCopyBufferLayout layout{};
+  layout.bytesPerRow = tex.size * 8;
+  layout.rowsPerImage = tex.size;
+  const WGPUExtent3D extent{tex.size, tex.size, 1};
+  wgpuQueueWriteTexture(impl_->queue, &destination, rgba_half,
+                        static_cast<std::size_t>(tex.size) * tex.size * 8,
+                        &layout, &extent);
+}
+
 void Rhi::update_planet_face(std::uint32_t handle, std::uint32_t face,
                              const std::uint16_t* height_half, const std::uint8_t* rgba) {
   const auto it = impl_->planet_textures.find(handle);
-  if (it == impl_->planet_textures.end() || face >= 6) {
+  if (it == impl_->planet_textures.end() || face >= it->second.layers) {
     return;
   }
   impl_->write_planet_face(it->second, face, height_half, rgba);
@@ -3509,8 +3672,17 @@ void Rhi::set_material_params(std::uint32_t layer, const MaterialParams& params)
   impl_->material_dirty = true;
 }
 
+float Rhi::exposure() const { return impl_->exposure; }
+Rhi::FrameTiming Rhi::frame_timing() const { return impl_->frame_timing; }
+
 bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
                        std::size_t item_count) {
+  impl_->frame_timing = {};
+  const auto timed = [](auto work) {
+    const auto start = core::MonotonicClock::now();
+    work();
+    return std::chrono::duration<double, std::milli>(core::MonotonicClock::now() - start).count();
+  };
   impl_->ensure_mesh_pipeline();
   if (impl_->material_dirty) {
     // Table layout: three arrays of 64 vec4 (a: tint+tile, b: rough/
@@ -3547,11 +3719,13 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // Upload all uniforms before the command buffer executes.
   const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
   for (std::size_t i = 0; i < count; ++i) {
-    float block[32];
+    float block[44];
     std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
     std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
     std::memcpy(block + 20, items[i].aux, sizeof(items[i].aux));
     std::memcpy(block + 24, items[i].extra, sizeof(items[i].extra));
+    std::memcpy(block + 32, items[i].volume_rotation, sizeof(items[i].volume_rotation));
+    block[35] = items[i].overlay ? 1.0f : 0.0f;  // volume_x.w: unjittered UI
     block[27] = static_cast<float>(items[i].mode);
     for (int k = 0; k < 4; ++k) {
       block[28 + k] = static_cast<float>(items[i].material_palette[k]);
@@ -3577,7 +3751,9 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   depth_attachment.depthClearValue = 0.0f;  // reversed-Z: far plane
 
   WGPUSurfaceTexture surface_texture{};
-  wgpuSurfaceGetCurrentTexture(impl_->surface, &surface_texture);
+  impl_->frame_timing.acquire_ms = timed([&] {
+    wgpuSurfaceGetCurrentTexture(impl_->surface, &surface_texture);
+  });
   const bool have_surface =
       surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
       surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal;
@@ -3595,7 +3771,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   // Consume last frame's luminance readback (async, 1-2 frame latency),
   // then follow the exposure target with asymmetric time constants:
   // glare adapts in a blink, dark adaptation opens over seconds.
-  wgpuDevicePoll(impl_->device, 0U, nullptr);
+  impl_->frame_timing.poll_ms = timed([&] { wgpuDevicePoll(impl_->device, 0U, nullptr); });
   if (impl_->lum_map_ready) {
     impl_->lum_map_ready = false;
     impl_->lum_map_inflight = false;
@@ -3639,9 +3815,9 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   impl_->ensure_post_set(impl_->post_main, impl_->width, impl_->height);
   impl_->ensure_post_set(impl_->post_rec, Impl::kRecW, Impl::kRecH);
 
-  // Post uniforms: slots 0-3 main, 4-7 recorder (bright/composite, blurH,
-  // blurV, luminance). a = (exposure, scotopic, bloom, threshold),
-  // b = (texel_x, texel_y, dir_x, dir_y).
+  // Post uniforms: slots 0-3 main, 4-7 recorder (bright/composite, circular
+  // bloom, reserved, luminance). a = (exposure, scotopic, bloom, threshold),
+  // b.xy = input texel size.
   const auto write_post_slots = [&](std::uint32_t base, const Impl::PostSet& set) {
     const float tx = 1.0f / static_cast<float>(set.w);
     const float ty = 1.0f / static_cast<float>(set.h);
@@ -3655,9 +3831,6 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     float blur_h[8] = {a[0], a[1], a[2], a[3], btx, bty, 1.0f, 0.0f};
     wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, (base + 1) * 256, blur_h,
                          sizeof(blur_h));
-    float blur_v[8] = {a[0], a[1], a[2], a[3], btx, bty, 0.0f, 1.0f};
-    wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, (base + 2) * 256, blur_v,
-                         sizeof(blur_v));
     float lum[8] = {a[0], a[1], a[2], a[3], tx, ty, 0.0f, 0.0f};
     wgpuQueueWriteBuffer(impl_->queue, impl_->post_uniforms, (base + 3) * 256, lum,
                          sizeof(lum));
@@ -3940,7 +4113,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         continue;  // city meshes: their own pipeline (draw_city)
       }
       const Pass item_pass = items[i].mode == 2 || items[i].mode == 3 ||
-                                     items[i].mode == 7 || items[i].mode == 9
+                                     items[i].mode == 7 || items[i].mode == 9 ||
+                                     items[i].mode == 10
                                  ? Pass::Additive
                              : items[i].translucent ? Pass::Blend
                                                     : Pass::Opaque;
@@ -4242,9 +4416,8 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
         grp_comp = impl_->post_taa[par];
       }
     }
-    fullscreen(impl_->bright_pipeline, grp_only, slot_base + 0, set.bloom_view[0]);
-    fullscreen(impl_->blur_pipeline, set.grp_b0, slot_base + 1, set.bloom_view[1]);
-    fullscreen(impl_->blur_pipeline, set.grp_b1, slot_base + 2, set.bloom_view[0]);
+    fullscreen(impl_->bright_pipeline, grp_only, slot_base + 0, set.bloom_view[1]);
+    fullscreen(impl_->blur_pipeline, set.grp_b1, slot_base + 1, set.bloom_view[0]);
     if (do_lum) {
       fullscreen(impl_->lum_pipeline, grp_only, slot_base + 3, impl_->lum_view);
     }
@@ -4281,7 +4454,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     }
     WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
     wgpuCommandEncoderRelease(encoder);
-    wgpuQueueSubmit(impl_->queue, 1, &commands);
+    impl_->frame_timing.submit_ms += timed([&] { wgpuQueueSubmit(impl_->queue, 1, &commands); });
     wgpuCommandBufferRelease(commands);
     if (main_set && impl_->cull_readback_inflight && impl_->cull_readback_count > 0 && impl_->cull_readback != nullptr &&
         impl_->frame_counter % 30 == 0) {
@@ -4334,7 +4507,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, nullptr);
     render_full(impl_->post_main, impl_->depth_view, view, 0, true);
     wgpuTextureViewRelease(view);
-    wgpuSurfacePresent(impl_->surface);
+    impl_->frame_timing.present_ms = timed([&] { wgpuSurfacePresent(impl_->surface); });
     wgpuTextureRelease(surface_texture.texture);
     if (taa_on) {
       impl_->taa_valid = true;
@@ -4390,7 +4563,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     }
     WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
     wgpuCommandEncoderRelease(encoder);
-    wgpuQueueSubmit(impl_->queue, 1, &commands);
+    impl_->frame_timing.submit_ms += timed([&] { wgpuQueueSubmit(impl_->queue, 1, &commands); });
     wgpuCommandBufferRelease(commands);
     if (!impl_->lum_map_inflight) {
       impl_->lum_map_inflight = true;
@@ -4570,6 +4743,11 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     wgpuTextureRelease(color_tex);
   }
 
+  // Age history even while its automatic readbacks are suspended. F9 must
+  // never prepend stale departure frames from an earlier part of a flight.
+  while (!impl_->ring.empty() &&
+         frame.time_s - impl_->ring.front().time_s > Impl::kRingSeconds)
+    impl_->ring.pop_front();
   // --- debug recorder: ring buffer + triggered sequences ----------------
   impl_->last_frame_time = frame.time_s;
   ++impl_->frame_counter;

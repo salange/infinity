@@ -1,6 +1,11 @@
 add_executable(game_tests
   main.cpp
   test_galaxy.cpp
+  test_galaxy_route.cpp
+  ../app/src/galaxy_flythrough.cpp
+  ../app/src/stellar_stream.cpp
+  ../app/src/deep_sky_render.cpp
+  ../app/src/distant_catalog.cpp
   test_names.cpp
   test_planet.cpp
   test_provinces.cpp
@@ -15,7 +20,8 @@ add_executable(game_tests
   test_surface.cpp
   test_civ.cpp
   test_city.cpp)
-target_include_directories(game_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(game_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/engine/render/include)
 target_link_libraries(game_tests
   PRIVATE game::gen game::sim game::tex game::city doctest::doctest game_warnings)
 

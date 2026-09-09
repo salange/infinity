@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -7,7 +8,15 @@
 
 namespace inf::core {
 
-// The ONLY source of "now" (planetary-systems spec section 5). Everything
+// Elapsed real time for presentation and background-work budgets. This clock
+// never enters procedural generation or replaces the world's simulation time.
+class MonotonicClock {
+ public:
+  using time_point = std::chrono::steady_clock::time_point;
+  static time_point now();
+};
+
+// The source of simulation "now" (planetary-systems spec section 5). Everything
 // else receives time, never asks the OS — a ci gate forbids OS-clock
 // reads outside the clock module.
 class WorldClock {

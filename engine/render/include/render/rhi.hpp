@@ -23,6 +23,11 @@ class Rhi {
   ~Rhi();
 
   void resize(std::uint32_t width, std::uint32_t height);
+  float exposure() const;
+  struct FrameTiming {
+    double acquire_ms{0}, poll_ms{0}, submit_ms{0}, present_ms{0};
+  };
+  FrameTiming frame_timing() const;
 
   // Acquires the next surface texture, clears it to the given color,
   // presents. Returns false if the frame had to be skipped (e.g. surface
@@ -141,6 +146,11 @@ class Rhi {
   // deliberately NOT a general texture system — one pair per resident
   // body plus a shared sampler.
   std::uint32_t create_planet_texture(std::uint32_t face_size);
+  // Spatial radiance/extinction volume, RGBA16F slices in a 2D array. Its
+  // contents are world-space samples, never camera images or route frames.
+  std::uint32_t create_sky_volume(std::uint32_t size);
+  void update_sky_slice(std::uint32_t handle, std::uint32_t slice,
+                        const std::uint16_t* rgba_half);
   // Full-layer upload of one cube face: height as raw IEEE half floats
   // (face_size^2), material as RGBA8 (face_size^2 * 4 bytes).
   void update_planet_face(std::uint32_t handle, std::uint32_t face,
@@ -192,6 +202,8 @@ class Rhi {
     // an object whose fine level is on screen).
     bool shadow_only = false;
     float extra[4]{};
+    // Mode 10 spatial emission volume: world-to-object rotation rows.
+    float volume_rotation[12]{};
     // 0 = legacy lit/unlit, 1 = star surface, 2 = additive corona/glow,
     // 3 = additive glow sprite (lens flare / veil / limb halo; extra.x
     // intensity, extra.y falloff, extra.z rim radius or 0 for a disc),

@@ -126,13 +126,15 @@ class Player {
   void enter_map();
   void exit_map();
 
-  // Debug/capture aids: directly set attitude/position/speed
-  // (scripted captures and recordings; never gameplay paths).
+  // External camera controllers and scripted capture poses.
   void set_attitude(const Vec3& forward, const Vec3& up) {
     forward_ = normalize(forward);
     up_ = normalize(up - forward_ * dot(up, forward_));
   }
-  void set_position(const Vec3& position) { position_ = position; }
+  void set_position(const Vec3& position) {
+    position_ = position;
+    position_error_ = {};
+  }
   void set_speed(double speed) { speed_ = speed; }
 
   // Interplanetary flight: swap the effective field (and coordinate
@@ -163,6 +165,8 @@ class Player {
   PlayerMode mode_ = PlayerMode::Flight;
 
   Vec3 position_;
+  Vec3 position_error_{};  // Preserve small flight steps far from the body
+                           // origin.
   Vec3 forward_{0.0, 0.0, 1.0};
   Vec3 up_{1.0, 0.0, 0.0};
   double speed_ = 0.0;

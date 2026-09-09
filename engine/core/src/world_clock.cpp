@@ -4,8 +4,12 @@
 
 namespace inf::core {
 
+MonotonicClock::time_point MonotonicClock::now() {
+  return std::chrono::steady_clock::now();
+}
+
 WorldTime LocalClock::now() const {
-  // The single sanctioned OS-clock read in the codebase (ci-enforced).
+  // Wall-clock reads stay in this module (ci-enforced).
   // C++20: system_clock counts Unix time (no leap seconds) — matching
   // WorldTime's uniform-timescale convention.
   const auto unix_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(

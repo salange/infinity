@@ -106,6 +106,15 @@ cmake -B build-headless -DUNENDLICH_BUILD_APP=OFF
 Rule of the house: `core`/`gen`/`world`/`cli` never depend on a window,
 GPU, or engine. Rendering is a view of the world, not part of it.
 
+### Galaxy traversal
+
+Press **F6** in flight mode for a live 120-second tour through the current galaxy
+center, starting at your current pose. **F6** or **Escape** brakes and returns
+control where you have reached. The shared sky follows the actual observer every
+frame, with short, cancellable preparation for nearby stars. Use
+`--render-width 1280` for a 1280×720 window, including on Retina displays.
+See [route, controls, and profiling](docs/galaxy-flythrough.md).
+
 ## Contextual debugging overlay
 
 Press **F3** to show/hide the independent right-side debugging panel. The

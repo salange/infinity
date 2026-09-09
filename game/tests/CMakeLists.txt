@@ -9,6 +9,7 @@ add_executable(game_tests
   test_seam.cpp
   test_system.cpp
   test_player.cpp
+  test_debug_overlay.cpp
   test_edits.cpp
   test_map.cpp
   test_surface.cpp

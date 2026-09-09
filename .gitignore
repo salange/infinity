@@ -15,3 +15,9 @@ demos/cityblock/assets/textures/
 demos/cityblock/assets/sky/
 demos/cityblock/assets/fetched.json
 cityblock-*.png
+
+# Human tech visual demo optional CC0 assets and captures
+demos/human_tech_demo/assets/textures/
+demos/human_tech_demo/assets/sky/
+demos/human_tech_demo/assets/fetched.json
+human-tech-*.png

@@ -1411,11 +1411,16 @@ int main(int argc, char** argv) {
   std::atomic<bool> bake_running{false};
   bool bake_restart_pending = false;
   std::thread bake_thread;
+  std::vector<inf::app::CivBodyInputs> bake_civ_inputs;
+  std::unique_ptr<BakeResult> uploading_body;
+  std::uint32_t uploading_body_handle = 0, uploading_body_face = 0;
   // Restartable (T0017): a jump regenerates the system, so the worker is
   // stopped, textures dropped, and a new worker started for the arrival
   // system.
-  const auto start_bake_worker = [&](const inf::gen::StarSystemParams system_copy,
-                                     const inf::gen::SystemCell cell_copy) {
+  const auto start_bake_worker = [&](const inf::gen::StarSystemParams
+                                         system_copy,
+                                     const inf::gen::SystemCell cell_copy,
+                                     bool refresh_inputs = true) {
     bake_quit.store(false);
     bake_restart_pending = false;
     std::vector<float> means_copy(materials.mean_albedo_table(),
@@ -1424,8 +1429,12 @@ int main(int argc, char** argv) {
     // (the registry is not thread-safe); the worker rebuilds each body's
     // modifier on its own field so the bake shows plates, urban albedo
     // and night lights from orbit.
-    std::vector<inf::app::CivBodyInputs> civ_bodies =
-        inf::app::gather_civ_bodies(*seed, civ_registry, civ_resolver, cell_copy, civ_now(world_clock.now()));
+    if (refresh_inputs) {
+      bake_civ_inputs =
+          inf::app::gather_civ_bodies(*seed, civ_registry, civ_resolver,
+                                      cell_copy, civ_now(world_clock.now()));
+    }
+    const auto civ_bodies = bake_civ_inputs;
     bake_running.store(true);
     bake_thread = std::thread([&bake_mutex, &bake_done, &bake_quit,
                                &bake_running, &body_tex_key, seed_copy = *seed,
@@ -1518,24 +1527,32 @@ int main(int argc, char** argv) {
     }
     const std::lock_guard<std::mutex> lock(bake_mutex);
     bake_done.clear();
+    if (uploading_body_handle)
+      rhi->destroy_planet_texture(uploading_body_handle);
+    uploading_body_handle = uploading_body_face = 0;
+    uploading_body.reset();
   };
   start_bake_worker(system, current_cell);
   const auto upload_finished_bakes = [&] {
-    std::vector<BakeResult> ready;
-    {
+    if (!uploading_body) {
       const std::lock_guard<std::mutex> lock(bake_mutex);
-      ready.swap(bake_done);
+      if (bake_done.empty()) return;
+      uploading_body =
+          std::make_unique<BakeResult>(std::move(bake_done.front()));
+      bake_done.erase(bake_done.begin());
+      uploading_body_handle =
+          rhi->create_planet_texture(uploading_body->texture.face_size);
+      uploading_body_face = 0;
     }
-    for (BakeResult& result : ready) {
-      const std::uint32_t handle =
-          rhi->create_planet_texture(result.texture.face_size);
-      for (std::uint32_t face = 0; face < 6; ++face) {
-        rhi->update_planet_face(handle, face,
-                                result.texture.faces[face].height_half.data(),
-                                result.texture.faces[face].rgba.data());
-      }
+    // Publish only a complete texture, but spread its six uploads over frames.
+    auto& result = *uploading_body;
+    const auto face = uploading_body_face++;
+    rhi->update_planet_face(uploading_body_handle, face,
+                            result.texture.faces[face].height_half.data(),
+                            result.texture.faces[face].rgba.data());
+    if (uploading_body_face == 6) {
       BodyTexture entry;
-      entry.handle = handle;
+      entry.handle = uploading_body_handle;
       entry.amp_over_radius = static_cast<float>(
           static_cast<double>(result.texture.height_amp_m) / result.radius_m);
       entry.slope_scale = static_cast<float>(
@@ -1545,6 +1562,8 @@ int main(int argc, char** argv) {
         rhi->destroy_planet_texture(old->second.handle);
       }
       body_textures[result.key] = entry;
+      uploading_body.reset();
+      uploading_body_handle = uploading_body_face = 0;
     }
   };
 
@@ -1586,7 +1605,7 @@ int main(int argc, char** argv) {
     // off-thread.
     if (bake_restart_pending && !bake_running.load()) {
       stop_bake_worker();
-      start_bake_worker(system, current_cell);
+      start_bake_worker(system, current_cell, false);
     }
     if (materials_anchor != anchor->field.get()) {
       materials.apply_planet(*rhi, anchor->field->material());

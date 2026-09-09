@@ -188,6 +188,7 @@ inf::render::Rhi::DrawItem hud_quad(std::uint32_t mesh, double ndc_x, double ndc
                                     float b) {
   inf::render::Rhi::DrawItem item;
   item.mesh = mesh;
+  item.overlay = true;  // UI never enters exposure, bloom or temporal history.
   Mat4 m{};
   m.m[0] = static_cast<float>(width_ndc);
   m.m[5] = static_cast<float>(height_ndc);
@@ -2109,6 +2110,10 @@ int main(int argc, char** argv) {
       galaxy_flight.clear_departure_body(
           player.position() - departure_body.center, departure_body.radius);
       flight_elapsed = 0;
+      // The optional debug history performs synchronous GPU readbacks. Keep
+      // live travel on the same path as release playback; explicit F9/record
+      // requests still work and ordinary debug history resumes afterwards.
+      rhi->set_ring_enabled(false);
       flight_active = true;
       if (galaxy_profile) {
         flight_csv.close();
@@ -2120,7 +2125,7 @@ int main(int argc, char** argv) {
                    << sky_volume.size << '\n';
         flight_csv
             << "elapsed_s,frame_ms,catalog_ms,presented,width,height,x_"
-               "m,y_m,z_m,resources_ms,world_ms,stars_ms,draw_ms,render_ms\n";
+               "m,y_m,z_m,resources_ms,world_ms,stars_ms,draw_ms,render_ms,acquire_ms,poll_ms,submit_ms,present_ms\n";
       }
     }
     if (flight_active) {
@@ -2668,7 +2673,7 @@ int main(int argc, char** argv) {
         stars_item.aux[0] = static_cast<float>(offset.x);
         stars_item.aux[1] = static_cast<float>(offset.y);
         stars_item.aux[2] = static_cast<float>(offset.z);
-        const double star_half_px = 5.0;
+        const double star_half_px = 1.0;  // shader coordinates are physical pixels
         stars_item.extra[0] = static_cast<float>(2.0 * star_half_px / state.width);
         stars_item.extra[1] = static_cast<float>(2.0 * star_half_px / state.height);
         items.push_back(stars_item);
@@ -3758,10 +3763,15 @@ int main(int argc, char** argv) {
                  << elapsed_ms(resources_finished, world_finished) << ','
                  << elapsed_ms(world_finished, stars_finished) << ','
                  << elapsed_ms(stars_finished, render_started) << ','
-                 << elapsed_ms(render_started, FlightClock::now()) << '\n';
+                 << elapsed_ms(render_started, FlightClock::now()) << ','
+                 << rhi->frame_timing().acquire_ms << ','
+                 << rhi->frame_timing().poll_ms << ','
+                 << rhi->frame_timing().submit_ms << ','
+                 << rhi->frame_timing().present_ms << '\n';
     }
     if (flight_final_frame && presented) {
       flight_active = false;
+      rhi->set_ring_enabled(!release_mode);
       player.set_speed(0);
       flight_csv << "# complete=" << (!galaxy_flight.cancelled())
                  << ";cancelled=" << galaxy_flight.cancelled() << '\n';

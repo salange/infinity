@@ -58,7 +58,11 @@ objects are never moved or brightened to fill an empty part of the sky.
 The external volumes share a 64 MiB texture budget, including their companion
 height textures. Populous seeds use a smaller, fixed macro sampling grid.
 
-Bright stellar points have round, compact optical profiles. Continuous HDR and
+Bright stellar points have a small fixed optical core with continuously growing
+Gaussian support, and a single circular bloom filter. They no longer become
+oversized flat white discs. The crosshair, steering reticle and recording marker
+are final UI overlays: neither exposure, bloom, temporal history nor camera
+jitter affects them. Bright stellar points have round, compact optical profiles. Continuous HDR and
 bloom highlight shoulders prevent saturated points from exposing either their
 billboard or the blur kernel as white squares. These optical glows do not imply
 large physical bodies: at interstellar distances the stellar discs usually
@@ -89,7 +93,10 @@ uv run --script tools/profile-galaxy.py /tmp/galaxy.csv
 `--render-width` accepts 320–16384 pixels and uses a fixed-size 16:9 window. It disables
 automatic framebuffer scaling on Retina displays; verify the actual dimensions
 in the profile. `--window WxH` remains available for ordinary logical window
-sizes. `--release` disables the debug capture ring. The automatic profile run
+sizes. `--release` disables the debug capture ring. F6 also suspends automatic debug
+readbacks for the duration of a flight, then restores the previous normal setting.
+F9/scripted recordings still explicitly capture future frames; such readbacks
+can stall playback and are excluded from performance measurements. The automatic profile run
 exits on completion; without `--galaxy-demo`, the chosen file records each F6
 flight, replacing the previous contents.
 
@@ -97,7 +104,8 @@ The CSV covers the complete 120-second trajectory, including its first and last
 frames. It records elapsed time, frame-call duration, last catalog build cost,
 presentation success, actual framebuffer dimensions and galactocentric position.
 Timing breakdowns cover resource updates, world/terrain work, stellar uploads,
-draw preparation, and rendering/presentation.
+draw preparation, rendering, surface acquisition, device polling, submission and
+presentation. These distinguish scene work from driver/compositor waits.
 A monotonic clock drives the camera independently of simulation frame clamping;
 a late frame never silently extends the route. The summary checks completeness
 and reports departure, entry, center and exit, including 24/60 fps budget misses.

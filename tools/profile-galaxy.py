@@ -55,7 +55,7 @@ def summarize(frames):
         "failed_presentations": sum(row["presented"] != 1 for row in frames),
         "max_catalog_ms": max(row["catalog_ms"] for row in frames),
     }
-    for stage in ("resources_ms", "world_ms", "stars_ms", "draw_ms", "render_ms"):
+    for stage in ("resources_ms", "world_ms", "stars_ms", "draw_ms", "render_ms", "acquire_ms", "poll_ms", "submit_ms", "present_ms"):
         if stage in frames[0]:
             summary[f"max_{stage}"] = max(row[stage] for row in frames)
     return summary

@@ -24,6 +24,10 @@ class Rhi {
 
   void resize(std::uint32_t width, std::uint32_t height);
   float exposure() const;
+  struct FrameTiming {
+    double acquire_ms{0}, poll_ms{0}, submit_ms{0}, present_ms{0};
+  };
+  FrameTiming frame_timing() const;
 
   // Acquires the next surface texture, clears it to the given color,
   // presents. Returns false if the frame had to be skipped (e.g. surface

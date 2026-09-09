@@ -16,7 +16,7 @@ class MonotonicClock {
   static time_point now();
 };
 
-// The ONLY source of "now" (planetary-systems spec section 5). Everything
+// The source of simulation "now" (planetary-systems spec section 5). Everything
 // else receives time, never asks the OS — a ci gate forbids OS-clock
 // reads outside the clock module.
 class WorldClock {

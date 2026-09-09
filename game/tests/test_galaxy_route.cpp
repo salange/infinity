@@ -125,3 +125,27 @@ TEST_CASE("stellar exposure culling never reseeds surviving points") {
   CHECK(app::build_stellar_catalog(octree, start.position, {}, &cancelled, 5.0)
             .vertices.empty());
 }
+
+TEST_CASE("galaxy flight clears a departure body that blocks the center") {
+  auto start = starting_pose();
+  start.velocity = {};
+  constexpr double radius = 1e6;
+  for (const sim::Vec3 relative : {sim::Vec3{radius * 1.001, 0, 0},
+                                   sim::Vec3{radius * 2, radius * .2, 0}}) {
+    app::GalaxyFlight flight;
+    flight.start(parameters(), start);
+    flight.clear_departure_body(relative, radius);
+    CHECK(sim::length(flight.sample(0).position - start.position) == 0);
+    for (int step = 0; step <= 2000; ++step) {
+      const double t = step / 1000.0;
+      CHECK(sim::length(relative + flight.displacement(t)) >= radius);
+    }
+    CHECK(sim::length(flight.sample(flight.center_time()).position) < 1024);
+    const double t = .15, h = 1e-7;
+    const auto measured =
+        (flight.displacement(t + h) - flight.displacement(t - h)) * (.5 / h);
+    CHECK(sim::length(measured - flight.sample(t).velocity) /
+              std::max(1.0, sim::length(measured)) <
+          1e-5);
+  }
+}

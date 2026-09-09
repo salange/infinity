@@ -1611,6 +1611,7 @@ int main(int argc, char** argv) {
       materials.apply_planet(*rhi, anchor->field->material());
       materials_anchor = anchor->field.get();
     }
+    const auto resources_finished = FlightClock::now();
     // Quit (design/map-mode.md section 5): Cmd+Q/Cmd+W on macOS, Ctrl+Q
     // elsewhere — never bare W. The diff overlay flushes on the normal
     // shutdown path below.
@@ -2098,6 +2099,9 @@ int main(int argc, char** argv) {
           {galactic_pos + planet_sys + player.position(), player.forward(),
            player.up(), player.forward() * player.speed()});
       flight_epoch = FlightClock::now();
+      const auto departure_body = closest_body();
+      galaxy_flight.clear_departure_body(
+          player.position() - departure_body.center, departure_body.radius);
       flight_elapsed = 0;
       flight_active = true;
       if (galaxy_profile) {
@@ -2108,8 +2112,9 @@ int main(int argc, char** argv) {
                    << ";duration_s=120;center_s=" << galaxy_flight.center_time()
                    << ";budget_ms=41.6667;prediction_s=1;volume_size="
                    << sky_volume.size << '\n';
-        flight_csv << "elapsed_s,frame_ms,catalog_ms,presented,width,height,x_"
-                      "m,y_m,z_m\n";
+        flight_csv
+            << "elapsed_s,frame_ms,catalog_ms,presented,width,height,x_"
+               "m,y_m,z_m,resources_ms,world_ms,stars_ms,draw_ms,render_ms\n";
       }
     }
     if (flight_active) {
@@ -2402,6 +2407,7 @@ int main(int argc, char** argv) {
       ++uploads;
     }
 
+    const auto world_finished = FlightClock::now();
     const double star_visibility = std::clamp(
         8.3 + 2.5 * std::log10(std::max(.01f, rhi->exposure()) / 35.0), -4.0,
         8.3);
@@ -2429,6 +2435,7 @@ int main(int argc, char** argv) {
       }
     }
 
+    const auto stars_finished = FlightClock::now();
     // --- camera (map-aware) ----------------------------------------------
     SVec3 cam_pos_local = player_pos;
     SVec3 cam_fwd_v = player.forward();
@@ -3726,6 +3733,7 @@ int main(int argc, char** argv) {
                           state.height);
       for (auto i = first; i < items.size(); ++i) items[i].overlay = true;
     }
+    const auto render_started = FlightClock::now();
     const bool presented =
         rhi->render_frame(frame_params, items.data(), items.size());
     scene_presented = scene_presented || presented;
@@ -3733,10 +3741,18 @@ int main(int argc, char** argv) {
       const double ms = std::chrono::duration<double, std::milli>(
                             FlightClock::now() - frame_started)
                             .count();
+      const auto elapsed_ms = [](auto from, auto to) {
+        return std::chrono::duration<double, std::milli>(to - from).count();
+      };
       flight_csv << flight_elapsed << ',' << ms << ',' << star_catalog.build_ms
                  << ',' << presented << ',' << state.width << ','
                  << state.height << ',' << observer_gal.x << ','
-                 << observer_gal.y << ',' << observer_gal.z << '\n';
+                 << observer_gal.y << ',' << observer_gal.z << ','
+                 << elapsed_ms(frame_started, resources_finished) << ','
+                 << elapsed_ms(resources_finished, world_finished) << ','
+                 << elapsed_ms(world_finished, stars_finished) << ','
+                 << elapsed_ms(stars_finished, render_started) << ','
+                 << elapsed_ms(render_started, FlightClock::now()) << '\n';
     }
     if (flight_final_frame && presented) {
       flight_active = false;

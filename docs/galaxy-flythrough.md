@@ -5,6 +5,8 @@ with the current attitude, roll, field of view and exposure. If the view points
 more than 10 degrees away from the center, it first turns smoothly toward it.
 A smaller correction blends into departure. The first second of translation
 accelerates gently at first, then reaches interstellar cruise speed. The route
+curves smoothly clear of the nearest departure body if it blocks the center;
+that local detour vanishes before the interstellar crossing. The route
 passes through the center and brakes at the opposite outskirts after 120 seconds.
 The outskirts are 1.1 times the seed's nominal galaxy radius; the density has a
 soft outer tail. Distances retain the existing `gen::kLightYearM` conversion.
@@ -80,6 +82,8 @@ flight, replacing the previous contents.
 The CSV covers the complete 120-second trajectory, including its first and last
 frames. It records elapsed time, frame-call duration, last catalog build cost,
 presentation success, actual framebuffer dimensions and galactocentric position.
+Timing breakdowns cover resource updates, world/terrain work, stellar uploads,
+draw preparation, and rendering/presentation.
 A monotonic clock drives the camera independently of simulation frame clamping;
 a late frame never silently extends the route. The summary checks completeness
 and reports departure, entry, center and exit, including 24/60 fps budget misses.
@@ -102,3 +106,5 @@ scene frame belongs to application startup; the recorded first flight frame is
 still at elapsed time zero. Manual F6 activation requires no preparation pause.
 Material-library completion requests an asynchronous planet-texture refresh;
 the main loop keeps rendering while an obsolete body bake finishes cancelling.
+Each frame uploads at most one material tile and one face of a body texture;
+a body texture becomes available only after all six faces are ready.

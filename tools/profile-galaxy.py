@@ -43,7 +43,7 @@ def summarize(frames):
     def percentile(p):
         return times[max(0, math.ceil(len(times) * p) - 1)]
 
-    return {
+    summary = {
         "frames": len(times),
         "mean_ms": sum(times) / len(times),
         "p50_ms": percentile(0.5),
@@ -55,6 +55,10 @@ def summarize(frames):
         "failed_presentations": sum(row["presented"] != 1 for row in frames),
         "max_catalog_ms": max(row["catalog_ms"] for row in frames),
     }
+    for stage in ("resources_ms", "world_ms", "stars_ms", "draw_ms", "render_ms"):
+        if stage in frames[0]:
+            summary[f"max_{stage}"] = max(row[stage] for row in frames)
+    return summary
 
 
 center = float(metadata["center_s"])

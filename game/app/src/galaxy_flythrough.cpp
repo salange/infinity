@@ -44,6 +44,21 @@ void GalaxyFlight::start(const gen::GalaxyParams& galaxy,
   cruise_ =
       (sim::length(origin_) + outskirts) / (duration_s - alignment_ - 1.6);
   cancelled_ = false;
+  clearance_ = {};
+}
+
+void GalaxyFlight::clear_departure_body(Vec3 from_body, double radius_m) {
+  const double distance = sim::length(from_body);
+  if (distance < 1 || radius_m <= 0) return;
+  const double along = sim::dot(from_body, axis_);
+  Vec3 side = from_body - axis_ * along;
+  if (along >= 0 || sim::length(side) > radius_m * 1.1) return;
+  const Vec3 radial = from_body * (1.0 / distance);
+  if (sim::length(side) < distance * 1e-6) {
+    side = initial_.up - axis_ * sim::dot(initial_.up, axis_);
+  }
+  clearance_ = radial * 2.0 + sim::normalize(side) * 4.0;
+  clearance_scale_ = 4.0 * distance;
 }
 
 GalaxyPose GalaxyFlight::sample(double elapsed) const {
@@ -76,6 +91,14 @@ GalaxyPose GalaxyFlight::sample(double elapsed) const {
                   axis_ * (distance * cruise_);
   pose.velocity = initial_.velocity * (t <= alignment_ ? 1.0 : 1.0 - ramp(a)) +
                   axis_ * (speed * cruise_);
+  // A smooth local detour starts outward if the center lies behind the
+  // departure body. It vanishes once clear, leaving the galactic route intact.
+  const double d = distance * cruise_;
+  const double q = d / clearance_scale_;
+  const double falloff = std::exp(-q);
+  pose.position = pose.position + clearance_ * (d * falloff);
+  pose.velocity =
+      pose.velocity + clearance_ * (speed * cruise_ * falloff * (1.0 - q));
   Vec3 turn_axis = sim::cross(initial_.forward, axis_);
   const double turn_length = sim::length(turn_axis);
   turn_axis =

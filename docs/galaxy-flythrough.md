@@ -72,7 +72,7 @@ For a Release build and a 1280×720 physical-pixel window:
 uv run --script tools/profile-galaxy.py /tmp/galaxy.csv
 ```
 
-`--render-width` accepts 320–16384 pixels and uses a 16:9 window. It disables
+`--render-width` accepts 320–16384 pixels and uses a fixed-size 16:9 window. It disables
 automatic framebuffer scaling on Retina displays; verify the actual dimensions
 in the profile. `--window WxH` remains available for ordinary logical window
 sizes. `--release` disables the debug capture ring. The automatic profile run

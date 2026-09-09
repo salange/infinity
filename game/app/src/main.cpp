@@ -799,7 +799,10 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  if (pixel_window) glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
+  if (pixel_window) {
+    glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+  }
   if (hidden) {
     // Scripted/headless captures: render into an invisible window — no
     // window appears, nothing steals focus.

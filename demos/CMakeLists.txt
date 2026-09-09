@@ -2,3 +2,4 @@
 # game's pipeline (renderers, generators). They may link engine libraries
 # but the game never depends on them.
 add_subdirectory(cityblock)
+add_subdirectory(human_tech_demo)

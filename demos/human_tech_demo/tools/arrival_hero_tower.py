@@ -6,6 +6,9 @@ SPEC={
     'arrival_hero':{'center':[72.82,301.39], 'base_y':13.2,'yaw':-.27,
                     'rx':28.80,'rz':16.74,'height':195.0,'floors':45,
                     'lean_world':[-2.50,-1.17],
+                    'glazing':{'pane_transmission':[.28,.29,.30],'coating':.10,
+                               'roughness':.095,'lit_probability':.23,
+                               'intent':'neutral smoked graphite with warm occupied interiors'},
                     'features':['elliptical plan','inclined rounded crown',
                                 'continuous recessed graphite curtain wall',
                                 'fine bronze vertical framing','rounded occupied socket']},
@@ -77,6 +80,22 @@ def build():
             hatch.append((x+lean[0],h-5-5*x/(p['rx']*.64)+dy,z+lean[1]))
     b.mesh('Flush crown maintenance hatch',hatch,[(3,2,1,0),(4,5,6,7),
            (0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)],'graphite')
+
+    # Builder gives this resource its own occupied-glass material copies.
+    # Reduce pane transmission/coating for the graphite landmark while
+    # retaining the warm rooms and every neighboring tower's material.
+    b.finish();finish=p['glazing']
+    for obj in b.objects:
+        for material in obj.data.materials:
+            if not material.get('engine_flags',0)&1:continue
+            color=(*finish['pane_transmission'],1)
+            material.diffuse_color=color
+            shader=material.node_tree.nodes.get('Principled BSDF')
+            shader.inputs['Base Color'].default_value=color
+            shader.inputs['Metallic'].default_value=finish['coating']
+            shader.inputs['Roughness'].default_value=finish['roughness']
+            room=list(material['engine_room']);room[3]=finish['lit_probability']
+            material['engine_room']=room
 
     socket=Builder('arrival_hero_socket');socket.root['engine_room_h']=4.0
     footprint=rounded_rect(36.5,26,8.2,14)

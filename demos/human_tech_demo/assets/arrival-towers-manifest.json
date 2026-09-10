@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "source_format": "glTF 2.0",
-  "source_sha256": "fb76356308311c1b312a236cd86290f60e94adcf8948aebec4af293f3c93024e",
-  "runtime_sha256": "ba0acc18750918fdc467149c202af6930905184a609f6d56eaeeb7845604fb39",
+  "source_sha256": "c20be957bb1dcbb9046724b6f8b35803c11c2fbdb270ddc5d13cd7416fd1b400",
+  "runtime_sha256": "acc25f5f4a33fb36396393c6a3fdbef2f4eeb38988b9aab87853ab0568d80a6e",
   "units": "metres",
   "up_axis": "Y",
   "license": "Project-authored geometry; same license as repository",
@@ -147,12 +147,12 @@
     {
       "name": "arrival_hero_glass_dark",
       "base_color_linear": [
-        0.5,
-        0.6000000238418579,
-        0.6600000262260437
+        0.2800000011920929,
+        0.28999999165534973,
+        0.30000001192092896
       ],
-      "roughness": 0.07500000298023224,
-      "metallic": 0.3100000023841858,
+      "roughness": 0.0949999988079071,
+      "metallic": 0.10000000149011612,
       "flags": 1,
       "double_sided": false,
       "glass_optical": null,
@@ -160,7 +160,7 @@
         "width_m": 3.6,
         "height_m": 4.041333333333333,
         "depth_m": 6.0,
-        "lit_probability": 0.32
+        "lit_probability": 0.23
       }
     },
     {
@@ -414,6 +414,17 @@
         -2.5,
         -1.17
       ],
+      "glazing": {
+        "pane_transmission": [
+          0.28,
+          0.29,
+          0.3
+        ],
+        "coating": 0.1,
+        "roughness": 0.095,
+        "lit_probability": 0.23,
+        "intent": "neutral smoked graphite with warm occupied interiors"
+      },
       "features": [
         "elliptical plan",
         "inclined rounded crown",
@@ -574,7 +585,7 @@
   },
   "recipe": {
     "arrival_tower_geometry.py": "69aa74485b5077d8e1b4b4fede704b4c6f5b4059caf56bc83b1dd08b013feef6",
-    "arrival_hero_tower.py": "0a605fe443d62770229cc1b4a55a6654793187d7e2bfc144a62b3d4b0cca2a61",
+    "arrival_hero_tower.py": "84b98fd7b0ad5cbeadf7b7951d72c74e5339741721f14171095f1abd5a591009",
     "arrival_left_towers.py": "debb5724f7aafefef3b534dab97ca1e111606c6b5d584fe9a1e8cae011ea1020",
     "arrival_right_towers.py": "37294671afae80884a4fc3fbb17d0511b5fdddb10151cc76aa4ad1d4772ac30c",
     "author-arrival-towers-blender.py": "43e75e19e1708488a3a67b9abdcd825c201f4ea14b3d6790ef261a05d34c6275",
@@ -582,9 +593,9 @@
     "compile-gltf-kit.py": "3cda4f2d6fc98adf02ba586c6b93ff2d2c1b73d9278721392afe19a13720b482"
   },
   "artifacts": {
-    "arrival_towers.authoring.glb": "7510c3e130f04422469a2c732c2bb2cb19ee6a7a09fa52148f425155a4236c70",
-    "arrival_towers.blend": "89745ebfc46165e328fab0286ea0aa9e81b98386e3f535385547382ea013677d",
-    "arrival_towers.glb": "fb76356308311c1b312a236cd86290f60e94adcf8948aebec4af293f3c93024e",
-    "arrival_towers.htkit": "ba0acc18750918fdc467149c202af6930905184a609f6d56eaeeb7845604fb39"
+    "arrival_towers.authoring.glb": "22bc87ea0d1e556a0c0049b8a9e7a1a76f79491b26a32b2e72a7f24fd21e1b40",
+    "arrival_towers.blend": "d46cc5c7773ddc8727d4a4b272920e5d263f8b59579f864015642e60fb5c4220",
+    "arrival_towers.glb": "c20be957bb1dcbb9046724b6f8b35803c11c2fbdb270ddc5d13cd7416fd1b400",
+    "arrival_towers.htkit": "acc25f5f4a33fb36396393c6a3fdbef2f4eeb38988b9aab87853ab0568d80a6e"
   }
 }

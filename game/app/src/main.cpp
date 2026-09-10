@@ -503,6 +503,7 @@ int main(int argc, char** argv) {
   bool pixel_window = false;
   bool galaxy_demo = false;
   const char* galaxy_profile = nullptr;
+  const char* hyper_profile = nullptr;
   bool map_demo = false;  // scripted M/Esc for headless smoke + captures
   bool windowed = false;  // default is fullscreen on the primary monitor
   const char* capture_text = nullptr;  // --capture <path.ppm>: PPM of the last frame
@@ -566,6 +567,8 @@ int main(int argc, char** argv) {
       windowed = true;
     } else if (std::strcmp(argv[i], "--galaxy-demo") == 0) {
       galaxy_demo = true;
+    } else if (std::strcmp(argv[i], "--hyper-profile") == 0 && i + 1 < argc) {
+      hyper_profile = argv[++i];
     } else if (std::strcmp(argv[i], "--galaxy-profile") == 0 && i + 1 < argc) {
       galaxy_profile = argv[++i];
     } else if (std::strcmp(argv[i], "--map-demo") == 0) {
@@ -1140,6 +1143,9 @@ int main(int argc, char** argv) {
   bool script_thrust = false;
   bool script_land = false;
   bool script_map = false;   // scripted M press (map captures)
+  bool script_hyper = false;
+  bool script_brake = false;
+  bool script_slow = false;
   bool script_jump = false;  // scripted J select + instant confirm
   bool script_exposure_locked = false;
   bool script_hud = true;    // scripted HUD visibility (clean captures)
@@ -1581,6 +1587,7 @@ int main(int argc, char** argv) {
     }
   };
 
+  bool h_was_down = false;
   bool f6_was_down = false;
   inf::app::GalaxyFlight galaxy_flight;
   bool flight_active = false, flight_profile_exit = false,
@@ -1591,9 +1598,16 @@ int main(int argc, char** argv) {
   SVec3 flight_start_local{}, flight_start_planet{};
   std::ofstream flight_csv;
   std::printf("F6: continuous galaxy flight; F6/Esc: brake and resume here\n");
+  std::ofstream hyper_csv;
+  if (hyper_profile) {
+    hyper_csv.open(hyper_profile);
+    hyper_csv << std::setprecision(17);
+    hyper_csv << "frame,wall_dt_s,sim_dt_s,frame_ms,state,speed_c,target_c,x_m,y_m,z_m,catalog_ms,resident_chunks,pending_chunks,draw_items,presented\n";
+  }
   long frame = 0;
   while (glfwWindowShouldClose(window) == GLFW_FALSE) {
     const auto frame_started = FlightClock::now();
+    const bool hyper_was_active = player.hyperdrive().active();
     glfwPollEvents();
     flight_final_frame = false;
     const bool f6_down = glfwGetKey(window, GLFW_KEY_F6) == GLFW_PRESS;
@@ -1645,7 +1659,7 @@ int main(int argc, char** argv) {
     const bool esc_down = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     const bool esc_pressed = esc_down && !esc_was_down;
     esc_was_down = esc_down;
-    if (esc_pressed && map_phase == MapPhase::Off && !flight_active) {
+    if (esc_pressed && map_phase == MapPhase::Off && !flight_active && !player.hyperdrive().active()) {
       glfwSetWindowShouldClose(window, GLFW_TRUE);  // prototype convenience
     }
     const inf::core::WorldTime now = world_clock.now();
@@ -1691,10 +1705,16 @@ int main(int argc, char** argv) {
 
     inf::sim::InputFrame input;
     input.dt = dt;
+    const bool h_down = glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS;
+    input.hyper_toggle = ((focused && h_down && !h_was_down) || script_hyper) &&
+        !flight_active && jump_timer <= 0.0 && map_phase == MapPhase::Off;
+    input.hyper_cancel = esc_pressed || (!focused && !hidden) || script_brake;
+    h_was_down = h_down;
+    script_hyper = script_brake = false;
     input.mouse_dx = mx - last_mx;
     input.mouse_dy = my - last_my;
     input.forward = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS || script_thrust;
-    input.back = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+    input.back = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS || script_slow;
     input.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
     input.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
     input.run = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
@@ -1762,8 +1782,6 @@ int main(int argc, char** argv) {
       }
     }
 
-    if (!flight_active) player.update(input);
-
     // --- live system state (ephemerides; the universe never pauses) -----
     const auto eval_pos = [&](const inf::core::OrbitalElements& orbit) {
       const auto pv = inf::core::Ephemeris::evaluate(orbit, now);
@@ -1815,6 +1833,24 @@ int main(int argc, char** argv) {
       }
     };
     recompute_bodies();
+
+    // Feed every body's conservative exclusion shell before moving, so a
+    // high-speed frame cannot tunnel through a body that was not nearest.
+    std::vector<inf::sim::HyperObstacle> hyper_obstacles;
+    for (int slot = 0; slot < inf::gen::kMaxPlanetSlots; ++slot) {
+      const auto& entry = system.planets[static_cast<std::size_t>(slot)];
+      if (entry.occupied) hyper_obstacles.push_back({planet_local[static_cast<std::size_t>(slot)],
+          inf::sim::Hyperdrive::body_clearance(entry.phys.radius_m.to_double(),
+                                             entry.phys.atmosphere.height_m.to_double())});
+    }
+    for (const auto& moon : moons_local) hyper_obstacles.push_back({moon.pos,
+        inf::sim::Hyperdrive::body_clearance(moon.radius, 0)});
+    hyper_obstacles.push_back({SVec3{} - planet_sys,
+        system.star.radius_solar.to_double() * 6.957e7 * 1.6});
+    for (const auto& star : system.companions) hyper_obstacles.push_back({
+        eval_pos(star.orbit) - planet_sys, star.phys.radius_solar.to_double() * 6.957e7 * 1.6});
+    player.set_hyper_obstacles(std::move(hyper_obstacles));
+    if (!flight_active) player.update(input);
 
     // --- closest body (uniform-planet rule; moons count too, T0016) -----
     // Whichever body is closest by surface gap governs the speed limit,
@@ -1888,6 +1924,8 @@ int main(int argc, char** argv) {
         anchor = make_anchor(*seed, seed_text, system, current_cell, candidate.slot,
                              candidate.moon, std::nullopt, nullptr, &civ_setup_now);
         player.rebase(*anchor->effective, new_pos);
+        last_player_pos = player.position();
+        measured_speed = 0;
         rebuild_sea();
         hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(), anchor->planet);
         recompute_bodies();
@@ -1977,6 +2015,8 @@ int main(int argc, char** argv) {
         }
         if (j_hold >= 0.75) {
           jump_target = jump_candidates[static_cast<std::size_t>(jump_index)];
+          player.cancel_hyperdrive();
+          player.set_speed(0);
           jump_timer = 2.5;
           jump_swapped = false;
           jump_index = -1;
@@ -2047,6 +2087,8 @@ int main(int argc, char** argv) {
                                        arrival_pv.y.to_double(),
                                        arrival_pv.z.to_double()};
         player.rebase(*anchor->effective, ship_sys - arrival_planet_sys);
+        last_player_pos = player.position();
+        measured_speed = 0;
         player.set_attitude(keep_fwd, keep_up);
         rebuild_sea();
         hud = std::make_unique<inf::app::Hud>(rhi.get(), anchor->field.get(),
@@ -2140,6 +2182,7 @@ int main(int argc, char** argv) {
 
     if (flight_requested && map_phase == MapPhase::Off &&
         player.mode() == inf::sim::PlayerMode::Flight && jump_timer <= 0.0) {
+      player.cancel_hyperdrive();
       flight_start_local = player.position();
       flight_start_planet = planet_sys;
       galaxy_flight.start(
@@ -2332,6 +2375,12 @@ int main(int argc, char** argv) {
         else if (section > 0) debug_state.toggle_section(static_cast<std::size_t>(section - 1));
       } else if (cmd.op == "hud" && !cmd.args.empty()) {
         script_hud = arg_d(0) != 0.0;  // clean-frame captures
+      } else if (cmd.op == "hyper") {
+        script_hyper = true;
+      } else if (cmd.op == "brake") {
+        script_brake = true;
+      } else if (cmd.op == "slow" && !cmd.args.empty()) {
+        script_slow = arg_d(0) != 0;
       } else if (cmd.op == "speed" && !cmd.args.empty()) {
         player.set_speed(arg_d(0));
       } else if (cmd.op == "thrust" && !cmd.args.empty()) {
@@ -2393,8 +2442,12 @@ int main(int argc, char** argv) {
     }
 
     // Measured velocity (covers ship, walking, and later the rocket
-    // backpack alike), lightly smoothed.
-    if (dt > 0.0) {
+    // backpack alike), lightly smoothed. Hyperdrive must show its actual
+    // speed immediately: residual smoothing at 10c falsely reports enormous
+    // motion for several frames after an emergency stop.
+    if (hyper_was_active || player.hyperdrive().active()) {
+      measured_speed = player.speed();
+    } else if (dt > 0.0) {
       const double instantaneous =
           inf::sim::length(player.position() - last_player_pos) / dt;
       measured_speed += (instantaneous - measured_speed) * std::min(1.0, dt * 8.0);
@@ -3402,6 +3455,9 @@ int main(int argc, char** argv) {
     const double cross_len = 14.0 * px;
     const double cross_thick = 2.5 * px;
     const double ar = input.aspect;
+    if (map_phase == MapPhase::Off) {
+      hud->build_hyper_effect(&items, player.hyperdrive(), input.aspect);
+    }
     if (map_phase == MapPhase::Off && script_hud) {
     items.push_back(hud_quad(cube_mesh, 0.0, 0.0, cross_len / ar, cross_thick, 0.9f, 0.95f, 1.0f));
     items.push_back(hud_quad(cube_mesh, 0.0, 0.0, cross_thick / ar, cross_len, 0.9f, 0.95f, 1.0f));
@@ -3880,6 +3936,15 @@ int main(int argc, char** argv) {
     const bool presented =
         rhi->render_frame(frame_params, items.data(), items.size());
     scene_presented = scene_presented || presented;
+    if (hyper_csv) {
+      const auto p = player.position();
+      hyper_csv << frame << ',' << raw_dt << ',' << dt << ','
+                << std::chrono::duration<double, std::milli>(FlightClock::now() - frame_started).count()
+                << ',' << static_cast<int>(player.hyperdrive().state()) << ','
+                << player.speed() / inf::sim::Player::kLightSpeed << ',' << player.hyperdrive().factor()
+                << ',' << p.x << ',' << p.y << ',' << p.z << ',' << star_catalog.build_ms
+                << ',' << loaded.size() << ',' << pending_ready.size() << ',' << items.size() << ',' << presented << '\n';
+    }
     if (flight_active && flight_csv) {
       const double ms = std::chrono::duration<double, std::milli>(
                             FlightClock::now() - frame_started)

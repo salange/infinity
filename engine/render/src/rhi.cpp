@@ -7,6 +7,8 @@
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>  // wgpuDevicePoll (wgpu-native extension)
 
+#include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -36,7 +38,7 @@ namespace inf::render {
 namespace {
 
 constexpr std::uint64_t kUniformStride = 256;  // minUniformBufferOffsetAlignment
-constexpr std::uint32_t kMaxDrawItems = 4096;
+constexpr std::uint32_t kInitialDrawItems = 4096;
 constexpr std::uint64_t kItemUniformSize = 176;  // base material + spatial-volume rotation
 constexpr std::uint64_t kFrameUniformSize = 160;  // 10 vec4s (see Frame in WGSL)
 
@@ -1299,6 +1301,8 @@ struct Rhi::Impl {
   WGPUBindGroupLayout bind_layout = nullptr;
   WGPUBindGroup bind_group = nullptr;
   WGPUBuffer uniform_buffer = nullptr;
+  std::size_t uniform_capacity = 0;
+  std::vector<float> item_uniforms;
   WGPUBuffer frame_buffer = nullptr;
 
   // Planet cube-map textures (T0016): group 1 = height array + material
@@ -2058,18 +2062,43 @@ struct Rhi::Impl {
       lum_readback = wgpuDeviceCreateBuffer(device, &read_desc);
     }
 
-    WGPUBufferDescriptor uniform_desc{};
-    uniform_desc.label = sv("uniforms");
-    uniform_desc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
-    uniform_desc.size = kUniformStride * kMaxDrawItems;
-    uniform_buffer = wgpuDeviceCreateBuffer(device, &uniform_desc);
-
     WGPUBufferDescriptor frame_desc{};
     frame_desc.label = sv("frame-uniforms");
     frame_desc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
     frame_desc.size = kFrameUniformSize;
     frame_buffer = wgpuDeviceCreateBuffer(device, &frame_desc);
 
+    ensure_draw_capacity(kInitialDrawItems);
+
+    // 1x1 default planet texture so group 1 is always bindable.
+    default_tex = make_planet_tex(1);
+    const std::uint16_t half_zero = 0;  // 0.0h
+    const std::uint8_t grey[4] = {140, 140, 140, 255};
+    for (std::uint32_t face = 0; face < 6; ++face) {
+      write_planet_face(default_tex, face, &half_zero, grey);
+    }
+  }
+
+  bool ensure_draw_capacity(std::size_t required) {
+    if (required <= uniform_capacity) return true;
+    WGPULimits limits{};
+    if (wgpuDeviceGetLimits(device, &limits) != WGPUStatus_Success) return false;
+    const auto maximum = static_cast<std::size_t>(std::min<std::uint64_t>(
+        limits.maxBufferSize, std::numeric_limits<std::uint32_t>::max()) / kUniformStride);
+    if (required > maximum) {
+      std::fprintf(stderr, "rhi: %zu draw items exceed device uniform capacity %zu; frame refused\n",
+                   required, maximum);
+      return false;
+    }
+    std::size_t capacity = std::min<std::size_t>(kInitialDrawItems, maximum);
+    while (capacity < required) capacity = std::min(capacity * 2, maximum);
+    WGPUBufferDescriptor desc{};
+    desc.label = sv("uniforms");
+    desc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+    desc.size = capacity * kUniformStride;
+    const auto previous_buffer = uniform_buffer;
+    const auto previous_group = bind_group;
+    uniform_buffer = wgpuDeviceCreateBuffer(device, &desc);
     WGPUBindGroupEntry bind_entries[2] = {};
     bind_entries[0].binding = 0;
     bind_entries[0].buffer = uniform_buffer;
@@ -2085,13 +2114,13 @@ struct Rhi::Impl {
     bind_desc.entries = bind_entries;
     bind_group = wgpuDeviceCreateBindGroup(device, &bind_desc);
 
-    // 1x1 default planet texture so group 1 is always bindable.
-    default_tex = make_planet_tex(1);
-    const std::uint16_t half_zero = 0;  // 0.0h
-    const std::uint8_t grey[4] = {140, 140, 140, 255};
-    for (std::uint32_t face = 0; face < 6; ++face) {
-      write_planet_face(default_tex, face, &half_zero, grey);
+    if (previous_group) wgpuBindGroupRelease(previous_group);
+    if (previous_buffer) wgpuBufferRelease(previous_buffer);
+    if (uniform_capacity != 0) {
+      std::printf("rhi: draw capacity %zu -> %zu (%zu items)\n", uniform_capacity, capacity, required);
     }
+    uniform_capacity = capacity;
+    return true;
   }
 
   void write_planet_face(const PlanetTexEntry& entry, std::uint32_t face,
@@ -3684,6 +3713,7 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     return std::chrono::duration<double, std::milli>(core::MonotonicClock::now() - start).count();
   };
   impl_->ensure_mesh_pipeline();
+  if (!impl_->ensure_draw_capacity(item_count)) return false;
   if (impl_->material_dirty) {
     // Table layout: three arrays of 64 vec4 (a: tint+tile, b: rough/
     // emissive/strength/ready, c: mean) — repack from the row layout.
@@ -3717,9 +3747,12 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
   }
 
   // Upload all uniforms before the command buffer executes.
-  const std::size_t count = item_count > kMaxDrawItems ? kMaxDrawItems : item_count;
+  // Dense settlements after an anchor switch can exceed the initial budget.
+  // Grow capacity instead of dropping later terrain backstops and cockpit UI.
+  const std::size_t count = item_count;
+  impl_->item_uniforms.resize(count * kUniformStride / sizeof(float));
   for (std::size_t i = 0; i < count; ++i) {
-    float block[44];
+    float* block = impl_->item_uniforms.data() + i * kUniformStride / sizeof(float);
     std::memcpy(block, items[i].mvp, sizeof(items[i].mvp));
     std::memcpy(block + 16, items[i].color, sizeof(items[i].color));
     std::memcpy(block + 20, items[i].aux, sizeof(items[i].aux));
@@ -3730,8 +3763,10 @@ bool Rhi::render_frame(const FrameParams& frame, const DrawItem* items,
     for (int k = 0; k < 4; ++k) {
       block[28 + k] = static_cast<float>(items[i].material_palette[k]);
     }
-    wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, i * kUniformStride, block,
-                         sizeof(block));
+  }
+  if (count != 0) {
+    wgpuQueueWriteBuffer(impl_->queue, impl_->uniform_buffer, 0,
+                         impl_->item_uniforms.data(), count * kUniformStride);
   }
 
   // Attachment templates: the main pass fills in the surface view; the

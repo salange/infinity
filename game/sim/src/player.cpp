@@ -107,6 +107,7 @@ void Player::update(const InputFrame& input) {
 }
 
 void Player::enter_map() {
+  cancel_hyperdrive();
   if (mode_ == PlayerMode::Map) {
     return;
   }
@@ -137,6 +138,7 @@ void Player::rebase(const gen::EffectiveField& field, const Vec3& position) {
   set_position(position);
   beams_.clear();      // beam positions were in the old body's frame
   has_nearest_ = false;  // so was the nearest-body feed; re-fed next frame
+  hyper_obstacles_.clear();  // the app re-feeds all spheres in the new frame
 }
 
 void Player::push_out(const Vec3& center, double min_dist) {
@@ -174,6 +176,24 @@ void Player::update_flight(const InputFrame& input) {
   forward_ = normalize(forward_);
   up_ = normalize(up_ - forward_ * dot(up_, forward_));
 
+  // Hyperdrive shares ordinary attitude controls and compensated positioning.
+  // The anchor fallback also protects headless users of the controller.
+  const bool was_hyper = hyperdrive_.active();
+  double hyper_distance = 0;
+  if (was_hyper || input.hyper_toggle || hyperdrive_.effect() > 0) {
+    const auto& planet = field_->planet();
+    const HyperObstacle fallback{{}, Hyperdrive::body_clearance(
+        planet.radius_m.to_double(), planet.atmosphere_height_m.to_double())};
+    const std::span<const HyperObstacle> obstacles = hyper_obstacles_.empty()
+        ? std::span<const HyperObstacle>(&fallback, 1) : hyper_obstacles_;
+    hyper_distance = hyperdrive_.update(
+        dt, input.hyper_toggle, input.hyper_cancel || input.interact_pressed,
+        input.forward, input.back, position_, forward_, obstacles);
+  }
+  if (input.interact_pressed) hyperdrive_.stop(true);
+  const bool hyper_motion = was_hyper || hyperdrive_.active();
+  if (hyper_motion) speed_ = hyperdrive_.speed();
+
   // --- throttle -----------------------------------------------------------
   // Altitude governor between the hard caps: Mach 6 inside the atmosphere
   // band, light speed outside (supersedes the 0.1c cap of spec section 9,
@@ -184,34 +204,36 @@ void Player::update_flight(const InputFrame& input) {
   // relief of several km, the nominal radius let the ship skim solid
   // ground at Mach 4 and ride the hard clamp (the "sky becomes terrain"
   // jumps in the 2026-08-31 recordings).
-  const NearestBody nearest = nearest_or_anchor();
-  double alt;
-  if (nearest.is_anchor) {
-    const double floor_r = std::max(ground_radius(normalize(position_)), water_radius());
-    alt = std::max(0.0, length(position_) - floor_r);
-  } else {
-    alt = std::max(0.0, length(position_ - nearest.center) - nearest.radius_m);
+  if (!hyper_motion) {
+    const NearestBody nearest = nearest_or_anchor();
+    double alt;
+    if (nearest.is_anchor) {
+      const double floor_r = std::max(ground_radius(normalize(position_)), water_radius());
+      alt = std::max(0.0, length(position_) - floor_r);
+    } else {
+      alt = std::max(0.0, length(position_ - nearest.center) - nearest.radius_m);
+    }
+    const double zone_cap = zone() == FlightZone::Atmosphere ? kMachSix : kLightSpeed;
+    const double cap = std::min(std::clamp(alt * 0.8, 40.0, kLightSpeed), zone_cap);
+    const double accel = std::max(25.0, cap / 2.5);
+    if (input.forward) {
+      speed_ += accel * dt;
+    }
+    if (input.back) {
+      speed_ -= accel * 1.5 * dt;
+    }
+    speed_ = std::clamp(speed_, 0.0, cap);
   }
-  const double zone_cap = zone() == FlightZone::Atmosphere ? kMachSix : kLightSpeed;
-  const double cap = std::min(std::clamp(alt * 0.8, 40.0, kLightSpeed), zone_cap);
-  const double accel = std::max(25.0, cap / 2.5);
-  if (input.forward) {
-    speed_ += accel * dt;
-  }
-  if (input.back) {
-    speed_ -= accel * 1.5 * dt;
-  }
-  speed_ = std::clamp(speed_, 0.0, cap);
 
   // Compensated addition keeps sub-ULP steps after interstellar travel. Without
   // it a low-speed ship can remain stuck at a large coordinate indefinitely.
-  const Vec3 step = forward_ * (speed_ * dt) - position_error_;
+  const Vec3 step = forward_ * (hyper_motion ? hyper_distance : speed_ * dt) - position_error_;
   const Vec3 moved = position_ + step;
   position_error_ = (moved - position_) - step;
   position_ = moved;
   clamp_to_ground_flight();
 
-  try_fire(input);
+  if (!hyper_motion) try_fire(input);
 
   if (input.interact_pressed && can_land()) {
     // Begin landing (only inside the nearest planet's atmosphere band,

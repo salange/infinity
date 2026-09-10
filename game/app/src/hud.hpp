@@ -66,6 +66,9 @@ class Hud {
              int height_px, double dt, const std::string& location_name,
              const TargetInfo& target);
 
+  void build_hyper_effect(std::vector<render::Rhi::DrawItem>* items,
+                          const sim::Hyperdrive& drive, double aspect);
+
   // Map-mode overlay (design/map-mode.md section 3): the hover info card,
   // anchored at the pointer (NDC), lines top to bottom. The flight/walk
   // HUD is hidden in map mode — the app calls this INSTEAD of build().

@@ -13,16 +13,31 @@ struct Frame {
   sun_color: vec4<f32>,    // rgb irradiance, w = exposure
   sh: array<vec4<f32>, 9>, // irradiance SH (cosine-convolved)
   cascade: vec4<f32>,      // xyz split distances, w = 1 / shadow size
-  cascade_extent: vec4<f32>, // xyz ortho half-extent per cascade (m)
-  cascade_depth: vec4<f32>,  // xyz light-space depth range per cascade (m)
+  cascade_extent: vec4<f32>, // xyz ortho half-extent per cascade (m), w jitter x (px)
+  cascade_depth: vec4<f32>,  // xyz light-space depth range per cascade (m), w jitter y (px)
   screen: vec4<f32>,       // w, h, 1/w, 1/h
   params: vec4<f32>,       // emissive_scale, ao_strength, night, light_count
   params2: vec4<f32>,      // ibl_intensity, sun_intensity, ssao_on, debug
+  reflection_vp: mat4x4<f32>,
+  puddle_reflection_vp: mat4x4<f32>,
+  pond_reflection_vp: mat4x4<f32>,
+  transport: vec4<f32>,
+  voxel_min: vec4<f32>,
+  voxel_extent: vec4<f32>,
+  fine_min: vec4<f32>,
+  fine_extent: vec4<f32>,
+  moon_dir: vec4<f32>, // xyz direction, w visible disc
+  moon_color: vec4<f32>, // xyz weak irradiance, w visible primary sun
+  moon_shape: vec4<f32>, // illumination x/z, angular radius, display-referred sky
+  point_visibility: vec4<f32>, // x independent practical shadow enablement
 };
 
+struct Instance { model: mat4x4<f32>, normal0: vec4<f32>, normal1: vec4<f32>, normal2: vec4<f32>, tint: vec4<f32> };
+fn instance_normal(i: Instance,n: vec3<f32>) -> vec3<f32> {return normalize(i.normal0.xyz*n.x+i.normal1.xyz*n.y+i.normal2.xyz*n.z);}
+
 struct Material {
-  base_color: vec4<f32>,  // rgb tint, a = alpha cutoff (foliage)
-  params: vec4<f32>,      // roughness, metallic, emissive, normal_strength
+  base_color: vec4<f32>,  // rgb tint (occupied glass: one-pass transmission), a = alpha cutoff
+  params: vec4<f32>,      // roughness, metallic (occupied glass: coating coverage), emissive, normal_strength
   tex: vec4<f32>,         // albedo layer, normal layer, arm layer, uv_scale (m per repeat)
   misc: vec4<f32>,        // flags, tint2.rgb
   room: vec4<f32>,        // room w, h, d, lit probability
@@ -39,7 +54,18 @@ const FLAG_PLANAR_XZ: u32 = 4u;
 const FLAG_FOLIAGE: u32 = 8u;
 const FLAG_TRIPLANAR: u32 = 16u;
 const FLAG_NIGHT_ONLY: u32 = 32u;
+const FLAG_WATER: u32 = 64u;
+const FLAG_TRANSMISSION: u32 = 128u;
+const FLAG_WETTABLE: u32 = 512u;
+const FLAG_PLANAR_POND: u32 = 1024u; // true shallow surface at the explicit pond plane
+const FLAG_EXPOSED_STONE: u32 = 2048u; // rain-exposed stone with height-map water retention
 const PI: f32 = 3.14159265358979;
+
+// The sign carries shadow enablement; the magnitude independently encodes
+// every diagnostic view, including direct-light components without shadows.
+fn debug_view(encoded: f32) -> i32 {
+  return i32(select(encoded,-encoded-1.0,encoded<0.0)+.5);
+}
 
 // Packed 32-byte vertex: position f32x3, octahedral normal snorm16x2,
 // octahedral tangent snorm16x2, uv f16x2, packed bytes (material lo, hi,
@@ -84,3 +110,14 @@ fn hash33(p: vec3<f32>) -> vec3<f32> {
   return fract((q.xxy + q.yxx) * q.zyx);
 }
 fn luminance(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
+
+// Horizon radiance comes from atmospheric scattering, never a stretched row
+// of bright stars. All camera, reflected-sky and surface-fog passes share it.
+fn atmosphere_horizon(direction: vec3<f32>,sun_direction: vec3<f32>,night: f32) -> vec3<f32> {
+  let horizontal=normalize(vec3<f32>(direction.x,.001,direction.z));
+  let solar_horizontal=normalize(vec3<f32>(sun_direction.x,.001,sun_direction.z));
+  let forward=pow(max(dot(horizontal,solar_horizontal),0.0),5.0);
+  let daylight=mix(vec3<f32>(.19,.26,.35),vec3<f32>(.62,.43,.26),forward);
+  let moonlight=vec3<f32>(.009,.017,.032)+vec3<f32>(.005,.007,.011)*forward;
+  return mix(daylight,moonlight,night);
+}

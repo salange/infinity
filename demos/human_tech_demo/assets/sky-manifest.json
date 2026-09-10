@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "assets": [
+    {
+      "id": "human-tech/sunset/v1",
+      "file": "sky-sunset-v1.png",
+      "sha256": "2459b8115a995916e21c437b714007bc60132f832042200d06e556e451f25242",
+      "projection": "equirectangular",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1774,
+        887
+      ],
+      "yaw_degrees": 45,
+      "rights": "Project-authored environment texture; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-sunset-v1.png",
+      "status": "retained matched assembly lighting source; arrival uses reference-framed v2"
+    },
+    {
+      "id": "human-tech/galaxy/v1",
+      "file": "sky-galaxy-v1.png",
+      "sha256": "310595fc456904e6843bc5678418a8d1f963100009a862aabfacac595561dd66",
+      "projection": "equirectangular",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1774,
+        887
+      ],
+      "yaw_degrees": 100,
+      "rights": "Project-authored environment texture; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-galaxy-v1.png",
+      "status": "retained earlier full-sphere source; superseded for hero sky"
+    },
+    {
+      "id": "human-tech/galaxy/perspective-v2",
+      "file": "sky-galaxy-perspective-v2.png",
+      "sha256": "d5e64c50a76bac9f5ccb9a6a11fed1f5bb416b332a6ec73b5bfd10b7c58545fb",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-galaxy-perspective-v2.png",
+      "status": "retained earlier source; superseded by reference-framed v3"
+    },
+    {
+      "id": "human-tech/galaxy/perspective-v3",
+      "file": "sky-galaxy-perspective-v3.png",
+      "sha256": "f7f9918ce764cba0de855d4513e6b90d206f26dcce2b4465f848ab4f33720896",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture derived from the project-owned concept; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-galaxy-perspective-v3.png",
+      "reference": "design/concepts/cities/human/tech/metropolis-2026-09-06/06-city-under-galaxy.png"
+    },
+    {
+      "id": "human-tech/arrival/perspective-v2",
+      "file": "sky-arrival-perspective-v2.png",
+      "sha256": "43b06296a6293b3b9457a58b8b8d131b92ef7daf8ef1810e972705af5f0dadfc",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture derived from the project-owned concept; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-arrival-perspective-v2.png",
+      "reference": "design/concepts/cities/human/tech/metropolis-2026-09-06/01-first-arrival.png"
+    },
+    {
+      "id": "human-tech/civic/perspective-v1",
+      "file": "sky-civic-perspective-v1.png",
+      "sha256": "6330b05fb3fdf03cb25d1b4435740b9f48b805e25bdaa8c1c8371788a319eb89",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture derived from the project-owned concept; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-civic-perspective-v1.png",
+      "reference": "design/concepts/cities/human/tech/metropolis-2026-09-06/02-unification-square.png"
+    },
+    {
+      "id": "human-tech/street/perspective-v1",
+      "file": "sky-street-perspective-v1.png",
+      "sha256": "e41eff59147aa925f8df6bd461c93e3378ff4422a00923be91aeb5fe787f7992",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture derived from the project-owned concept; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-street-perspective-v1.png",
+      "reference": "design/concepts/cities/human/tech/metropolis-2026-09-06/03-street-after-rain.png"
+    },
+    {
+      "id": "human-tech/garden/perspective-v1",
+      "file": "sky-garden-perspective-v1.png",
+      "sha256": "689b4aea8c800f5a7f842b418d5d966c00bd7d1ae8a2b68b22f06097a9638755",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture derived from the project-owned concept; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-garden-perspective-v1.png",
+      "reference": "design/concepts/cities/human/tech/metropolis-2026-09-06/04-lattice-garden.png"
+    },
+    {
+      "id": "human-tech/landing/perspective-v1",
+      "file": "sky-landing-perspective-v1.png",
+      "sha256": "1fb6909c530f0be657da7e8601277954eb475a420f62de68298ff9e747729be1",
+      "projection": "rectilinear sky patch projected into a fixed world-direction cubemap; smoothly blended outside its angular bounds",
+      "encoding": "sRGB RGB8; converted to relative linear radiance at import",
+      "dimensions": [
+        1672,
+        941
+      ],
+      "rights": "Project-authored environment texture derived from the project-owned concept; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-landing-perspective-v1.png",
+      "reference": "design/concepts/cities/human/tech/metropolis-2026-09-06/05-landing-terrace.png"
+    },
+    {
+      "id": "human-tech/civic/full-v1",
+      "file": "sky-civic-full-v1.png",
+      "sha256": "ef6271890c106d8d16e314109aeed68312a165d57706d11f3bdf90dc6e1b0d53",
+      "projection": "equirectangular 360 x 180 degrees; upper hemisphere supplies clouds outside the fixed perspective plate",
+      "encoding": "sRGB RGB8; exact sRGB decoding to relative linear radiance, not measured HDR",
+      "dimensions": [
+        1774,
+        887
+      ],
+      "yaw_degrees": 0,
+      "rights": "Project-authored environment texture; no third-party source images",
+      "source": "design/assets/human-tech-metropolis/sky-civic-full-v1.png",
+      "status": "Civic upper-hemisphere environment extension; hero perspective core and analytic lower hemisphere retained"
+    }
+  ],
+  "scope": "Reusable environment assets for the authored visual demo; no city, water or terrain in the maps",
+  "reproduction": "Import the immutable source PNGs with tools/import-sky-assets.py; verifies SHA-256 before copying. Lighting directions and intensity are explicitly calibrated separately from the relative-linear sky."
+}

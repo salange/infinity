@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "encoding": {
+    "color.jpg": "sRGB",
+    "normal.jpg": "linear tangent-space OpenGL +Y",
+    "roughness.jpg": "linear",
+    "ao.jpg": "linear; absent means unoccluded",
+    "height.jpg": "linear"
+  },
+  "assets": [
+    {
+      "name": "marble",
+      "asset_id": "Marble012",
+      "url": "https://ambientcg.com/get?file=Marble012_1K-JPG.zip",
+      "archive_sha256": "b04384c6d49ce73baeb70db7ea4abfe9948fc9b74b9fd92c3766970662bf2c43",
+      "license": "CC0-1.0",
+      "license_url": "https://docs.ambientcg.com/license/",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "linear_albedo_mean": [
+        0.420374,
+        0.425492,
+        0.473587
+      ],
+      "roughness_mean": 0.0658778,
+      "files": {
+        "color.jpg": "a34b55c889c6b3819d2c351b6409bfd0baf0a0a55b073441850627dfebcdcd1e",
+        "height.jpg": "c074259c93ed0f9964a2eedb38f3c78321a7c46f5650832bbb7a8e4120dec0fa",
+        "normal.jpg": "2e9a56525ffbb7e80854b19985a5c921f91192698ea337f4834192479ba0063b",
+        "roughness.jpg": "f7afd636d6cca0b470549959c514976186df58ac1013016b6c3919910a6d3a04"
+      }
+    },
+    {
+      "name": "paving_slabs",
+      "asset_id": "PavingStones136",
+      "url": "https://ambientcg.com/get?file=PavingStones136_1K-JPG.zip",
+      "archive_sha256": "a0934b008683333265e061319aa1ceb018b3a721969147606415033b27a13ae3",
+      "license": "CC0-1.0",
+      "license_url": "https://docs.ambientcg.com/license/",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "linear_albedo_mean": [
+        0.362198,
+        0.311757,
+        0.173937
+      ],
+      "roughness_mean": 0.501609,
+      "files": {
+        "ao.jpg": "249e4bb7fdfc71290d6a9311b2214777f762984a7d14d4e9cf416c2b6d6d7eee",
+        "color.jpg": "5291854f8a7fcf554f2e278e36426eee9de65dd71d93c7f837b2c3f80ca42cfa",
+        "height.jpg": "17b428addba6dd325eabfa04fe35c68aada687680bddc0df89126b1947d173dc",
+        "normal.jpg": "a302144995a7d7b638864a8f28ed1c8bf68d8c7b6c6e3daac6ad5b0bbf4bc9c0",
+        "roughness.jpg": "37370086ad37d163f089646da366692e10515e7c94128fe7bac83daa64015267"
+      }
+    },
+    {
+      "name": "terrazzo",
+      "asset_id": "Tiles043",
+      "url": "https://ambientcg.com/get?file=Tiles043_1K-JPG.zip",
+      "archive_sha256": "69e7e63070aa95c74ed40c0bb4553eb06441793c6cab1af95ee54ec21fe49e91",
+      "license": "CC0-1.0",
+      "license_url": "https://docs.ambientcg.com/license/",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "linear_albedo_mean": [
+        0.698054,
+        0.746566,
+        0.73258
+      ],
+      "roughness_mean": 0.570621,
+      "files": {
+        "color.jpg": "551b1941ef558428d5b86eed72a19519c18d8300d62bf0e30693059bf2d86856",
+        "height.jpg": "2a4d5756010d6c1a998bb4e6fc5a59ed975b80fa22714b4d10ff447bf5b8f59f",
+        "normal.jpg": "03f2d9144e414f531dcae8a6f009ac1e349fb9806c585679dcab6ebd60ddf5a8",
+        "roughness.jpg": "728252a27ee52fc336fd173e943551aa1978434f9c464a1ece3afe0882e53778"
+      }
+    }
+  ]
+}

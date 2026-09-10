@@ -25,6 +25,14 @@ fn tonemap_inv(c: vec3<f32>) -> vec3<f32> { return c / max(1.0 - luma(c), 1e-3);
   // the unjittered pixel centre so the accumulated image does not drift
   let uv_cur = in.uv - taa.jitter.xy * texel;
   let cur = textureSample(current, samp, uv_cur).rgb;
+  let centre_depth=textureLoad(depth_tex,vec2<i32>(in.pos.xy),0);
+  // The sky pass is deliberately unjittered. Its authored star field is
+  // already filtered to the target resolution, so history clipping would
+  // progressively erase or spread the small stars. Geometry keeps TAA.
+  let centre_coverage=textureLoad(current,vec2<i32>(in.pos.xy),0).a;
+  if (centre_depth <= 1e-8 && centre_coverage < .001) {
+    return vec4<f32>(textureSampleLevel(current,samp,in.uv,0.0).rgb,0.0);
+  }
   // 3x3 neighbourhood bounds in tonemapped space
   var mn = vec3<f32>(1e9);
   var mx = vec3<f32>(-1e9);
@@ -54,17 +62,23 @@ fn tonemap_inv(c: vec3<f32>) -> vec3<f32> { return c / max(1.0 - luma(c), 1e-3);
   var hist_t = cur_t;
   var weight = 0.0;
   if (taa.params.y > 0.5 && pc.w > 0.0 && prev_uv.x > 0.0 && prev_uv.x < 1.0 && prev_uv.y > 0.0 && prev_uv.y < 1.0) {
-    let h = tonemap_w(textureSample(history, samp, prev_uv).rgb);
+    let previous=textureSample(history,samp,prev_uv);
+    let h = tonemap_w(previous.rgb);
     // clip toward the current neighbourhood box (variance clipping)
     let centre = (box_lo + box_hi) * 0.5;
     let extent = (box_hi - box_lo) * 0.5 + vec3<f32>(1e-4);
     let d = h - centre;
     let t = max(abs(d.x) / extent.x, max(abs(d.y) / extent.y, abs(d.z) / extent.z));
     hist_t = select(h, centre + d / t, t > 1.0);
-    weight = taa.params.x;
+    let expected_depth=pc.z/pc.w;
+    let depth_error=abs(previous.a-expected_depth);
+    let depth_limit=max(.000006,abs(expected_depth)*.035);
+    weight=select(0.0,taa.params.x,depth_error<depth_limit);
+    let motion_pixels=length((prev_uv-in.uv)*size);
+    weight*=1.0-smoothstep(2.0,32.0,motion_pixels)*.65;
     // sky (far depth) can keep full history
     if (depth <= 1e-7) { weight = min(taa.params.x, 0.9); }  // sky (reversed Z)
   }
   let out_t = mix(cur_t, hist_t, weight);
-  return vec4<f32>(tonemap_inv(out_t), 1.0);
+  return vec4<f32>(tonemap_inv(out_t), depth);
 }

@@ -21,3 +21,5 @@ demos/human_tech_demo/assets/textures/
 demos/human_tech_demo/assets/sky/
 demos/human_tech_demo/assets/fetched.json
 human-tech-*.png
+demos/human_tech_demo/assets/generated/
+__pycache__/

@@ -19,6 +19,12 @@ int MaterialArrays::layer_of(const std::string& name) const {
   return 0;
 }
 
+bool MaterialArrays::has_file_set(const std::string& name) const {
+  for (std::size_t i = 0; i < names.size(); ++i)
+    if (names[i] == name) return i < file_sets.size() && file_sets[i];
+  return false;
+}
+
 namespace {
 
 struct Image {
@@ -27,7 +33,7 @@ struct Image {
   bool ok() const { return w > 0; }
 };
 
-Image load_resized(const std::string& path, std::uint32_t size) {
+Image load_resized(const std::string& path, std::uint32_t size, bool srgb = false) {
   Image img;
   int w = 0, h = 0, n = 0;
   stbi_uc* data = stbi_load(path.c_str(), &w, &h, &n, 4);
@@ -37,19 +43,24 @@ Image load_resized(const std::string& path, std::uint32_t size) {
   if (static_cast<std::uint32_t>(w) == size && static_cast<std::uint32_t>(h) == size) {
     std::copy(data, data + img.rgba.size(), img.rgba.begin());
   } else {
-    stbir_resize_uint8_linear(data, w, h, 0, img.rgba.data(), static_cast<int>(size),
+    if (srgb)
+      stbir_resize_uint8_srgb(data, w, h, 0, img.rgba.data(), static_cast<int>(size),
                               static_cast<int>(size), 0, STBIR_RGBA);
+    else
+      stbir_resize_uint8_linear(data, w, h, 0, img.rgba.data(), static_cast<int>(size),
+                                static_cast<int>(size), 0, STBIR_RGBA);
   }
   stbi_image_free(data);
   return img;
 }
 
-// Value noise helpers for the fallbacks (tileable via integer lattice mod).
+// Tileable detail for the generated material library.
 float vnoise(std::uint32_t seed, float x, float y, std::uint32_t period) {
   const int xi = static_cast<int>(std::floor(x)), yi = static_cast<int>(std::floor(y));
   const float fx = x - static_cast<float>(xi), fy = y - static_cast<float>(yi);
   auto h = [&](int i, int j) {
-    const std::uint32_t ui = static_cast<std::uint32_t>(i) % period, uj = static_cast<std::uint32_t>(j) % period;
+    const auto wrap=[&](int value){return static_cast<std::uint32_t>((value%int(period)+int(period))%int(period));};
+    const std::uint32_t ui = wrap(i), uj = wrap(j);
     return hash01(ui, uj, seed);
   };
   const float sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
@@ -79,7 +90,8 @@ void fallback_set(const TextureSetSpec& spec, std::uint32_t size, Image* albedo,
     for (std::uint32_t x = 0; x < size; ++x) {
       const float u = static_cast<float>(x) / static_cast<float>(size) * period;
       const float v = static_cast<float>(y) / static_cast<float>(size) * period;
-      float hgt = 0.5f, tint = 1.0f;
+      float hgt = 0.5f, tint = 1.0f, roughness=spec.fallback_roughness, occlusion=1.0f;
+      Vec3 color{spec.fallback_rgb[0],spec.fallback_rgb[1],spec.fallback_rgb[2]};
       switch (spec.fallback_pattern) {
         case 1: hgt = fbm(seed, u, v, 5, 8); tint = 0.94f + 0.12f * fbm(seed + 3, u * 0.5f, v * 0.5f, 3, 4); break;
         case 2: hgt = 0.5f + 0.1f * (fbm(seed, u * 8, v * 0.25f, 3, 64) - 0.5f); tint = 0.9f + 0.2f * hgt; break;
@@ -94,13 +106,65 @@ void fallback_set(const TextureSetSpec& spec, std::uint32_t size, Image* albedo,
         case 5: hgt = 0.5f + 0.15f * (fbm(seed, u * 6, v * 6, 4, 48) - 0.5f); tint = 0.85f + 0.3f * fbm(seed + 9, u, v, 3, 8); break;
         default: break;
       }
+      // Material-specific structure at architectural scale. Wear is concentrated
+      // in joints and pores; broad surfaces retain their maintained character.
+      const float grain=hash01(x,y,seed+127);
+      if(spec.name=="concrete_white") {
+        const float pore=std::max(0.f,(grain-.982f)*55.f);
+        hgt=.5f+.013f*(fbm(seed,u*3,v*3,4,24)-.5f)-pore*.016f;
+        tint=.985f+.025f*fbm(seed,u,v,4,8)-pore*.024f;
+        color={.92f,.914f,.89f};roughness=.34f+.035f*grain;
+      } else if(spec.name=="paving_slabs"||spec.name=="pavement_light") {
+        const float row=std::floor(v),gx=u*.5f+std::fmod(row,2.f)*.5f;
+        const float fx=gx-std::floor(gx),fy=v-row;
+        const float seam=std::min({fx,1-fx,fy*.5f,(1-fy)*.5f});
+        const float bevel=clampf(seam/.012f,0,1);
+        const float slab=hash01(std::uint32_t(std::floor(gx))%4,std::uint32_t(row),seed);
+        const float stain=(1-clampf(seam/.065f,0,1))*fbm(seed+41,u*2,v*2,4,16);
+        const float pit=std::max(0.f,(grain-.965f)*28.f)*.04f;
+        hgt=.25f+.28f*bevel-pit;
+        tint=(.91f+.11f*slab)*(1-.24f*stain)*(.58f+.42f*bevel);
+        color=spec.name=="pavement_light"?Vec3{.72f,.713f,.685f}:Vec3{.56f,.57f,.55f};
+        occlusion=.63f+.37f*bevel;
+        roughness=.36f+.13f*grain+.2f*(1-bevel);
+      } else if(spec.name=="soil") {
+        const float clod=fbm(seed,u*4,v*4,5,32);
+        const float grit=std::max(0.f,(grain-.85f)*5.f);
+        const float mulch=std::pow(std::max(0.f,std::sin(u*83+v*19+fbm(seed,u,v,3,8)*6)),12.f)*(.4f+.6f*grain);
+        hgt=.23f+.45f*clod+.12f*grit+.09f*mulch;
+        tint=.63f+.58f*clod+.26f*grit;
+        color={.31f+mulch*.12f,.235f+mulch*.07f,.155f+mulch*.024f};
+        roughness=.9f+.08f*grain;occlusion=.77f+.23f*clod;
+      } else if(spec.name=="bark") {
+        const float warp=fbm(seed,u*2,v*.5f,4,16);
+        const float ridge=std::pow(.5f+.5f*std::sin(u*16*kPi+warp*9),.35f);
+        const float fissure=std::pow(1-ridge,1.6f);
+        hgt=.2f+.55f*ridge+.06f*fbm(seed,u*8,v*3,3,64);
+        tint=.61f+.49f*ridge-.3f*fissure;roughness=.85f+.1f*grain;
+        color={.37f,.285f,.185f};occlusion=.65f+.35f*ridge;
+      } else if(spec.name=="marble") {
+        const float warp=fbm(seed,u,v,5,8);
+        const float vein=std::pow(.5f+.5f*std::sin((u+v*.5f)*kPi*2+warp*8),24.f);
+        hgt=.5f+grain*.004f;tint=.98f-vein*.16f;color={.84f,.84f,.815f};roughness=.22f+vein*.07f;
+      } else if(spec.name=="terrazzo") {
+        const float aggregate=hash01(x/3,y/3,seed);
+        const float stone=aggregate>.7f?1.f:0.f;
+        const float warm=aggregate>.86f?1.f:0.f;
+        hgt=.5f+(grain-.5f)*.008f;tint=.94f+.08f*grain;
+        color={.63f+stone*.17f+warm*.05f,.64f+stone*.15f,.62f+stone*.13f-warm*.06f};roughness=.27f+.09f*(1-stone);
+      } else if(spec.name=="metal_silver"||spec.name=="metal_black") {
+        const float brush=vnoise(seed,u*32,v*.25f,256);
+        hgt=.5f+(brush-.5f)*.028f;tint=.97f+brush*.06f;
+        roughness=spec.fallback_roughness+.09f*(brush-.5f);
+      }
       height[y * size + x] = hgt;
       const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4;
       for (int c = 0; c < 3; ++c) {
-        albedo->rgba[i + c] = static_cast<std::uint8_t>(std::clamp(spec.fallback_rgb[c] * tint, 0.0f, 1.0f) * 255.0f);
+        const float component=c==0?color.x:c==1?color.y:color.z;
+        albedo->rgba[i + c] = static_cast<std::uint8_t>(std::clamp(component * tint, 0.0f, 1.0f) * 255.0f);
       }
-      arm->rgba[i + 0] = 255;
-      arm->rgba[i + 1] = static_cast<std::uint8_t>(std::clamp(spec.fallback_roughness + 0.1f * (hgt - 0.5f), 0.0f, 1.0f) * 255.0f);
+      arm->rgba[i + 0] = static_cast<std::uint8_t>(occlusion*255);
+      arm->rgba[i + 1] = static_cast<std::uint8_t>(std::clamp(roughness + 0.1f * (hgt - 0.5f), 0.0f, 1.0f) * 255.0f);
       arm->rgba[i + 2] = static_cast<std::uint8_t>(hgt * 255.0f);
     }
   }
@@ -126,12 +190,12 @@ struct LoadedSet {
 
 LoadedSet load_set(const std::string& dir, const TextureSetSpec& spec, std::uint32_t size) {
   LoadedSet out;
-  Image color = load_resized(dir + "/color.jpg", size);
+  Image color = load_resized(dir + "/color.jpg", size, true);
   Image nrm = load_resized(dir + "/normal.jpg", size);
   Image rough = load_resized(dir + "/roughness.jpg", size);
   Image ao = load_resized(dir + "/ao.jpg", size);
   Image hgt = load_resized(dir + "/height.jpg", size);
-  if (color.ok() && nrm.ok()) {
+  if (color.ok() && nrm.ok() && rough.ok()) {
     out.from_files = true;
     out.albedo = std::move(color);
     out.normal = std::move(nrm);
@@ -172,8 +236,9 @@ MaterialArrays load_material_arrays(Gpu& gpu, const std::string& assets_dir,
   }
   for (std::uint32_t i = 0; i < layers; ++i) {
     LoadedSet set = jobs[i].get();
+    arrays.file_sets.push_back(set.from_files);
     if (verbose) {
-      std::printf("  material %-18s %s\n", sets[i].name.c_str(), set.from_files ? "files" : "procedural fallback");
+      std::printf("  material %-18s %s\n", sets[i].name.c_str(), set.from_files ? "files" : "generated surface library");
     }
     gpu.upload_rgba8_mips(arrays.albedo, i, set.albedo.rgba.data());
     gpu.upload_rgba8_mips(arrays.normal, i, set.normal.rgba.data());

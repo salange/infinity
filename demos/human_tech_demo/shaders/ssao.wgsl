@@ -35,7 +35,11 @@ const KERNEL: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
   if (abs(dot(n, rnd)) > 0.99) { t = normalize(cross(n, vec3<f32>(0.0, 1.0, 0.0))); }
   let b = cross(n, t);
   let dist = -p.z;
-  let radius = clamp(0.8 + dist * 0.03, 1.0, 4.0);
+  let radius = clamp(.20 + dist * .002, .25, .8);
+  let radius_pixels = radius * frame.proj[1][1] * frame.screen.y * .5 / max(dist, .01);
+  // A contact kernel smaller than a pixel has no resolved occluder. In
+  // particular, a grazing ocean must not self-occlude through depth rounding.
+  if (radius_pixels < .65) { return vec4<f32>(1.0); }
   var occlusion = 0.0;
   for (var i = 0u; i < 16u; i = i + 1u) {
     let fi = (f32(i) + 0.5) / 16.0;
@@ -49,7 +53,7 @@ const KERNEL: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
     let range = smoothstep(0.0, 1.0, radius / max(abs(p.z - sp.z), 1e-4));
     if (sp.z >= s.z + 0.05) { occlusion += range; }
   }
-  let ao = clamp(1.0 - 1.25 * occlusion / 16.0, 0.0, 1.0);
+  let ao = mix(1.0,clamp(1.0 - 1.25 * occlusion / 16.0, 0.0, 1.0),smoothstep(.65,2.0,radius_pixels));
   return vec4<f32>(ao, ao, ao, 1.0);
 }
 
@@ -65,11 +69,14 @@ const KERNEL: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
       let uv = in.uv + vec2<f32>(f32(x) + 0.5, f32(y) + 0.5) * frame.screen.zw;
       let d = textureSample(depth_tex, samp, uv);
       let z = view_pos(uv, d).z;
-      let w = exp(-abs(z - z0) * 2.0);
+      let w = exp(-abs(z - z0) * 2.0 / max(1.0,abs(z0)*.002));
       sum += textureSample(ao_tex, samp, uv).r * w;
       wsum += w;
     }
   }
-  let ao = sum / max(wsum, 1e-4);
+  // A discontinuity may reject every neighbour. Preserve the valid source
+  // sample instead of turning the missing filter support into black AO.
+  let source = textureSample(ao_tex,samp,in.uv).r;
+  let ao = select(source,sum/max(wsum,1e-8),wsum>1e-6);
   return vec4<f32>(ao, ao, ao, 1.0);
 }

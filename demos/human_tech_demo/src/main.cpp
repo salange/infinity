@@ -34,6 +34,7 @@
 #include "renderer_proof.hpp"
 #include "scene.hpp"
 #include "sculpted_diagrid.hpp"
+#include "canal_tower.hpp"
 #include "textures.hpp"
 
 namespace {
@@ -486,6 +487,7 @@ int main(int argc, char **argv) {
   const bool market_blade_proof =
       args.asset.starts_with("reflection-proof-market-blade-");
   const bool diagrid_sample = args.asset.starts_with("diagrid-sample-");
+  const bool tower_sample = args.asset.starts_with("canal-tower-sample-");
   if (environment_proof) {
     args.shot = cb::kEnvironmentProofShot;
     args.night = false;
@@ -495,7 +497,9 @@ int main(int argc, char **argv) {
     args.night = false;
   }
   try {
-    if (diagrid_sample) {
+    if (tower_sample)
+      scene = cb::make_canal_tower_sample(args.asset.substr(std::string("canal-tower-sample-").size()));
+    else if (diagrid_sample) {
       std::string view = args.asset.substr(std::string("diagrid-sample-").size());
       const bool shallow = view.ends_with("-shallow");
       if (shallow)
@@ -526,7 +530,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   std::printf("  content tier: %s; %zu reusable resources, %zu instances\n",
-              diagrid_sample         ? "isolated production facade sample"
+              tower_sample           ? "isolated production canal tower"
+              : diagrid_sample       ? "isolated production facade sample"
               : renderer_proof       ? "isolated renderer proof"
               : sp.asset_kit.empty() ? "procedural preview"
                                      : "authored production kit",

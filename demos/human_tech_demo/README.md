@@ -186,6 +186,25 @@ Visual parity comes first; performance tuning follows that gate.
 
 Source and licensing: [assets/PROVENANCE.md](assets/PROVENANCE.md).
 
+The First Arrival canal tower has a parameterized shaft, complete cellular
+facade, shaped open crown rings and a raised roof pavilion. For native geometry
+inspection, use `--asset canal-tower-sample-crown` or
+`--asset canal-tower-sample-full`. These isolated views omit the surrounding city
+and are not full-scene appearance or performance evidence.
+
+Export the same production mesh into an editable Blender inspection scene after
+building the demo:
+
+```sh
+uv run --script demos/human_tech_demo/tools/inspect-canal-tower.py \
+  --output build/canal-tower-inspection
+```
+
+This uses a separate background Blender process, preserving the open desktop
+scene. The exported geometry and normals are exact; Blender materials and
+lighting are simplified for shape inspection. The native module remains the
+source of the rendered tower.
+
 The canonical manifest also includes camera waypoints along the market bridge
 approach, cylinder podium access, landing stairs and retained garden connections.
 The garden loggia route starts on its occupied elevated floor; the former east

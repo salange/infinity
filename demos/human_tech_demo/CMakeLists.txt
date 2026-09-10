@@ -24,6 +24,7 @@ add_executable(human_tech_demo
   src/civic_landmarks.cpp
   src/canal_construction.cpp
   src/canal_bridge.cpp
+  src/canal_tower.cpp
   src/asset_pipeline.cpp
   src/lookdev.cpp
   src/catalog.cpp
@@ -51,7 +52,7 @@ if(NOT WIN32)
   set_target_properties(human_tech_demo PROPERTIES BUILD_RPATH "$ORIGIN;@loader_path")
 endif()
 
-add_executable(human_tech_scene_test tests/scene_test.cpp src/scene.cpp src/catalog.cpp src/asset_pipeline.cpp src/garden_staging.cpp src/garden_canopy.cpp src/garden_frame.cpp src/garden_guard.cpp src/market_staging.cpp src/market_structure.cpp src/market_canopy.cpp src/market_climbers.cpp src/landing_lounge.cpp src/landing_canopies.cpp src/roof_staging.cpp src/civic_forecourt.cpp src/street_forecourt.cpp src/transit_concourse.cpp src/civic_landmarks.cpp src/canal_construction.cpp src/canal_bridge.cpp)
+add_executable(human_tech_scene_test tests/scene_test.cpp src/scene.cpp src/catalog.cpp src/asset_pipeline.cpp src/garden_staging.cpp src/garden_canopy.cpp src/garden_frame.cpp src/garden_guard.cpp src/market_staging.cpp src/market_structure.cpp src/market_canopy.cpp src/market_climbers.cpp src/landing_lounge.cpp src/landing_canopies.cpp src/roof_staging.cpp src/civic_forecourt.cpp src/street_forecourt.cpp src/transit_concourse.cpp src/civic_landmarks.cpp src/canal_construction.cpp src/canal_bridge.cpp src/canal_tower.cpp)
 target_include_directories(human_tech_scene_test PRIVATE src)
 target_link_libraries(human_tech_scene_test PRIVATE game::city)
 set(_human_tech_kit "${CMAKE_CURRENT_SOURCE_DIR}/assets/generated/human_tech_kit.htkit")
@@ -61,7 +62,7 @@ else()
   add_test(NAME human_tech_scene COMMAND human_tech_scene_test)
 endif()
 
-add_executable(human_tech_route_test tests/route_test.cpp src/scene.cpp src/catalog.cpp src/asset_pipeline.cpp src/garden_staging.cpp src/garden_canopy.cpp src/garden_frame.cpp src/garden_guard.cpp src/market_staging.cpp src/market_structure.cpp src/market_canopy.cpp src/market_climbers.cpp src/landing_lounge.cpp src/landing_canopies.cpp src/roof_staging.cpp src/civic_forecourt.cpp src/street_forecourt.cpp src/transit_concourse.cpp src/civic_landmarks.cpp src/canal_construction.cpp src/canal_bridge.cpp)
+add_executable(human_tech_route_test tests/route_test.cpp src/scene.cpp src/catalog.cpp src/asset_pipeline.cpp src/garden_staging.cpp src/garden_canopy.cpp src/garden_frame.cpp src/garden_guard.cpp src/market_staging.cpp src/market_structure.cpp src/market_canopy.cpp src/market_climbers.cpp src/landing_lounge.cpp src/landing_canopies.cpp src/roof_staging.cpp src/civic_forecourt.cpp src/street_forecourt.cpp src/transit_concourse.cpp src/civic_landmarks.cpp src/canal_construction.cpp src/canal_bridge.cpp src/canal_tower.cpp)
 target_include_directories(human_tech_route_test PRIVATE src)
 target_link_libraries(human_tech_route_test PRIVATE game::city)
 if(EXISTS "${_human_tech_kit}")

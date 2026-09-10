@@ -5,6 +5,7 @@
 #include "civic_landmarks.hpp"
 #include "civic_forecourt.hpp"
 #include "canal_construction.hpp"
+#include "canal_tower.hpp"
 
 #include <algorithm>
 #include <array>
@@ -103,7 +104,7 @@ const std::array<Vec2,5> kWestGardenWalk{{{-388,405},{-400,402},{-404.3f,398},{-
 const Vec2 kUpperBridgeOriginal{-350,362.2f};
 const Vec2 kUpperBridgeCompanion{-383,317.7f};
 const Vec2 kUpperStair{-350,356.4f};
-const Vec2 kCanalHex{-179.8f,248.1f};
+const Vec2 kCanalHex=CanalTowerSpec{}.centre-kHexMove;
 const std::vector<Vec2> kCanalHexParcel=moved_plan(riverfront::rectangle(
     riverfront::lot_west,riverfront::lot_east,riverfront::lot_north,riverfront::lot_south),kHexMove*-1.f);
 const std::vector<Vec2> kCanalHexAccess=moved_plan(riverfront::rectangle(146,178,104,112),kHexMove*-1.f);
@@ -2910,7 +2911,9 @@ void foreground(Scene& sc,Rng rng) {
   low_building(sc,rng.child(59),neighbor_plan,neighbor,kDeck,4,1,true);
 }
 void canal_hex_landmark(Scene& sc,Rng rng) {
-  constexpr float base=13.2f,radius=18.117f,body_top=89.2f,roof=93.2f;
+  constexpr float base=13.2f;
+  const CanalTowerSpec tower_spec;
+  const float radius=tower_spec.neck_radius;
   const Mat ceramic=lattice_ceramic(sc);
   auto material=[&](MaterialDesc recipe,const char* name) {
     recipe.name=name;const auto id=static_cast<Mat>(sc.materials.size());
@@ -2919,17 +2922,6 @@ void canal_hex_landmark(Scene& sc,Rng rng) {
   MaterialDesc bronze_recipe=sc.materials[M_BRONZE];
   bronze_recipe.base_color={.24f,.145f,.072f};bronze_recipe.roughness=.30f;
   const Mat bronze=material(bronze_recipe,"canal tower dark brushed bronze");
-  MaterialDesc glass_recipe=sc.materials[M_GLASS_BRONZE];
-  glass_recipe.base_color={.54f,.39f,.245f};glass_recipe.metallic=.54f;
-  glass_recipe.roughness=.10f;glass_recipe.room_h=4;glass_recipe.room_w=3.1f;
-  glass_recipe.tint2={.79f,.69f,.51f};glass_recipe.lit_probability=.27f;
-  const Mat shaft_glass=material(glass_recipe,"canal tower bronze occupied glazing");
-  glass_recipe.base_color={.37f,.285f,.20f};glass_recipe.metallic=.64f;
-  glass_recipe.lit_probability=.15f;
-  const Mat neck_glass=material(glass_recipe,"canal tower dark clerestory glazing");
-  MaterialDesc rim_recipe=sc.materials[M_SILVER];
-  rim_recipe.base_color={.64f,.60f,.49f};rim_recipe.roughness=.30f;rim_recipe.metallic=.83f;
-  const Mat rim=material(rim_recipe,"canal tower champagne silver crown");
   auto first=std::uint32_t(sc.opaque.indices.size());
   auto local=[](float s,float t){return riverfront::point(s,t)-kHexMove;};
   auto plan=[&](float s0,float s1,float t0,float t1) {
@@ -2938,6 +2930,10 @@ void canal_hex_landmark(Scene& sc,Rng rng) {
   const Vec3 across{riverfront::across.x,0,riverfront::across.y};
   const Vec3 along{riverfront::along.x,0,riverfront::along.y};
   const float survey_yaw=std::atan2(-riverfront::across.y,riverfront::across.x);
+  const Vec2 entry_start=local(98,108),entry_end=kCanalHex+Vec2{tower_spec.base_radius+.1f,0};
+  const Vec2 entry_direction=normalize(entry_end-entry_start),entry_side{-entry_direction.y*3,entry_direction.x*3};
+  const std::vector<Vec2> entry_walk{entry_start-entry_side,entry_end-entry_side,entry_end+entry_side,entry_start+entry_side};
+
   MaterialDesc paving_recipe=sc.materials[M_PLAZA];
   paving_recipe.base_color={.49f,.55f,.53f};paving_recipe.roughness=.66f;
   paving_recipe.flags&=~512u;
@@ -3187,7 +3183,7 @@ void canal_hex_landmark(Scene& sc,Rng rng) {
   bed(49.5f,81.5f,146.5f,172.5f,base,1300,9,
       {plan(57.5f,72.5f,151.5f,164.5f),plan(62.5f,67.5f,144,153)});
   bed(48.5f,94.5f,79.5f,130.5f,base,1320,12,
-      {plan_circle(radius+2.2f,72,kCanalHex),plan(87,98,103,113)});
+      {plan_circle(radius+2.2f,72,kCanalHex),entry_walk,plan(94,98,103,113)});
   // Courtyard trees root on the real ground slab and grow through the open
   // courts; the lounge footprints and their branching approaches remain open.
   bed(101.5f,130.5f,44.5f,69.5f,kDeck,1340,6,
@@ -3256,117 +3252,12 @@ void canal_hex_landmark(Scene& sc,Rng rng) {
       Emit(&sc.opaque,ceramic).beam(P3(local(s,t),kDeck),P3(local(s,t),top),.34f,.34f);
     Emit(&sc.opaque,bronze).beam(P3(local(s,105.5f),top),P3(local(s,110.5f),top),.25f,.24f);
   }
-  // The public entrance is an open arc in the real lobby wall. A central core
-  // and radial columns bear the inhabited floors above it.
-  const auto floor_plan=plan_circle(radius,72,kCanalHex);
-  slab(sc.opaque,floor_plan,base,.22f,M_MARBLE_WHITE);
-  box(sc,M_CONCRETE_WHITE,P3(kCanalHex,base+4),{7,4,7});
-  for(int i=0;i<72;++i) {
-    float a=i*2*kPi/72,b=(i+1)*2*kPi/72;
-    if(std::min(a,2*kPi-a)<.23f||std::min(b,2*kPi-b)<.23f)continue;
-    Vec3 p=P3(kCanalHex+Vec2{std::cos(a),std::sin(a)}*(radius-.5f),base+.15f);
-    Vec3 q=P3(kCanalHex+Vec2{std::cos(b),std::sin(b)}*(radius-.5f),base+.15f);
-    Emit(&sc.opaque,M_GLASS_CLEAR).quad_metric(q,p,p+Vec3{0,7.65f,0},q+Vec3{0,7.65f,0});
-  }
-  for(int i=0;i<12;++i) {
-    float a=(i+.5f)*2*kPi/12;Vec3 p=P3(kCanalHex+Vec2{std::cos(a),std::sin(a)}*(radius-.9f),base);
-    ceramic_member(sc,p,p+Vec3{0,8,0},{std::cos(a),0,std::sin(a)},.62f,ceramic);
-  }
+  // The independent tower module shares its surveyed entrance and real podium.
+  auto local_tower=tower_spec;local_tower.centre=kCanalHex;
+  build_canal_tower(sc,local_tower);
   if(!sc.asset_library.resources.empty()) {
     add_asset_instance(sc,"interior_lounge",P3(kCanalHex+Vec2{9,0},base),kPi*.5f,1.f);
-    add_asset_instance(sc,"glass_door",P3(kCanalHex+Vec2{radius-.4f,0},base),kPi*.5f,1.7f);
-  }
-  constexpr float lattice_base=21.2f,lattice_top=76.8f;
-  for(int floor=2;floor<19;++floor) {
-    const float y=base+floor*4;
-    const float bulge=1+.025f*std::sin((floor-2)/17.f*kPi);
-    const auto p=plan_circle(radius*bulge-.5f,108,kCanalHex);
-    const auto start=sc.opaque.vertices.size();
-    Emit(&sc.opaque,y>=77.2f?neck_glass:shaft_glass).wall(p,y+.18f,y+3.82f,true);
-    for(auto i=start;i<sc.opaque.vertices.size();++i)
-      sc.opaque.vertices[i].aux.y=sc.opaque.vertices[i].position.y-base;
-    // The physical four-metre floor and its room-grid datum agree. Thin dark
-    // slab edges stay behind the outer cells, with an occupied bronze neck.
-    slab(sc.opaque,plan_offset(p,.20f),y+4,.20f,bronze);
-    for(int i=0;i<72;++i) {
-      const float a=i*2*kPi/72;
-      const Vec3 foot=P3(kCanalHex+Vec2{std::cos(a),std::sin(a)}*(radius*bulge-.46f),y+.18f);
-      Emit(&sc.opaque,bronze).beam(foot,foot+Vec3{0,3.64f,0},.072f,.105f,
-        {std::cos(a),0,std::sin(a)});
-    }
-  }
-  // Thin elongated six-sided cells stop beneath the dark upper neck. Their
-  // circumference is closed and shared edges are emitted only once.
-  constexpr int columns=18;
-  const float circumference=2*kPi*(radius+.45f),cell_w=circumference/columns,cell_h=14.8f;
-  constexpr float cell_extent=lattice_top-lattice_base;
-  auto point=[&](float u,float v) {
-    const float a=u/(radius+.45f);
-    const float bulge=1+.025f*std::sin(std::clamp(v/68.f,0.f,1.f)*kPi);
-    return P3(kCanalHex+Vec2{std::cos(a),std::sin(a)}*((radius+.45f)*bulge),lattice_base+v);
-  };
-  std::set<std::array<int,4>> hex_edges;
-  for(int row=0;row<6;++row)for(int column=0;column<columns;++column) {
-    float x=(column+(row%2)*.5f)*cell_w,y=cell_h*.5f+row*cell_h*.75f;
-    const std::array<Vec2,6> hex{{{x,y-cell_h*.5f},{x+cell_w*.5f,y-cell_h*.25f},{x+cell_w*.5f,y+cell_h*.25f},
-       {x,y+cell_h*.5f},{x-cell_w*.5f,y+cell_h*.25f},{x-cell_w*.5f,y-cell_h*.25f}}};
-    for(int edge=0;edge<6;++edge) {
-      Vec2 a=hex[edge],b=hex[(edge+1)%6];
-      if(a.y>=cell_extent&&b.y>=cell_extent)continue;
-      if(a.y>cell_extent)a=a+(b-a)*((cell_extent-a.y)/(b.y-a.y));
-      if(b.y>cell_extent)b=b+(a-b)*((cell_extent-b.y)/(a.y-b.y));
-      auto canonical=[&](Vec2 p) {float u=std::fmod(p.x+circumference*2,circumference);return std::array<int,2>{int(std::lround(u*1000)),int(std::lround(p.y*1000))};};
-      auto ka=canonical(a),kb=canonical(b);if(kb<ka)std::swap(ka,kb);
-      if(!hex_edges.insert({ka[0],ka[1],kb[0],kb[1]}).second)continue;
-      for(int piece=0;piece<3;++piece) {
-        const Vec2 p=a+(b-a)*(piece/3.f),q=a+(b-a)*((piece+1)/3.f);
-        const float angle=(p.x+q.x)*.5f/(radius+.45f);
-        ceramic_member(sc,point(p.x,p.y),point(q.x,q.y),{std::cos(angle),0,std::sin(angle)},.43f,ceramic);
-      }
-    }
-  }
-  auto annulus=[&](float outer,float inner,float top,float thickness,Mat mat) {
-    const auto a=plan_circle(outer,108,kCanalHex),b=plan_circle(inner,108,kCanalHex);
-    Emit e(&sc.opaque,mat);e.ring_cap(a,b,top);e.ring_cap(a,b,top-thickness,false);
-    e.wall(a,top-thickness,top,true);e.wall(b,top-thickness,top,true,false);
-  };
-  annulus(radius+.58f,radius+.12f,lattice_top+.08f,.18f,bronze);
-  // The maintenance disk occupies seventy percent of the crown diameter.
-  // A recessed dark roof and the open air between narrow formed rings make
-  // their actual layered construction visible from the elevated city approach.
-  MaterialDesc crown_recipe=sc.materials[M_DARK_METAL];
-  crown_recipe.base_color={.095f,.073f,.046f};crown_recipe.roughness=.43f;
-  const Mat crown_deck=material(crown_recipe,"canal crown dark bronze recessed roof");
-  constexpr float disk_radius=13.6f,dark_roof_top=90.95f,disk_top=91.18f;
-  slab(sc.opaque,plan_circle(radius-.12f,108,kCanalHex),dark_roof_top,.25f,crown_deck);
-  slab(sc.opaque,plan_circle(disk_radius,108,kCanalHex),disk_top,.23f,M_MARBLE_WHITE);
-  annulus(disk_radius+.20f,disk_radius-.10f,disk_top+.20f,.30f,rim);
-  Emit(&sc.opaque,neck_glass).wall(plan_circle(radius-.5f,108,kCanalHex),body_top,dark_roof_top-.25f,true);
-  for(int support=0;support<12;++support) {
-    const float a=(support+.5f)*2*kPi/12;
-    const Vec3 out{std::cos(a),0,std::sin(a)};
-    const Vec3 foot=P3(kCanalHex,body_top)+out*(radius-1.3f);
-    Emit(&sc.opaque,bronze).beam(foot,{foot.x,dark_roof_top-.36f,foot.z},.16f,.20f,out);
-    Emit(&sc.opaque,bronze).beam(P3(kCanalHex,dark_roof_top-.36f),
-      P3(kCanalHex,dark_roof_top-.36f)+out*(radius-.15f),.18f,.22f);
-  }
-  for(int level=0;level<4;++level) {
-    const float y=body_top+.30f+level*1.11f;
-    annulus(radius+1.30f,radius+.72f,y,.14f,level==0?ceramic:rim);
-    annulus(radius+.83f,radius+.71f,y-.22f,.055f,bronze);
-  }
-  for(int i=0;i<54;++i) {
-    const float a=i*2*kPi/54;const Vec3 outward{std::cos(a),0,std::sin(a)};
-    const Vec3 foot=P3(kCanalHex,body_top)+outward*(radius+.73f);
-    Emit(&sc.opaque,rim).beam(foot,foot+Vec3{0,5.08f,0},.065f,.10f,outward);
-    Emit(&sc.opaque,bronze).beam(P3(kCanalHex,body_top)+outward*(radius-.4f),foot,.09f,.18f);
-  }
-  for(float y:{roof-.33f,roof+.18f,roof+.66f,roof+1.08f})
-    annulus(radius+.81f,radius+.74f,y,.065f,rim);
-  for(int i=0;i<18;++i) {
-    const float a=i*2*kPi/18;
-    const Vec3 p=P3(kCanalHex+Vec2{std::cos(a),std::sin(a)}*(disk_radius+.055f),disk_top+.225f);
-    box(sc,M_LOBBY_LIGHT,p,{.09f,.025f,.09f});
+    add_asset_instance(sc,"glass_door",P3(kCanalHex+Vec2{tower_spec.base_radius-.4f,0},base),kPi*.5f,1.7f);
   }
   Vec3 bounds_lo{1e30f,1e30f,1e30f},bounds_hi{-1e30f,-1e30f,-1e30f};
   for(auto i=first;i<sc.opaque.indices.size();++i) {
@@ -3883,8 +3774,8 @@ std::vector<SceneRoute> scene_routes() {
   hex_waypoint(176.5f,108,kDeck);hex_waypoint(171.16f,108,kDeck);
   for(int step=0;step<riverfront::stair_steps;++step)
     hex_waypoint(riverfront::stair_bottom-(step+.5f)*riverfront::stair_run,108,kDeck+(step+1)/6.f);
-  for(float lateral:{147.8f,143.f,120.f})hex_waypoint(lateral,108,13.2f);
-  const Vec3 hex_door=P3(kCanalHex+kHexMove+Vec2{19.117f,0},15);
+  for(float lateral:{147.8f,143.f,120.f,98.f})hex_waypoint(lateral,108,13.2f);
+  const Vec3 hex_door=P3(kCanalHex+kHexMove+Vec2{CanalTowerSpec{}.base_radius+1,0},15);
   hex_route.waypoints.push_back({hex_door,P3(kCanalHex+kHexMove,15)});
   routes.push_back(std::move(hex_route));
   SceneRoute landing_route{"landing_access",true,{
@@ -4054,7 +3945,7 @@ std::string scene_layout_manifest(const std::string& seed) {
       << kGardenGraphiteBegin*180.f/kPi << "," << kGardenGraphiteEnd*180.f/kPi
       << "],\"graphite_structural_column_boundaries\":[14,21],\"structural_column_count\":22,\"transition_ribs_at_sector_boundaries\":true,\"occupied_inner_curtain_retained\":true,\"normal_incidence_north_pane_transmission\":[0.1392,0.1584,0.1776],\"north_spandrel_height\":0.8},"
       << "{\"id\":\"oval_lattice\",\"position\":[458.8,1.2,-360],\"height\":136,\"half_extents\":[60,34],\"yaw_radians\":-0.862,\"mid_shaft_bulge\":0.06,\"roof_y\":137.2},"
-      << "{\"id\":\"canal_hex\",\"position\":[-151.43,13.2,233.20],\"radius\":18.117,\"roof_y\":93.2},"
+      << "{\"id\":\"canal_hex\",\"position\":[-154.37,13.2,243.40],\"radius\":15.5,\"neck_radius\":16.7,\"roof_y\":97.2,\"crown_guard_top_y\":98.28},"
       << "{\"id\":\"west_market\",\"position\":[-334,1.2,88],\"facade_x\":-312.5},"
       << "{\"id\":\"south_civic_arcade\",\"position\":[70.884,1.2,7.64],\"occupied_floor_count\":2,\"asymmetric_upper_wings\":true,\"public_colonnade_roof_y\":5.2},"
       << "{\"id\":\"secondary_curved_slab\",\"position\":[410,13.2,95],\"shaft_floors\":44,\"shaft_crown_y\":197.2},"

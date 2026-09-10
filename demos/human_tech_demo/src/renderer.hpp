@@ -1,7 +1,7 @@
 #pragma once
-// The demo renderer: cascaded shadow maps, depth/normal prepass, SSAO,
-// MSAA forward PBR with HDRI IBL and interior-mapped glass, bloom, ACES,
-// FXAA. Fixed pipeline; a handful of runtime toggles.
+// The standalone renderer: instanced scene geometry, runtime multiscale
+// indirect light, two planar scene reflections, real foreground glazing,
+// cascaded shadows, local practical lights and temporally filtered PBR.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -19,56 +19,84 @@ struct RenderSettings {
   std::uint32_t msaa{4};
   bool ssao{true};
   bool shadows{true};
+  bool point_shadows{true}; // finite segment visibility in known scene volumes
   bool bloom{true};
   bool fxaa{true};
-  bool taa{true};   // temporal AA (jittered projection + depth reprojection)
-  int debug_view{0};  // 0 final, 1 albedo, 2 normals, 3 ao, 4 shadow cascades, 5 roughness, 6-9 lighting terms,
-                      // 10 raw ssao, 11 prepass normals, 12 material id (linear, no tonemap)
-  float exposure_bias{0.0f};  // EV
+  bool indirect{true};
+  bool reflections{true};
+  float water_height{0.0f};
+  float puddle_height{1.222f};
+  float pond_height{1.04f}; // explicit shallow civic pond, material flag1024
+  bool taa{true};    // temporal AA (jittered projection + depth reprojection)
+  int debug_view{0}; // 0 final, 1 albedo, 2 normals, 3 ao, 4 shadow cascades, 5
+                     // roughness, 6-9 lighting terms, 10 raw ssao, 11 prepass
+                     // normals, 12 material id (linear, no tonemap), 13 clay,
+                     // 14 silhouette, 15 neutral material lighting,
+                     // 16 raw window lit factor / mullion coverage / detail,
+                     // 17 raw projected/reaching light counts (0..255) / secondary
+                     // 18 blocked fraction / known segment fraction / reaching
+                     // 19 window lit / gradient / joint energy (last two /1.3)
+                     // 20 room pixels x,y /32 and vertical-floor detail
+  float exposure_bias{0.0f}; // EV
   std::uint32_t shadow_size{2048};
-  float jitter_x{0.0f}, jitter_y{0.0f};  // projection offset in pixels (analysis / TAA)
+  float jitter_x{0.0f},
+      jitter_y{0.0f}; // projection offset in pixels (analysis / TAA)
   // Performance options (player-facing later):
-  bool ssao_half{false};          // SSAO at half resolution with bilateral upsampling
-  bool shadow_half_rate{false};   // the two far cascades update every other frame
-  bool occlusion{true};           // GPU occlusion culling against the current prepass depth pyramid
-  bool shadow_far_lod{false};     // far cascade: tower shells only, no building blocks beyond 350 m
+  bool ssao_half{false}; // SSAO at half resolution with bilateral upsampling
+  bool shadow_half_rate{false}; // the two far cascades update every other frame
+  bool occlusion{
+      true}; // GPU occlusion culling against the current prepass depth pyramid
+  bool shadow_far_lod{
+      false}; // far cascade: tower shells only, no building blocks beyond 350 m
 };
 
 class Renderer {
- public:
-  bool init(Gpu* gpu, const std::string& shader_dir, RenderSettings settings, std::string* error);
+public:
+  bool init(Gpu *gpu, const std::string &shader_dir, RenderSettings settings,
+            std::string *error, std::uint32_t render_width = 0,
+            std::uint32_t render_height = 0);
   void shutdown();
 
-  void set_scene(const Scene& scene, const MaterialArrays& arrays);
+  // Synchronously consumes mesh vertices/indices for upload and transport.
+  // On success their CPU storage may be released; no Scene references remain.
+  // The material texture arrays must remain alive while rendering this scene.
+  void set_scene(const Scene &scene, const MaterialArrays &arrays);
   // Which environment the frame uses (day or night); night also enables
   // point lights and lit interiors.
-  void set_environment(const Environment* env, bool night);
+  void set_environment(const Environment *env, bool night);
   void resize(std::uint32_t w, std::uint32_t h);
-  // Re-creates size- and setting-dependent targets after msaa / ssao_half changed.
+  // Re-creates size- and setting-dependent targets after msaa / ssao_half
+  // changed.
   void apply_settings();
   // Draw statistics of the last frame.
-  struct Stats { std::uint32_t ranges_total{0}, ranges_drawn{0}, ranges_occluded{0}; std::uint64_t indices_drawn{0}; };
-  const Stats& stats() const;
+  struct Stats {
+    std::uint32_t ranges_total{0}, ranges_drawn{0}, ranges_occluded{0};
+    std::uint64_t indices_drawn{0};
+  };
+  const Stats &stats() const;
 
   // Renders into `target` (the acquired surface view or nullptr to skip the
   // final blit, e.g. for a capture-only frame).
-  void render(const Camera& camera, float time_s, WGPUTextureView target);
-  bool capture_png(const std::string& path);
+  void render(const Camera &camera, float time_s, WGPUTextureView target);
+  bool capture_png(const std::string &path);
   // Reads back the final LDR frame (RGBA8, sRGB-encoded) into rgba.
-  bool read_frame(std::vector<std::uint8_t>* rgba, std::uint32_t* w, std::uint32_t* h);
-  // Reads back the 1x depth buffer (0..1, near = 1, reversed Z) and the unjittered view-projection.
-  bool read_depth(std::vector<float>* depth, std::uint32_t* w, std::uint32_t* h);
-  const Mat4& last_view_proj() const;
+  bool read_frame(std::vector<std::uint8_t> *rgba, std::uint32_t *w,
+                  std::uint32_t *h);
+  // Reads back the 1x depth buffer (0..1, near = 1, reversed Z) and the
+  // unjittered view-projection.
+  bool read_depth(std::vector<float> *depth, std::uint32_t *w,
+                  std::uint32_t *h);
+  const Mat4 &last_view_proj() const;
   void reset_history();
-  RenderSettings& settings() { return settings_; }
+  RenderSettings &settings() { return settings_; }
   std::uint32_t triangles() const { return triangles_; }
 
- private:
+private:
   struct Impl;
-  Impl* impl_{nullptr};
-  Gpu* gpu_{nullptr};
+  Impl *impl_{nullptr};
+  Gpu *gpu_{nullptr};
   RenderSettings settings_;
   std::uint32_t triangles_{0};
 };
 
-}  // namespace cb
+} // namespace cb

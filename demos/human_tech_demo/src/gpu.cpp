@@ -1,4 +1,5 @@
 #include "gpu.hpp"
+#include "renderer_memory.hpp"
 
 #include <GLFW/glfw3.h>
 #if defined(__linux__)
@@ -15,30 +16,36 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 #if defined(__APPLE__)
-extern "C" void* unendlichMetalLayerForCocoaWindow(void* nsWindow);
+extern "C" void *unendlichMetalLayerForCocoaWindow(void *nsWindow);
 #endif
 
 namespace cb {
 
 std::string to_string(WGPUStringView v) {
-  if (v.data == nullptr) return {};
-  if (v.length == WGPU_STRLEN) return std::string(v.data);
+  if (v.data == nullptr)
+    return {};
+  if (v.length == WGPU_STRLEN)
+    return std::string(v.data);
   return std::string(v.data, v.length);
 }
 
 void Texture::release() {
-  if (view != nullptr) wgpuTextureViewRelease(view);
-  if (texture != nullptr) wgpuTextureRelease(texture);
+  if (view != nullptr)
+    wgpuTextureViewRelease(view);
+  if (texture != nullptr)
+    wgpuTextureRelease(texture);
   view = nullptr;
   texture = nullptr;
 }
 
 namespace {
 
-WGPUSurface create_surface(WGPUInstance instance, GLFWwindow* window, std::string* error) {
+WGPUSurface create_surface(WGPUInstance instance, GLFWwindow *window,
+                           std::string *error) {
   WGPUSurfaceDescriptor desc{};
 #if defined(__linux__)
   const int platform = glfwGetPlatform();
@@ -90,9 +97,9 @@ struct DeviceRequest {
   bool done{false};
 };
 
-}  // namespace
+} // namespace
 
-bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
+bool Gpu::create(GLFWwindow *window, Gpu *g, std::string *error) {
   WGPUInstanceDescriptor idesc{};
   g->instance = wgpuCreateInstance(&idesc);
   if (g->instance == nullptr) {
@@ -101,7 +108,8 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
   }
   g->surface = create_surface(g->instance, window, error);
   if (g->surface == nullptr) {
-    if (error->empty()) *error = "surface creation failed";
+    if (error->empty())
+      *error = "surface creation failed";
     return false;
   }
   AdapterRequest ar;
@@ -111,16 +119,19 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
     options.powerPreference = WGPUPowerPreference_HighPerformance;
     WGPURequestAdapterCallbackInfo cb{};
     cb.mode = WGPUCallbackMode_AllowProcessEvents;
-    cb.callback = [](WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message,
-                     void* u1, void*) {
-      auto* r = static_cast<AdapterRequest*>(u1);
-      if (status == WGPURequestAdapterStatus_Success) r->adapter = adapter;
-      else r->message = to_string(message);
+    cb.callback = [](WGPURequestAdapterStatus status, WGPUAdapter adapter,
+                     WGPUStringView message, void *u1, void *) {
+      auto *r = static_cast<AdapterRequest *>(u1);
+      if (status == WGPURequestAdapterStatus_Success)
+        r->adapter = adapter;
+      else
+        r->message = to_string(message);
       r->done = true;
     };
     cb.userdata1 = &ar;
     wgpuInstanceRequestAdapter(g->instance, &options, cb);
-    while (!ar.done) wgpuInstanceProcessEvents(g->instance);
+    while (!ar.done)
+      wgpuInstanceProcessEvents(g->instance);
   }
   if (ar.adapter == nullptr) {
     *error = "no GPU adapter: " + ar.message;
@@ -130,12 +141,28 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
   {
     WGPUAdapterInfo info{};
     if (wgpuAdapterGetInfo(g->adapter, &info) == WGPUStatus_Success) {
-      g->adapter_name = to_string(info.device) + " (" + to_string(info.description) + ")";
+      g->adapter_name =
+          to_string(info.device) + " (" + to_string(info.description) + ")";
       wgpuAdapterInfoFreeMembers(info);
     }
     WGPULimits limits{};
     if (wgpuAdapterGetLimits(g->adapter, &limits) == WGPUStatus_Success) {
       g->max_buffer_size = limits.maxBufferSize;
+      g->max_storage_buffer_binding_size = limits.maxStorageBufferBindingSize;
+      const bool ray = wgpuAdapterHasFeature(
+          g->adapter, static_cast<WGPUFeatureName>(WGPUNativeFeature_RayQuery));
+      const bool arrays = wgpuAdapterHasFeature(
+          g->adapter, static_cast<WGPUFeatureName>(
+                          WGPUNativeFeature_AccelerationStructureBindingArray));
+      std::printf(
+          "  renderer capability: adapter=%s; native RayQuery=%s; AS binding "
+          "array=%s; max3D=%u; maxbuffer=%llu MiB\n",
+          g->adapter_name.c_str(), ray ? "yes" : "no", arrays ? "yes" : "no",
+          limits.maxTextureDimension3D,
+          static_cast<unsigned long long>(limits.maxBufferSize / 1048576));
+      std::printf("  renderer path: scene voxel indirect + raster planar "
+                  "reflections (wgpu-native 29 C API exposes no AS "
+                  "creation/build/binding entry points)\n");
     }
   }
   DeviceRequest dr;
@@ -146,29 +173,44 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
       return false;
     }
     WGPUDeviceDescriptor ddesc{};
-    ddesc.requiredLimits = &required;  // ask for everything the adapter has
+    ddesc.requiredLimits = &required; // ask for everything the adapter has
     // wgpu-native does not gate MultiDrawIndexedIndirect behind a feature (only
     // the *Count variants are); it is available on every backend it ships.
     g->multi_draw = true;
-    ddesc.uncapturedErrorCallbackInfo.callback = [](WGPUDevice const*, WGPUErrorType type,
-                                                    WGPUStringView message, void*, void*) {
-      std::fprintf(stderr, "[wgpu] error (%d): %.*s\n", static_cast<int>(type),
-                   static_cast<int>(message.length == WGPU_STRLEN ? std::strlen(message.data)
-                                                                   : message.length),
-                   message.data);
+    ddesc.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowProcessEvents;
+    ddesc.deviceLostCallbackInfo.userdata1 = g;
+    ddesc.deviceLostCallbackInfo.callback =
+        [](WGPUDevice const *, WGPUDeviceLostReason reason,
+           WGPUStringView message, void *user, void *) {
+          if (reason == WGPUDeviceLostReason_Destroyed ||
+              reason == WGPUDeviceLostReason_CallbackCancelled)
+            return;
+          static_cast<Gpu *>(user)->record_failure("GPU device lost: " +
+                                                   to_string(message));
+        };
+    ddesc.uncapturedErrorCallbackInfo.userdata1 = g;
+    ddesc.uncapturedErrorCallbackInfo.callback = [](WGPUDevice const *,
+                                                    WGPUErrorType type,
+                                                    WGPUStringView message,
+                                                    void *user, void *) {
+      static_cast<Gpu *>(user)->record_failure(
+          "GPU error " + std::to_string(int(type)) + ": " + to_string(message));
     };
     WGPURequestDeviceCallbackInfo cb{};
     cb.mode = WGPUCallbackMode_AllowProcessEvents;
-    cb.callback = [](WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message,
-                     void* u1, void*) {
-      auto* r = static_cast<DeviceRequest*>(u1);
-      if (status == WGPURequestDeviceStatus_Success) r->device = device;
-      else r->message = to_string(message);
+    cb.callback = [](WGPURequestDeviceStatus status, WGPUDevice device,
+                     WGPUStringView message, void *u1, void *) {
+      auto *r = static_cast<DeviceRequest *>(u1);
+      if (status == WGPURequestDeviceStatus_Success)
+        r->device = device;
+      else
+        r->message = to_string(message);
       r->done = true;
     };
     cb.userdata1 = &dr;
     wgpuAdapterRequestDevice(g->adapter, &ddesc, cb);
-    while (!dr.done) wgpuInstanceProcessEvents(g->instance);
+    while (!dr.done)
+      wgpuInstanceProcessEvents(g->instance);
   }
   if (dr.device == nullptr) {
     *error = "device request failed: " + dr.message;
@@ -178,7 +220,8 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
   g->queue = wgpuDeviceGetQueue(g->device);
   {
     WGPUSurfaceCapabilities caps{};
-    if (wgpuSurfaceGetCapabilities(g->surface, g->adapter, &caps) != WGPUStatus_Success ||
+    if (wgpuSurfaceGetCapabilities(g->surface, g->adapter, &caps) !=
+            WGPUStatus_Success ||
         caps.formatCount == 0) {
       *error = "surface reports no formats";
       return false;
@@ -203,7 +246,51 @@ bool Gpu::create(GLFWwindow* window, Gpu* g, std::string* error) {
   return true;
 }
 
+void Gpu::record_failure(const std::string &message) {
+  {
+    std::lock_guard<std::mutex> lock(failure_mutex_);
+    if (failure_.empty())
+      failure_ = message;
+  }
+  failed_.store(true);
+  std::fprintf(stderr, "[gpu-failure] %s\n", message.c_str());
+  std::fflush(stderr);
+}
+std::string Gpu::failure_message() const {
+  std::lock_guard<std::mutex> lock(failure_mutex_);
+  return failure_;
+}
+bool Gpu::poll(bool wait) {
+  if (!device || !healthy())
+    return false;
+  wgpuDevicePoll(device, wait ? 1U : 0U, nullptr);
+  wgpuInstanceProcessEvents(instance);
+  return healthy();
+}
+bool Gpu::submit(WGPUCommandBuffer command, bool wait) {
+  if (!command || !poll(false))
+    return false;
+  wgpuQueueSubmit(queue, 1, &command);
+  return poll(wait);
+}
+
+bool Gpu::flush_uploads() {
+  if (!poll(false))
+    return false;
+  // An empty submit starts pending QueueWriteBuffer/QueueWriteTexture copies.
+  // Waiting without this submit would retain their native staging allocations.
+  wgpuQueueSubmit(queue, 0, nullptr);
+  return poll(true);
+}
+
+[[noreturn]] void Gpu::fail(const std::string &message) {
+  record_failure(message);
+  throw GpuUnavailable(failure_message());
+}
+
 void Gpu::configure_surface() {
+  if (!healthy())
+    return;
   WGPUSurfaceConfiguration config{};
   config.device = device;
   config.format = surface_format;
@@ -216,19 +303,26 @@ void Gpu::configure_surface() {
 }
 
 void Gpu::resize(std::uint32_t w, std::uint32_t h) {
-  if (w == 0 || h == 0) return;
+  if (w == 0 || h == 0)
+    return;
   width = w;
   height = h;
   configure_surface();
 }
 
-WGPUTextureView Gpu::acquire_frame(WGPUTexture* out_texture) {
+WGPUTextureView Gpu::acquire_frame(WGPUTexture *out_texture) {
+  if (!poll(false)) {
+    *out_texture = nullptr;
+    return nullptr;
+  }
   WGPUSurfaceTexture st{};
   wgpuSurfaceGetCurrentTexture(surface, &st);
-  const bool ok = st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
-                  st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal;
+  const bool ok =
+      st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
+      st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal;
   if (!ok) {
-    if (st.texture != nullptr) wgpuTextureRelease(st.texture);
+    if (st.texture != nullptr)
+      wgpuTextureRelease(st.texture);
     if (st.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
         st.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
       configure_surface();
@@ -246,17 +340,24 @@ WGPUTextureView Gpu::acquire_frame(WGPUTexture* out_texture) {
   return wgpuTextureCreateView(st.texture, &vd);
 }
 
-void Gpu::present() { wgpuSurfacePresent(surface); }
+void Gpu::present() {
+  if (healthy())
+    wgpuSurfacePresent(surface);
+}
 
 void Gpu::destroy() {
-  if (queue != nullptr) wgpuQueueRelease(queue);
-  if (device != nullptr) wgpuDeviceRelease(device);
-  if (adapter != nullptr) wgpuAdapterRelease(adapter);
+  if (queue != nullptr)
+    wgpuQueueRelease(queue);
+  if (device != nullptr)
+    wgpuDeviceRelease(device);
+  if (adapter != nullptr)
+    wgpuAdapterRelease(adapter);
   if (surface != nullptr) {
     wgpuSurfaceUnconfigure(surface);
     wgpuSurfaceRelease(surface);
   }
-  if (instance != nullptr) wgpuInstanceRelease(instance);
+  if (instance != nullptr)
+    wgpuInstanceRelease(instance);
   queue = nullptr;
   device = nullptr;
   adapter = nullptr;
@@ -264,26 +365,85 @@ void Gpu::destroy() {
   instance = nullptr;
 }
 
-WGPUBuffer Gpu::create_buffer(WGPUBufferUsage usage, std::uint64_t size, const void* data,
-                              const char* label) {
+WGPUBuffer Gpu::create_buffer(WGPUBufferUsage usage, std::uint64_t size,
+                              const void *data, const char *label) {
+  if (!healthy())
+    throw GpuUnavailable(failure_message());
   WGPUBufferDescriptor bd{};
   bd.label = sv(label);
   bd.usage = usage | (data != nullptr ? WGPUBufferUsage_CopyDst : 0);
-  bd.size = (size + 3) & ~std::uint64_t{3};
+  try {
+    bd.size = memory::buffer_size(size, max_buffer_size);
+    // This renderer binds storage buffers in full, without dynamic subranges.
+    if (usage & WGPUBufferUsage_Storage)
+      (void)memory::buffer_size(size, max_storage_buffer_binding_size);
+    if (data)
+      memory::buffer_write(bd.size, 0, size);
+  } catch (const std::length_error &error) {
+    fail(std::string("buffer '") + label + "' requested " +
+         std::to_string(size) + " bytes (adapter maxBufferSize " +
+         std::to_string(max_buffer_size) + ", maxStorageBufferBindingSize " +
+         std::to_string(max_storage_buffer_binding_size) + "): " + error.what());
+  }
   WGPUBuffer b = wgpuDeviceCreateBuffer(device, &bd);
-  if (data != nullptr && size > 0) wgpuQueueWriteBuffer(queue, b, 0, data, size);
+  try {
+    if (!poll(false) || !b)
+      fail(std::string("could not allocate buffer '") + label + "'");
+    if (data && size)
+      upload_buffer(b, 0, data, size);
+  } catch (...) {
+    if (b)
+      wgpuBufferRelease(b);
+    throw;
+  }
   return b;
 }
 
-void Gpu::write_buffer(WGPUBuffer buffer, std::uint64_t offset, const void* data,
-                       std::uint64_t size) {
-  wgpuQueueWriteBuffer(queue, buffer, offset, data, size);
+void Gpu::write_buffer(WGPUBuffer buffer, std::uint64_t offset,
+                       const void *data, std::uint64_t size) {
+  if (!healthy())
+    throw GpuUnavailable(failure_message());
+  if (!buffer || (!data && size))
+    fail("buffer write has no destination or source");
+  try {
+    memory::buffer_write(wgpuBufferGetSize(buffer), offset, size);
+  } catch (const std::length_error &error) {
+    fail(error.what());
+  }
+  if (size)
+    wgpuQueueWriteBuffer(queue, buffer, offset, data, size);
 }
 
-Texture Gpu::create_texture(std::uint32_t w, std::uint32_t h, WGPUTextureFormat format,
-                            WGPUTextureUsage usage, std::uint32_t mips, std::uint32_t layers,
-                            std::uint32_t samples, const char* label, bool cube) {
+void Gpu::upload_buffer(WGPUBuffer buffer, std::uint64_t offset,
+                        const void *data, std::uint64_t size) {
+  if (!healthy())
+    throw GpuUnavailable(failure_message());
+  if (!buffer || (!data && size))
+    fail("buffer upload has no destination or source");
+  try {
+    // Validate the entire range before writing its first chunk.
+    memory::buffer_write(wgpuBufferGetSize(buffer), offset, size);
+  } catch (const std::length_error &error) {
+    fail(error.what());
+  }
+  const auto *source = static_cast<const std::uint8_t *>(data);
+  for (std::uint64_t sent = 0; sent < size;) {
+    const auto count = std::min(memory::upload_bytes, size - sent);
+    write_buffer(buffer, offset + sent, source + sent, count);
+    if (!flush_uploads())
+      throw GpuUnavailable(failure_message());
+    sent += count;
+  }
+}
+
+Texture Gpu::create_texture(std::uint32_t w, std::uint32_t h,
+                            WGPUTextureFormat format, WGPUTextureUsage usage,
+                            std::uint32_t mips, std::uint32_t layers,
+                            std::uint32_t samples, const char *label,
+                            bool cube) {
   Texture t;
+  if (!healthy())
+    return t;
   t.width = w;
   t.height = h;
   t.format = format;
@@ -301,7 +461,8 @@ Texture Gpu::create_texture(std::uint32_t w, std::uint32_t h, WGPUTextureFormat 
   WGPUTextureViewDescriptor vd{};
   vd.format = format;
   vd.dimension = cube ? WGPUTextureViewDimension_Cube
-                      : (layers > 1 ? WGPUTextureViewDimension_2DArray : WGPUTextureViewDimension_2D);
+                      : (layers > 1 ? WGPUTextureViewDimension_2DArray
+                                    : WGPUTextureViewDimension_2D);
   vd.mipLevelCount = mips;
   vd.arrayLayerCount = layers;
   vd.aspect = WGPUTextureAspect_All;
@@ -309,9 +470,11 @@ Texture Gpu::create_texture(std::uint32_t w, std::uint32_t h, WGPUTextureFormat 
   return t;
 }
 
-WGPUTextureView Gpu::create_view(const Texture& tex, std::uint32_t base_mip,
-                                 std::uint32_t mip_count, std::uint32_t base_layer,
-                                 std::uint32_t layer_count, WGPUTextureViewDimension dim) {
+WGPUTextureView Gpu::create_view(const Texture &tex, std::uint32_t base_mip,
+                                 std::uint32_t mip_count,
+                                 std::uint32_t base_layer,
+                                 std::uint32_t layer_count,
+                                 WGPUTextureViewDimension dim) {
   WGPUTextureViewDescriptor vd{};
   vd.format = tex.format;
   vd.dimension = dim;
@@ -323,36 +486,73 @@ WGPUTextureView Gpu::create_view(const Texture& tex, std::uint32_t base_mip,
   return wgpuTextureCreateView(tex.texture, &vd);
 }
 
-void Gpu::upload_level(const Texture& tex, std::uint32_t layer, std::uint32_t mip, std::uint32_t w,
-                       std::uint32_t h, const void* data, std::uint32_t bpp) {
-  WGPUTexelCopyTextureInfo dst{};
-  dst.texture = tex.texture;
-  dst.mipLevel = mip;
-  dst.origin = WGPUOrigin3D{0, 0, layer};
-  dst.aspect = WGPUTextureAspect_All;
-  WGPUTexelCopyBufferLayout layout{};
-  layout.offset = 0;
-  layout.bytesPerRow = w * bpp;
-  layout.rowsPerImage = h;
-  const WGPUExtent3D extent{w, h, 1};
-  wgpuQueueWriteTexture(queue, &dst, data, static_cast<std::size_t>(w) * h * bpp, &layout, &extent);
+void Gpu::upload_level(const Texture &tex, std::uint32_t layer,
+                       std::uint32_t mip, std::uint32_t w, std::uint32_t h,
+                       const void *data, std::uint32_t bpp) {
+  upload_texture_region(tex, mip, layer, w, h, 1, data, bpp);
 }
 
-void Gpu::upload_rgba8_mips(const Texture& tex, std::uint32_t layer, const std::uint8_t* rgba) {
+void Gpu::upload_volume_level(const Texture &tex, std::uint32_t mip,
+                              std::uint32_t w, std::uint32_t h,
+                              std::uint32_t depth, const void *data,
+                              std::uint32_t bpp) {
+  upload_texture_region(tex, mip, 0, w, h, depth, data, bpp);
+}
+
+void Gpu::upload_texture_region(const Texture &tex, std::uint32_t mip,
+                                std::uint32_t layer, std::uint32_t w,
+                                std::uint32_t h, std::uint32_t depth,
+                                const void *data, std::uint32_t bpp) {
+  if (!healthy())
+    return;
+  if (!tex.texture || !data) {
+    record_failure("texture upload has no destination or source");
+    return;
+  }
+  try {
+    memory::texture_chunks(w, h, depth, bpp, [&](memory::TextureChunk chunk) {
+      if (!healthy())
+        return;
+      WGPUTexelCopyTextureInfo dst{};
+      dst.texture = tex.texture;
+      dst.mipLevel = mip;
+      dst.origin = WGPUOrigin3D{0, chunk.y, layer + chunk.z};
+      dst.aspect = WGPUTextureAspect_All;
+      WGPUTexelCopyBufferLayout layout{};
+      layout.bytesPerRow = w * bpp;
+      layout.rowsPerImage = chunk.height;
+      const WGPUExtent3D extent{w, chunk.height, chunk.depth};
+      const auto *source = static_cast<const std::uint8_t *>(data);
+      wgpuQueueWriteTexture(queue, &dst, source + chunk.offset, chunk.size,
+                            &layout, &extent);
+      flush_uploads();
+    });
+  } catch (const std::length_error &error) {
+    record_failure(error.what());
+  }
+}
+
+void Gpu::upload_rgba8_mips(const Texture &tex, std::uint32_t layer,
+                            const std::uint8_t *rgba) {
   std::uint32_t w = tex.width, h = tex.height;
-  std::vector<std::uint8_t> level(rgba, rgba + static_cast<std::size_t>(w) * h * 4);
+  std::vector<std::uint8_t> level(rgba,
+                                  rgba + static_cast<std::size_t>(w) * h * 4);
   for (std::uint32_t mip = 0; mip < tex.mips; ++mip) {
     upload_level(tex, layer, mip, w, h, level.data(), 4);
-    if (w == 1 && h == 1) break;
+    if (w == 1 && h == 1)
+      break;
     const std::uint32_t nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
     std::vector<std::uint8_t> next(static_cast<std::size_t>(nw) * nh * 4);
     for (std::uint32_t y = 0; y < nh; ++y) {
       for (std::uint32_t x = 0; x < nw; ++x) {
         for (int c = 0; c < 4; ++c) {
-          const std::uint32_t x0 = std::min(2 * x, w - 1), x1 = std::min(2 * x + 1, w - 1);
-          const std::uint32_t y0 = std::min(2 * y, h - 1), y1 = std::min(2 * y + 1, h - 1);
-          const int s = level[(y0 * w + x0) * 4 + c] + level[(y0 * w + x1) * 4 + c] +
-                        level[(y1 * w + x0) * 4 + c] + level[(y1 * w + x1) * 4 + c];
+          const std::uint32_t x0 = std::min(2 * x, w - 1),
+                              x1 = std::min(2 * x + 1, w - 1);
+          const std::uint32_t y0 = std::min(2 * y, h - 1),
+                              y1 = std::min(2 * y + 1, h - 1);
+          const int s =
+              level[(y0 * w + x0) * 4 + c] + level[(y0 * w + x1) * 4 + c] +
+              level[(y1 * w + x0) * 4 + c] + level[(y1 * w + x1) * 4 + c];
           next[(y * nw + x) * 4 + c] = static_cast<std::uint8_t>((s + 2) / 4);
         }
       }
@@ -364,7 +564,8 @@ void Gpu::upload_rgba8_mips(const Texture& tex, std::uint32_t layer, const std::
 }
 
 namespace {
-std::string read_shader_source(const std::string& path, int depth, std::string* error) {
+std::string read_shader_source(const std::string &path, int depth,
+                               std::string *error) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     *error = "cannot read shader " + path;
@@ -375,7 +576,8 @@ std::string read_shader_source(const std::string& path, int depth, std::string* 
   while (std::getline(in, line)) {
     if (line.rfind("#include \"", 0) == 0 && depth < 8) {
       const std::size_t end = line.find('"', 10);
-      const std::string inc = line.substr(10, end == std::string::npos ? std::string::npos : end - 10);
+      const std::string inc = line.substr(
+          10, end == std::string::npos ? std::string::npos : end - 10);
       out += read_shader_source(dir + inc, depth + 1, error);
       out += "\n";
     } else {
@@ -385,11 +587,12 @@ std::string read_shader_source(const std::string& path, int depth, std::string* 
   }
   return out;
 }
-}  // namespace
+} // namespace
 
-WGPUShaderModule Gpu::load_shader(const std::string& path, std::string* error) {
+WGPUShaderModule Gpu::load_shader(const std::string &path, std::string *error) {
   const std::string code = read_shader_source(path, 0, error);
-  if (!error->empty()) return nullptr;
+  if (!error->empty())
+    return nullptr;
   WGPUShaderSourceWGSL wgsl{};
   wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
   wgsl.code = WGPUStringView{code.data(), code.size()};
@@ -399,14 +602,16 @@ WGPUShaderModule Gpu::load_shader(const std::string& path, std::string* error) {
   return wgpuDeviceCreateShaderModule(device, &md);
 }
 
-WGPUSampler Gpu::create_sampler(WGPUAddressMode mode, WGPUFilterMode filter, bool mips,
-                                std::uint16_t anisotropy, WGPUCompareFunction compare,
-                                const char* label) {
+WGPUSampler Gpu::create_sampler(WGPUAddressMode mode, WGPUFilterMode filter,
+                                bool mips, std::uint16_t anisotropy,
+                                WGPUCompareFunction compare,
+                                const char *label) {
   WGPUSamplerDescriptor sd{};
   sd.label = sv(label);
   sd.addressModeU = sd.addressModeV = sd.addressModeW = mode;
   sd.magFilter = sd.minFilter = filter;
-  sd.mipmapFilter = mips ? WGPUMipmapFilterMode_Linear : WGPUMipmapFilterMode_Nearest;
+  sd.mipmapFilter =
+      mips ? WGPUMipmapFilterMode_Linear : WGPUMipmapFilterMode_Nearest;
   sd.lodMinClamp = 0.0f;
   sd.lodMaxClamp = 32.0f;
   sd.compare = compare;
@@ -414,14 +619,18 @@ WGPUSampler Gpu::create_sampler(WGPUAddressMode mode, WGPUFilterMode filter, boo
   return wgpuDeviceCreateSampler(device, &sd);
 }
 
-bool Gpu::read_rgba8(const Texture& tex, std::vector<std::uint8_t>* rgba) {
+bool Gpu::read_rgba8(const Texture &tex, std::vector<std::uint8_t> *rgba) {
+  if (!poll(false))
+    return false;
   const std::uint32_t bpr = (tex.width * 4 + 255) & ~255u;
   const std::uint64_t size = static_cast<std::uint64_t>(bpr) * tex.height;
-  WGPUBufferDescriptor bd{};
-  bd.label = sv("readback");
-  bd.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
-  bd.size = size;
-  WGPUBuffer buf = wgpuDeviceCreateBuffer(device, &bd);
+  WGPUBuffer buf = nullptr;
+  try {
+    buf = create_buffer(WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead,
+                        size, nullptr, "readback");
+  } catch (const GpuUnavailable &) {
+    return false;
+  }
   WGPUCommandEncoderDescriptor ed{};
   WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
   WGPUTexelCopyTextureInfo src{};
@@ -435,31 +644,42 @@ bool Gpu::read_rgba8(const Texture& tex, std::vector<std::uint8_t>* rgba) {
   wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &extent);
   WGPUCommandBufferDescriptor cd{};
   WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
-  wgpuQueueSubmit(queue, 1, &cmd);
+  const bool submitted = submit(cmd, true);
   wgpuCommandBufferRelease(cmd);
   wgpuCommandEncoderRelease(enc);
-  struct MapState {
-    bool done{false};
-    bool ok{false};
-  } state;
-  WGPUBufferMapCallbackInfo mi{};
-  mi.mode = WGPUCallbackMode_AllowProcessEvents;
-  mi.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void*) {
-    auto* s = static_cast<MapState*>(u1);
-    s->ok = status == WGPUMapAsyncStatus_Success;
-    s->done = true;
-  };
-  mi.userdata1 = &state;
-  wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, mi);
-  while (!state.done) wgpuDevicePoll(device, 1U, nullptr);
-  if (!state.ok) {
+  if (!submitted) {
     wgpuBufferRelease(buf);
     return false;
   }
-  const auto* mapped = static_cast<const std::uint8_t*>(wgpuBufferGetConstMappedRange(buf, 0, size));
+  struct MapState {
+    std::atomic<bool> done{false};
+    std::atomic<bool> ok{false};
+  };
+  auto state = std::make_shared<MapState>();
+  WGPUBufferMapCallbackInfo mi{};
+  mi.mode = WGPUCallbackMode_AllowProcessEvents;
+  mi.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *u1,
+                   void *) {
+    auto *holder = static_cast<std::shared_ptr<MapState> *>(u1);
+    auto s = *holder;
+    delete holder;
+    s->ok = status == WGPUMapAsyncStatus_Success;
+    s->done = true;
+  };
+  mi.userdata1 = new std::shared_ptr<MapState>(state);
+  wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, mi);
+  while (!state->done && healthy())
+    poll(true);
+  if (!healthy() || !state->ok) {
+    wgpuBufferRelease(buf);
+    return false;
+  }
+  const auto *mapped = static_cast<const std::uint8_t *>(
+      wgpuBufferGetConstMappedRange(buf, 0, size));
   rgba->resize(static_cast<std::size_t>(tex.width) * tex.height * 4);
   for (std::uint32_t y = 0; y < tex.height; ++y) {
-    std::memcpy(rgba->data() + static_cast<std::size_t>(y) * tex.width * 4, mapped + static_cast<std::size_t>(y) * bpr,
+    std::memcpy(rgba->data() + static_cast<std::size_t>(y) * tex.width * 4,
+                mapped + static_cast<std::size_t>(y) * bpr,
                 static_cast<std::size_t>(tex.width) * 4);
   }
   wgpuBufferUnmap(buf);
@@ -467,14 +687,18 @@ bool Gpu::read_rgba8(const Texture& tex, std::vector<std::uint8_t>* rgba) {
   return true;
 }
 
-bool Gpu::read_depth32(const Texture& tex, std::vector<float>* depth) {
+bool Gpu::read_depth32(const Texture &tex, std::vector<float> *depth) {
+  if (!poll(false))
+    return false;
   const std::uint32_t bpr = (tex.width * 4 + 255) & ~255u;
   const std::uint64_t size = static_cast<std::uint64_t>(bpr) * tex.height;
-  WGPUBufferDescriptor bd{};
-  bd.label = sv("readback-depth");
-  bd.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
-  bd.size = size;
-  WGPUBuffer buf = wgpuDeviceCreateBuffer(device, &bd);
+  WGPUBuffer buf = nullptr;
+  try {
+    buf = create_buffer(WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead,
+                        size, nullptr, "readback-depth");
+  } catch (const GpuUnavailable &) {
+    return false;
+  }
   WGPUCommandEncoderDescriptor ed{};
   WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
   WGPUTexelCopyTextureInfo src{};
@@ -488,28 +712,43 @@ bool Gpu::read_depth32(const Texture& tex, std::vector<float>* depth) {
   wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &extent);
   WGPUCommandBufferDescriptor cd{};
   WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
-  wgpuQueueSubmit(queue, 1, &cmd);
+  const bool submitted = submit(cmd, true);
   wgpuCommandBufferRelease(cmd);
   wgpuCommandEncoderRelease(enc);
-  struct MapState { bool done{false}; bool ok{false}; } state;
-  WGPUBufferMapCallbackInfo mi{};
-  mi.mode = WGPUCallbackMode_AllowProcessEvents;
-  mi.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* u1, void*) {
-    auto* s = static_cast<MapState*>(u1);
-    s->ok = status == WGPUMapAsyncStatus_Success;
-    s->done = true;
-  };
-  mi.userdata1 = &state;
-  wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, mi);
-  while (!state.done) wgpuDevicePoll(device, 1U, nullptr);
-  if (!state.ok) {
+  if (!submitted) {
     wgpuBufferRelease(buf);
     return false;
   }
-  const auto* mapped = static_cast<const std::uint8_t*>(wgpuBufferGetConstMappedRange(buf, 0, size));
+  struct MapState {
+    std::atomic<bool> done{false};
+    std::atomic<bool> ok{false};
+  };
+  auto state = std::make_shared<MapState>();
+  WGPUBufferMapCallbackInfo mi{};
+  mi.mode = WGPUCallbackMode_AllowProcessEvents;
+  mi.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *u1,
+                   void *) {
+    auto *holder = static_cast<std::shared_ptr<MapState> *>(u1);
+    auto s = *holder;
+    delete holder;
+    s->ok = status == WGPUMapAsyncStatus_Success;
+    s->done = true;
+  };
+  mi.userdata1 = new std::shared_ptr<MapState>(state);
+  wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, mi);
+  while (!state->done && healthy())
+    poll(true);
+  if (!healthy() || !state->ok) {
+    wgpuBufferRelease(buf);
+    return false;
+  }
+  const auto *mapped = static_cast<const std::uint8_t *>(
+      wgpuBufferGetConstMappedRange(buf, 0, size));
   depth->resize(static_cast<std::size_t>(tex.width) * tex.height);
   for (std::uint32_t y = 0; y < tex.height; ++y) {
-    std::memcpy(depth->data() + static_cast<std::size_t>(y) * tex.width, mapped + static_cast<std::size_t>(y) * bpr, static_cast<std::size_t>(tex.width) * 4);
+    std::memcpy(depth->data() + static_cast<std::size_t>(y) * tex.width,
+                mapped + static_cast<std::size_t>(y) * bpr,
+                static_cast<std::size_t>(tex.width) * 4);
   }
   wgpuBufferUnmap(buf);
   wgpuBufferRelease(buf);
@@ -523,13 +762,16 @@ std::uint16_t float_to_half(float f) {
   std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xff) - 127 + 15;
   std::uint32_t mant = x & 0x7fffffu;
   if (exp <= 0) {
-    if (exp < -10) return static_cast<std::uint16_t>(sign);
+    if (exp < -10)
+      return static_cast<std::uint16_t>(sign);
     mant |= 0x800000u;
     const std::uint32_t shift = static_cast<std::uint32_t>(14 - exp);
     return static_cast<std::uint16_t>(sign | (mant >> shift));
   }
-  if (exp >= 31) return static_cast<std::uint16_t>(sign | 0x7c00u);
-  return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+  if (exp >= 31)
+    return static_cast<std::uint16_t>(sign | 0x7c00u);
+  return static_cast<std::uint16_t>(
+      sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
 }
 
-}  // namespace cb
+} // namespace cb

@@ -4,6 +4,22 @@ struct PostParams { a: vec4<f32>, b: vec4<f32> };
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var src2: texture_2d<f32>;
 @group(0) @binding(3) var samp: sampler;
+@group(0) @binding(4) var scene_depth: texture_depth_2d;
+// Unaccumulated HDR alpha preserves actual transparent-surface coverage;
+// those panes do not appear in the opaque depth prepass.
+@group(0) @binding(5) var scene_coverage: texture_2d<f32>;
+fn is_background(uv: vec2<f32>) -> bool {
+  let size = textureDimensions(scene_depth);
+  let pixel = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2<i32>(0), vec2<i32>(size) - vec2<i32>(1));
+  return textureLoad(scene_depth, pixel, 0) <= 1e-8 &&
+         textureLoad(scene_coverage, pixel, 0).a < .001;
+}
+
+// Reflection mip generation averages linear HDR radiance, without bloom,
+// display transforms, thresholding or exposure compensation.
+@fragment fn fs_reflection_mip(in: FSOut) -> @location(0) vec4<f32> {
+  return textureSample(src,samp,in.uv);
+}
 
 // ---- bloom downsample (13 taps, Jimenez) --------------------------------
 @fragment fn fs_down(in: FSOut) -> @location(0) vec4<f32> {
@@ -27,6 +43,9 @@ struct PostParams { a: vec4<f32>, b: vec4<f32> };
   col += (b + d + f + h) * 0.0625;
   col += (j + k + l + m) * 0.125;
   if (pp.a.z > 0.5) {
+    // The authored sky already contains the optical look of its stars.
+    // Exclude it from scene bloom instead of blooming that image a second time.
+    if (pp.b.w > .5 && is_background(uv)) { col = vec3<f32>(0.0); }
     // first level: threshold with a soft knee, and clamp fireflies
     let lum = max(max(col.r, col.g), col.b);
     let knee = pp.b.x * pp.b.y;
@@ -67,6 +86,9 @@ fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
 @fragment fn fs_tonemap(in: FSOut) -> @location(0) vec4<f32> {
   let hdr = textureSample(src, samp, in.uv).rgb;
   let bloom = textureSample(src2, samp, in.uv).rgb;
+  if (pp.b.w > .5 && is_background(in.uv)) {
+    return vec4<f32>(srgb_encode(clamp(hdr, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+  }
   var c = (hdr + bloom * pp.a.y) * pp.a.x;
   // gentle vignette
   let d = in.uv - vec2<f32>(0.5);

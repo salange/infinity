@@ -1,0 +1,27 @@
+# One physical assembly for matched engine/Blender material and construction review.
+# Metres, Y-up. Box dimensions are half-extents. Instance yaw is degrees.
+# camera position target vertical-FOV-degrees
+camera 14 7 19 0 3 -2 48
+# box material centre half-extents
+box ceramic_ivory 0 -0.2 -2 12 0.2 11
+# instance resource position yaw scaleXYZ
+instance ceramic_lattice_node -3 3.68 0 0 1 1 1
+instance planter_bench 4 0 2 0 1 1 1
+instance canopy_broadleaf 4 0.9 2 20 0.58 0.58 0.58
+instance fern_arching 2.5 0.91 2 15 1.2 1.2 1.2
+instance fern_arching 4.3 0.91 1.6 145 1 1 1
+instance phormium 5.3 0.91 2.6 55 0.9 0.9 0.9
+instance groundcover 3.5 0.91 2.5 35 1 1 1
+instance interior_lounge 0 0 -8 0 1 1 1
+instance facade_window_bay -1.8 0 -4.42 0 1 1 1
+instance facade_window_bay 1.8 0 -4.42 0 1 1 1
+instance glass_rail 6.5 0 -3.5 0 1 1 1
+instance glass_rail 6.5 0 0.5 90 1 1 1
+instance street_drain -0.4 0.025 5 0 1 1 1
+instance roof_irrigation 2 0.94 1 0 1 1 1
+instance bronze_light -3 4 1.02 0 1 1 1
+# light position radius linear RGB intensity
+light 0 2.7 -7 12 1 0.72 0.41 4
+# Explicit directional irradiance and display exposure for comparison.
+sun 0.89 0.047 -0.45 4.8 3.45 2.18
+exposure 0.86

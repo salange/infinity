@@ -93,6 +93,10 @@ target_include_directories(human_tech_renderer_memory_test PRIVATE src)
 target_link_libraries(human_tech_renderer_memory_test PRIVATE game::city)
 add_test(NAME human_tech_renderer_memory COMMAND human_tech_renderer_memory_test)
 
+add_executable(human_tech_renderer_mesh_pages_test tests/renderer_mesh_pages_test.cpp)
+target_include_directories(human_tech_renderer_mesh_pages_test PRIVATE src)
+add_test(NAME human_tech_renderer_mesh_pages COMMAND human_tech_renderer_mesh_pages_test)
+
 add_executable(human_tech_renderer_lights_test tests/renderer_lights_test.cpp)
 target_include_directories(human_tech_renderer_lights_test PRIVATE src)
 target_link_libraries(human_tech_renderer_lights_test PRIVATE game::city)
@@ -115,6 +119,9 @@ add_test(NAME human_tech_window_floor_filter COMMAND human_tech_window_floor_fil
 
 foreach(_scene_target human_tech_scene_test human_tech_route_test human_tech_roof_test)
   target_sources(${_scene_target} PRIVATE src/tower_floor_identity.cpp)
+endforeach()
+foreach(_diagrid_target human_tech_demo human_tech_scene_test human_tech_route_test human_tech_roof_test)
+  target_sources(${_diagrid_target} PRIVATE src/sculpted_diagrid.cpp)
 endforeach()
 add_executable(human_tech_tower_floor_identity_test tests/tower_floor_identity_test.cpp src/tower_floor_identity.cpp)
 target_include_directories(human_tech_tower_floor_identity_test PRIVATE src)

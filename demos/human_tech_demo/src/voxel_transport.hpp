@@ -186,6 +186,7 @@ struct VoxelTransport {
       ambiguous += (surface.normal & 0x80000000u) != 0;
     }
     Texture t;
+    try {
     t.width = nx;
     t.height = ny;
     t.layers = nz;
@@ -219,6 +220,12 @@ struct VoxelTransport {
         cell, occupied, ambiguous,
         double(packed.size() * sizeof(std::uint32_t)) / 1048576.);
     return t;
+    } catch (...) {
+      // Texture is a plain handle aggregate; release it if allocation, packing
+      // or upload throws before ownership is returned to the renderer.
+      t.release();
+      throw;
+    }
   }
   Texture illuminate(Gpu &gpu, const Environment &env, float night,
                      const std::vector<PointLight> &lights,
@@ -364,6 +371,7 @@ struct VoxelTransport {
           data[i * 4 + 3] = 1.f;
         }
     Texture t;
+    try {
     std::printf("  point visibility: %llu/%llu blocked injection segments, "
                 "%llu partially outside known volume; enabled=%d\n",
                 static_cast<unsigned long long>(point_blocked),
@@ -447,6 +455,12 @@ struct VoxelTransport {
             .count(),
         double(uploaded) / 1048576.0);
     return t;
+    } catch (...) {
+      // Texture is a plain handle aggregate; release it if allocation, packing
+      // or upload throws before ownership is returned to the renderer.
+      t.release();
+      throw;
+    }
   }
 };
 } // namespace cb

@@ -39,6 +39,8 @@ struct RenderSettings {
                      // 20 room pixels x,y /32 and vertical-floor detail
   float exposure_bias{0.0f}; // EV
   std::uint32_t shadow_size{2048};
+  // Diagnostic cap; zero selects the adapter's actual buffer limit.
+  std::uint64_t mesh_page_bytes{0};
   float jitter_x{0.0f},
       jitter_y{0.0f}; // projection offset in pixels (analysis / TAA)
   // Performance options (player-facing later):
@@ -57,10 +59,11 @@ public:
             std::uint32_t render_height = 0);
   void shutdown();
 
-  // Synchronously consumes mesh vertices/indices for upload and transport.
-  // On success their CPU storage may be released; no Scene references remain.
-  // The material texture arrays must remain alive while rendering this scene.
-  void set_scene(const Scene &scene, const MaterialArrays &arrays);
+  // Consumes CPU mesh vertices/indices after exact transport construction and
+  // GPU upload. Releases each mesh's storage after its last consumer; materials,
+  // transforms, bounds and authored metadata remain intact. No Scene references
+  // remain. The texture arrays must stay alive while rendering this scene.
+  void set_scene(Scene &scene, const MaterialArrays &arrays);
   // Which environment the frame uses (day or night); night also enables
   // point lights and lit interiors.
   void set_environment(const Environment *env, bool night);

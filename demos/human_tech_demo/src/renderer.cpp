@@ -2,8 +2,11 @@
 #include "renderer_batch.hpp"
 #include "renderer_lights.hpp"
 #include "renderer_memory.hpp"
+#include "renderer_mesh_pages.hpp"
+#include "scene_storage.hpp"
 #include <functional>
 #include <memory>
+#include <type_traits>
 
 #include <stb_image_write.h>
 
@@ -264,15 +267,15 @@ WGPUBindGroup make_bg(WGPUDevice device, WGPUBindGroupLayout layout,
 }
 
 struct MeshBuffers {
-  WGPUBuffer vertices{nullptr};
+  std::vector<WGPUBuffer> vertices;
+  std::vector<mesh_pages::Page> pages;
   WGPUBuffer indices{nullptr};
   std::uint32_t index_count{0};
   void release() {
-    if (vertices != nullptr)
-      wgpuBufferRelease(vertices);
+    for(auto buffer:vertices)if(buffer)wgpuBufferRelease(buffer);
     if (indices != nullptr)
       wgpuBufferRelease(indices);
-    vertices = indices = nullptr;
+    vertices.clear();pages.clear();indices = nullptr;
     index_count = 0;
   }
 };
@@ -432,6 +435,7 @@ struct Renderer::Impl {
   std::uint32_t cull_capacity{0};
   WGPUBindGroup cull_bg{nullptr};
   std::vector<DrawRange> cand; // unmerged candidates for the main pass
+  std::vector<bool> cand_direct; // original large-range Hi-Z bypass, before paging
   // CPU-built indirect args per pass (prepass, cascades): one multi-draw call
   // instead of thousands
   WGPUBuffer pass_args[1 + kCascades]{nullptr, nullptr, nullptr, nullptr};
@@ -1069,120 +1073,64 @@ void Renderer::shutdown() {
   impl_ = nullptr;
 }
 
-void Renderer::set_scene(const Scene &scene, const MaterialArrays &arrays) {
+void Renderer::set_scene(Scene &scene, const MaterialArrays &arrays) {
   Impl &I = *impl_;
   I.arrays = &arrays;
+  if(!gpu_->flush_uploads())throw GpuUnavailable(gpu_->failure_message());
+  // Bind groups retain buffers/textures. Drop the old scene's references
+  // before releasing their owning handles or allocating replacement fields.
+  for(auto group:{&I.frame_bg,&I.reflection_frame_bg,&I.puddle_frame_bg,
+                  &I.pond_frame_bg,&I.glass_frame_bg,&I.reflected_glass_frame_bg[0],
+                  &I.reflected_glass_frame_bg[1],&I.reflected_glass_frame_bg[2],
+                  &I.cascade_bg,&I.scene_tex_bg,&I.reflection_tex_bg}) {
+    if(*group)wgpuBindGroupRelease(*group);
+    *group=nullptr;
+  }
+  for(auto &fields:I.fine_radiance)for(auto &texture:fields)texture.release();
+  for(auto &fields:I.fine_environment)for(auto &environment:fields)environment=nullptr;
+  I.point_geometry.release();I.fine_point_geometry.release();
+  I.point_geometry_fine_index=-1;
   I.opaque.release();
   I.foliage.release();
-  auto upload = [&](const Mesh &m, MeshBuffers *out, const char *label) {
-    if (m.indices.empty())
-      return;
-    const auto vertex_bytes =
-        memory::bytes(m.vertices.size(), sizeof(PackedVertex));
-    const auto index_bytes =
-        memory::bytes(m.indices.size(), sizeof(std::uint32_t));
-    try {
-      if (m.vertices.empty())
-        throw std::length_error("indexed mesh has no vertices");
-      if (m.indices.size() > std::numeric_limits<std::uint32_t>::max())
-        throw std::length_error("mesh index count exceeds uint32");
-      (void)memory::buffer_size(vertex_bytes, gpu_->max_buffer_size);
-      (void)memory::buffer_size(index_bytes, gpu_->max_buffer_size);
-    } catch (const std::length_error &error) {
-      gpu_->fail(std::string("mesh '") + label + "': " + error.what() +
-                 " (vertex bytes " + std::to_string(vertex_bytes) +
-                 ", index bytes " + std::to_string(index_bytes) + ")");
-    }
-    out->vertices =
-        gpu_->create_buffer(WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst,
-                            vertex_bytes, nullptr, label);
-    std::vector<PackedVertex> packed(static_cast<std::size_t>(
-        memory::chunk_records(m.vertices.size(), sizeof(PackedVertex))));
-    for (std::size_t first = 0; first < m.vertices.size();) {
-      const auto count = std::min(packed.size(), m.vertices.size() - first);
-      for (std::size_t i = 0; i < count; ++i)
-        packed[i] = pack_vertex(m.vertices[first + i]);
-      gpu_->upload_buffer(out->vertices, first * sizeof(PackedVertex),
-                          packed.data(), count * sizeof(PackedVertex));
-      first += count;
-    }
-    out->indices = gpu_->create_buffer(WGPUBufferUsage_Index, index_bytes,
-                                       m.indices.data(), label);
-    out->index_count = static_cast<std::uint32_t>(m.indices.size());
-    std::printf(
-        "  mesh upload: %s, vertices %llu bytes, indices %llu bytes "
-        "(staging <= %llu MiB)\n",
-        label, static_cast<unsigned long long>(vertex_bytes),
-        static_cast<unsigned long long>(index_bytes),
-        static_cast<unsigned long long>(memory::upload_bytes / 1048576));
-  };
-  upload(scene.opaque, &I.opaque, "opaque");
-  upload(scene.foliage, &I.foliage, "foliage");
+  I.have_scene = false;
   for (auto &r : I.resources)
     r.mesh.release();
   I.resources.clear();
-  // Validate all transform/range counts before converting them to GPU uint32.
-  const auto capacity =
-      memory::instance_capacity(scene.asset_instances.size() + 1ull);
-  std::vector<GpuInstance> instances;
-  instances.reserve(scene.asset_instances.size() + 1);
-  instances.push_back({Mat4::identity(),
-                       {1, 0, 0, 0},
-                       {0, 1, 0, 0},
-                       {0, 0, 1, 0},
-                       {1, 1, 1, 1}});
-  for (std::uint32_t ri = 0; ri < scene.asset_library.resources.size(); ++ri) {
-    auto &resource = I.resources.emplace_back();
-    resource.first = static_cast<std::uint32_t>(instances.size());
-    for (const auto &inst : scene.asset_instances)
-      if (inst.resource == ri) {
-        const float c = std::cos(inst.yaw), s = std::sin(inst.yaw);
-        GpuInstance g{};
-        g.model = Mat4::identity();
-        g.model.at(0, 0) = c * inst.scale.x;
-        g.model.at(2, 0) = -s * inst.scale.x;
-        g.model.at(1, 1) = inst.scale.y;
-        g.model.at(0, 2) = s * inst.scale.z;
-        g.model.at(2, 2) = c * inst.scale.z;
-        g.model.at(0, 3) = inst.translation.x;
-        g.model.at(1, 3) = inst.translation.y;
-        g.model.at(2, 3) = inst.translation.z;
-        g.normal0 = {c / inst.scale.x, 0, -s / inst.scale.x, 0};
-        g.normal1 = {0, 1 / inst.scale.y, 0, 0};
-        g.normal2 = {s / inst.scale.z, 0, c / inst.scale.z, 0};
-        g.tint = Vec4{inst.tint, 1};
-        instances.push_back(g);
-      }
-    resource.count =
-        static_cast<std::uint32_t>(instances.size()) - resource.first;
-    if (resource.count) {
-      const auto &mesh = scene.asset_library.resources[ri].mesh;
-      upload(mesh, &resource.mesh,
-             scene.asset_library.resources[ri].name.c_str());
-      Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
-      for (const auto &v : mesh.vertices) {
-        lo = vmin(lo, v.position);
-        hi = vmax(hi, v.position);
-        const bool glass = (scene.materials.at(v.material).flags & 128u) != 0;
-        resource.has_glass |= glass;
-        resource.has_opaque |= !glass;
-      }
-      resource.centre = (lo + hi) * .5f;
-      resource.radius = length(hi - lo) * .5f;
-    }
-  }
-  if (I.instance_buf)
-    wgpuBufferRelease(I.instance_buf);
-  I.instance_buf = nullptr;
-  I.all_instances = std::move(instances);
-  I.instance_capacity = capacity;
-  I.instance_buf =
-      gpu_->create_buffer(WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst,
-                          I.instance_capacity * sizeof(GpuInstance), nullptr,
-                          "visible-mesh-instances");
   if (I.cascade_bg)
     wgpuBindGroupRelease(I.cascade_bg);
   I.cascade_bg = nullptr;
+  if (I.instance_buf)
+    wgpuBufferRelease(I.instance_buf);
+  I.instance_buf = nullptr;
+  std::vector<GpuInstance>().swap(I.all_instances);
+  for(auto buffer:{&I.material_buf,&I.light_buf}) {
+    if(*buffer)wgpuBufferRelease(*buffer);
+    *buffer=nullptr;
+  }
+  for(auto &buffer:I.light_tiles) {
+    if(buffer)wgpuBufferRelease(buffer);
+    buffer=nullptr;
+  }
+  std::uint64_t source_used=0,source_capacity=0;
+  auto account=[&](const Mesh& mesh,const char* label) {
+    // Validate before voxel traversal now that CPU consumers precede upload.
+    // Preserve the previous explicit error instead of dereferencing bad indices.
+    try {
+      mesh_pages::validate(mesh.indices,mesh.vertices.size());
+      (void)memory::buffer_size(memory::bytes(mesh.indices.size(),4),gpu_->max_buffer_size);
+    }catch(const std::exception& error) {
+      gpu_->fail(std::string("mesh '")+label+"' preflight: "+error.what());
+    }
+    source_used+=std::uint64_t(mesh.vertices.size())*sizeof(Vertex)+std::uint64_t(mesh.indices.size())*4;
+    source_capacity+=std::uint64_t(mesh.vertices.capacity())*sizeof(Vertex)+std::uint64_t(mesh.indices.capacity())*4;
+  };
+  account(scene.opaque,"opaque");account(scene.foliage,"foliage");
+  for(const auto& resource:scene.asset_library.resources)account(resource.mesh,resource.name.c_str());
+  std::printf("  CPU geometry before transport: %.1f MiB used, %.1f MiB capacity; scene GPU meshes not allocated\n",
+              double(source_used)/1048576.,double(source_capacity)/1048576.);
+  std::fflush(stdout);
+  // Transport sees precisely the original source geometry, in the original
+  // traversal order. Finish every CPU geometry consumer before GPU allocation.
   for (auto &r : I.radiance)
     r.release();
   I.radiance_environment[0] = I.radiance_environment[1] = nullptr;
@@ -1190,6 +1138,10 @@ void Renderer::set_scene(const Scene &scene, const MaterialArrays &arrays) {
       scene.city_radius > 0 && scene.city_radius <= 50;
   I.isolated_assembly = bounded_assembly;
   I.fine_count = bounded_assembly ? 1 : 4;
+  for(int f=I.fine_count;f<4;++f) {
+    std::vector<VoxelTransport::Cell>().swap(I.fine_transport[f].cells);
+    std::vector<MaterialDesc>().swap(I.fine_transport[f].materials);
+  }
   Vec3 assembly_centre{};
   float assembly_cell = .125f;
   if (bounded_assembly) {
@@ -1220,7 +1172,9 @@ void Renderer::set_scene(const Scene &scene, const MaterialArrays &arrays) {
   I.transport.cell = bounded_assembly ? .5f : 8.f;
   I.transport.origin = bounded_assembly ? assembly_centre - Vec3{48, 32, 48}
                                         : Vec3{-768, -32, -768};
+  std::printf("  startup stage: coarse transport begin\n");std::fflush(stdout);
   I.transport.build(scene);
+  std::printf("  startup stage: coarse transport complete\n");std::fflush(stdout);
   I.point_geometry.release();
   I.fine_point_geometry.release();
   I.point_geometry_fine_index = -1;
@@ -1239,9 +1193,11 @@ void Renderer::set_scene(const Scene &scene, const MaterialArrays &arrays) {
     field.origin = bounded_assembly
                        ? assembly_centre - Vec3{128, 128, 128} * assembly_cell
                        : position - Vec3{48, 32, 48};
-    if (f < I.fine_count)
+    if (f < I.fine_count) {
+      std::printf("  startup stage: fine transport %d (%s) begin\n",f,local_shots[f]);std::fflush(stdout);
       field.build(scene);
-    else
+      std::printf("  startup stage: fine transport %d complete\n",f);std::fflush(stdout);
+    } else
       field.cells.clear();
     for (int n = 0; n < 2; ++n) {
       I.fine_radiance[f][n].release();
@@ -1249,10 +1205,6 @@ void Renderer::set_scene(const Scene &scene, const MaterialArrays &arrays) {
     }
   }
   I.fine_index = -1;
-  std::printf("  resources: %zu unique meshes, %zu GPU instances (%.1f KiB "
-              "transforms)\n",
-              I.resources.size(), I.all_instances.size() - 1,
-              double(I.all_instances.size() * sizeof(GpuInstance)) / 1024);
   I.draws = scene.draws;
   I.has_planar_pond = std::any_of(
       scene.materials.begin(), scene.materials.end(),
@@ -1290,6 +1242,142 @@ void Renderer::set_scene(const Scene &scene, const MaterialArrays &arrays) {
   }
   triangles_ = static_cast<std::uint32_t>(
       (scene.opaque.indices.size() + scene.foliage.indices.size()) / 3);
+
+  std::printf("  CPU transport and geometry metadata complete; uploading and consuming meshes individually\n");
+  std::fflush(stdout);
+  auto release_consumed=[&](Mesh& mesh,const char* label) {
+    const auto bytes=release_mesh_storage(mesh);
+    if(bytes)std::printf("  consumed CPU mesh: %s released %.1f MiB after last geometry read\n",label,double(bytes)/1048576.);
+    std::fflush(stdout);
+  };
+  auto upload = [&](Mesh &m, MeshBuffers *out, const char *label) {
+    if (m.indices.empty()) {
+      release_consumed(m,label);
+      return;
+    }
+    const auto vertex_bytes = memory::bytes(m.vertices.size(), sizeof(PackedVertex));
+    const auto index_bytes = memory::bytes(m.indices.size(), sizeof(std::uint32_t));
+    const auto cap = settings_.mesh_page_bytes
+                         ? std::min(settings_.mesh_page_bytes, gpu_->max_buffer_size)
+                         : gpu_->max_buffer_size;
+    try {
+      // Global index offsets remain unchanged. Only vertices are paged; retain
+      // explicit preflight if a future scene also exceeds the index limit.
+      (void)memory::buffer_size(index_bytes, gpu_->max_buffer_size);
+      const auto page_bytes = vertex_bytes <= cap ? cap : std::min<std::uint64_t>(cap, 256ull*1024*1024);
+      out->pages = mesh_pages::partition(m.indices, m.vertices.size(), page_bytes / sizeof(PackedVertex));
+    } catch (const std::exception &error) {
+      gpu_->fail(std::string("mesh '") + label + "': " + error.what() +
+                 " (vertex bytes " + std::to_string(vertex_bytes) +
+                 ", index bytes " + std::to_string(index_bytes) + ")");
+    }
+    out->vertices.reserve(out->pages.size());
+    out->indices = gpu_->create_buffer(WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst,
+                                       index_bytes, nullptr, label);
+    std::vector<PackedVertex> packed;
+    std::vector<std::uint32_t> rebased;
+    std::uint64_t uploaded_vertices = 0;
+    for (const auto &page : out->pages) {
+      const auto bytes = memory::bytes(page.vertex_count, sizeof(PackedVertex));
+      out->vertices.push_back(gpu_->create_buffer(
+          WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst, bytes, nullptr, label));
+      packed.resize(static_cast<std::size_t>(memory::chunk_records(page.vertex_count, sizeof(PackedVertex))));
+      for(std::uint32_t first=0;first<page.vertex_count;) {
+        const auto count=std::min<std::uint32_t>(packed.size(),page.vertex_count-first);
+        for(std::uint32_t i=0;i<count;++i)packed[i]=pack_vertex(m.vertices[page.source(first+i)]);
+        gpu_->upload_buffer(out->vertices.back(),std::uint64_t(first)*sizeof(PackedVertex),
+                            packed.data(),std::uint64_t(count)*sizeof(PackedVertex));
+        first+=count;
+      }
+      rebased.resize(static_cast<std::size_t>(memory::chunk_records(page.count,sizeof(std::uint32_t))));
+      for(std::uint32_t offset=0;offset<page.count;) {
+        const auto count=std::min<std::uint32_t>(rebased.size(),page.count-offset);
+        for(std::uint32_t i=0;i<count;++i) {
+          const auto global=page.first+offset+i;
+          rebased[i]=page.index(global,m.indices[global]);
+        }
+        gpu_->upload_buffer(out->indices,std::uint64_t(page.first+offset)*4,
+                            rebased.data(),std::uint64_t(count)*4);
+        offset+=count;
+      }
+      uploaded_vertices+=bytes;
+    }
+    out->index_count = static_cast<std::uint32_t>(m.indices.size());
+    std::printf("  mesh upload: %s, %zu vertex pages, source vertices %llu bytes, "
+                "uploaded vertices %llu bytes, indices %llu bytes (staging <= %llu MiB per array)\n",
+                label,out->pages.size(),static_cast<unsigned long long>(vertex_bytes),
+                static_cast<unsigned long long>(uploaded_vertices),
+                static_cast<unsigned long long>(index_bytes),
+                static_cast<unsigned long long>(memory::upload_bytes/1048576));
+    release_consumed(m,label);
+  };
+  upload(scene.opaque, &I.opaque, "opaque");
+  upload(scene.foliage, &I.foliage, "foliage");
+
+  // Validate all transform/range counts before converting them to GPU uint32.
+  const auto capacity =
+      memory::instance_capacity(scene.asset_instances.size() + 1ull);
+  std::vector<GpuInstance> instances;
+  instances.reserve(scene.asset_instances.size() + 1);
+  instances.push_back({Mat4::identity(),
+                       {1, 0, 0, 0},
+                       {0, 1, 0, 0},
+                       {0, 0, 1, 0},
+                       {1, 1, 1, 1}});
+  for (std::uint32_t ri = 0; ri < scene.asset_library.resources.size(); ++ri) {
+    auto &resource = I.resources.emplace_back();
+    resource.first = static_cast<std::uint32_t>(instances.size());
+    for (const auto &inst : scene.asset_instances)
+      if (inst.resource == ri) {
+        const float c = std::cos(inst.yaw), s = std::sin(inst.yaw);
+        GpuInstance g{};
+        g.model = Mat4::identity();
+        g.model.at(0, 0) = c * inst.scale.x;
+        g.model.at(2, 0) = -s * inst.scale.x;
+        g.model.at(1, 1) = inst.scale.y;
+        g.model.at(0, 2) = s * inst.scale.z;
+        g.model.at(2, 2) = c * inst.scale.z;
+        g.model.at(0, 3) = inst.translation.x;
+        g.model.at(1, 3) = inst.translation.y;
+        g.model.at(2, 3) = inst.translation.z;
+        g.normal0 = {c / inst.scale.x, 0, -s / inst.scale.x, 0};
+        g.normal1 = {0, 1 / inst.scale.y, 0, 0};
+        g.normal2 = {s / inst.scale.z, 0, c / inst.scale.z, 0};
+        g.tint = Vec4{inst.tint, 1};
+        instances.push_back(g);
+      }
+    resource.count =
+        static_cast<std::uint32_t>(instances.size()) - resource.first;
+    if (resource.count) {
+      auto &mesh = scene.asset_library.resources[ri].mesh;
+      Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+      for (const auto &v : mesh.vertices) {
+        lo = vmin(lo, v.position);
+        hi = vmax(hi, v.position);
+        const bool glass = (scene.materials.at(v.material).flags & 128u) != 0;
+        resource.has_glass |= glass;
+        resource.has_opaque |= !glass;
+      }
+      resource.centre = (lo + hi) * .5f;
+      resource.radius = length(hi - lo) * .5f;
+      upload(mesh,&resource.mesh,scene.asset_library.resources[ri].name.c_str());
+    } else {
+      release_consumed(scene.asset_library.resources[ri].mesh,
+                       scene.asset_library.resources[ri].name.c_str());
+    }
+  }
+
+  I.all_instances = std::move(instances);
+  I.instance_capacity = capacity;
+  I.instance_buf =
+      gpu_->create_buffer(WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst,
+                          I.instance_capacity * sizeof(GpuInstance), nullptr,
+                          "visible-mesh-instances");
+
+  std::printf("  resources: %zu unique meshes, %zu GPU instances (%.1f KiB "
+              "transforms)\n",
+              I.resources.size(), I.all_instances.size() - 1,
+              double(I.all_instances.size() * sizeof(GpuInstance)) / 1024);
   for (const auto &r : I.resources)
     triangles_ += r.mesh.index_count / 3;
   // materials
@@ -2064,6 +2152,26 @@ void Renderer::render(const Camera &camera, float time_s,
       merge(I.sel_main);
       for (std::uint32_t c = 0; c < kCascades; ++c)
         merge(I.sel_cascade[c]);
+      // Preserve each original culling sphere and LOD decision, while making
+      // every indirect command bindable to exactly one vertex page.
+      auto split_selection = [&](auto &selection) {
+        std::decay_t<decltype(selection)> split;
+        for(const auto &[first,count]:selection)
+          mesh_pages::spans(I.opaque.pages,first,count,[&](auto,auto begin,auto n) {
+            split.emplace_back(begin,n);
+          });
+        selection.swap(split);
+      };
+      split_selection(I.sel_main);
+      for(auto &selection:I.sel_cascade)split_selection(selection);
+      std::vector<DrawRange> candidates;
+      I.cand_direct.clear();
+      for(const auto &range:I.cand)
+        mesh_pages::candidate_spans(I.opaque.pages,range.first,range.count,RenderBatch::triangle_budget,[&](auto,auto first,auto count,bool direct) {
+          auto part=range;part.first=first;part.count=count;candidates.push_back(part);
+          I.cand_direct.push_back(direct);
+        });
+      I.cand.swap(candidates);
     }
 
     // Compact only transforms per visibility pass; every mesh stays resident
@@ -2117,12 +2225,26 @@ void Renderer::render(const Camera &camera, float time_s,
     WGPUCommandEncoderDescriptor ed{};
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev, &ed);
     RenderBatch batch(*gpu_, enc, I.frame_index == 0);
+    auto bind_mesh_page = [&](WGPURenderPassEncoder &pass,const MeshBuffers &m,std::uint32_t first) {
+      const auto page=mesh_pages::page_at(m.pages,first);
+      batch.vertex(pass,0,m.vertices[page],0,WGPU_WHOLE_SIZE);
+      batch.index(pass,m.indices,WGPUIndexFormat_Uint32,0,WGPU_WHOLE_SIZE);
+    };
+    auto draw_mesh_range = [&](WGPURenderPassEncoder &pass,const MeshBuffers &m,
+                               std::uint32_t first,std::uint32_t count,
+                               std::uint32_t instances,std::uint32_t first_instance) {
+      if(!count||!instances)return;
+      // Keep instance-major primitive order when a reusable mesh spans pages.
+      const auto copies=m.pages.size()>1?instances:1u;
+      for(std::uint32_t i=0;i<copies;++i)
+        mesh_pages::spans(m.pages,first,count,[&](auto page,auto begin,auto n) {
+          batch.vertex(pass,0,m.vertices[page],0,WGPU_WHOLE_SIZE);
+          batch.index(pass,m.indices,WGPUIndexFormat_Uint32,0,WGPU_WHOLE_SIZE);
+          batch.draw(pass,n,copies==1?instances:1u,begin,0,first_instance+i);
+        });
+    };
     auto draw_mesh = [&](WGPURenderPassEncoder &pass, const MeshBuffers &m) {
-      if (m.index_count == 0)
-        return;
-      batch.vertex(pass, 0, m.vertices, 0, WGPU_WHOLE_SIZE);
-      batch.index(pass, m.indices, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
-      batch.draw(pass, m.index_count, 1, 0, 0, 0);
+      draw_mesh_range(pass,m,0,m.index_count,1,0);
     };
     auto draw_resources = [&](WGPURenderPassEncoder &pass, int selection = 0,
                               bool glass_pass = false) {
@@ -2134,11 +2256,7 @@ void Renderer::render(const Camera &camera, float time_s,
         const auto &selected = r.visible[selection];
         if (!selected.count || !r.mesh.index_count)
           continue;
-        batch.vertex(pass, 0, r.mesh.vertices, 0, WGPU_WHOLE_SIZE);
-        batch.index(pass, r.mesh.indices, WGPUIndexFormat_Uint32, 0,
-                    WGPU_WHOLE_SIZE);
-        batch.draw(pass, r.mesh.index_count, selected.count, 0, 0,
-                   selected.first);
+        draw_mesh_range(pass,r.mesh,0,r.mesh.index_count,selected.count,selected.first);
       }
     };
     // Selections are drawn through CPU-built indirect args and one multi-draw
@@ -2171,10 +2289,8 @@ void Renderer::render(const Camera &camera, float time_s,
           }
           gpu_->write_buffer(I.pass_args[slot], 0, args.data(),
                              args.size() * 4);
-          batch.vertex(pass, 0, I.opaque.vertices, 0, WGPU_WHOLE_SIZE);
-          batch.index(pass, I.opaque.indices, WGPUIndexFormat_Uint32, 0,
-                      WGPU_WHOLE_SIZE);
           for (std::uint32_t i = 0; i < n; ++i) {
+            bind_mesh_page(pass,I.opaque,sel[i].first);
             if (sel[i].second / 3 > RenderBatch::triangle_budget)
               batch.draw(pass, sel[i].second, 1, sel[i].first, 0, 0);
             else
@@ -2255,12 +2371,9 @@ void Renderer::render(const Camera &camera, float time_s,
         // fronts.
         batch.pipeline(pass, I.p_foliage1);
         if (I.opaque.index_count) {
-          batch.vertex(pass, 0, I.opaque.vertices, 0, WGPU_WHOLE_SIZE);
-          batch.index(pass, I.opaque.indices, WGPUIndexFormat_Uint32, 0,
-                      WGPU_WHOLE_SIZE);
           for (const auto &d : I.draws)
             if (d.lod_group < 0 || d.lod_level == 0)
-              batch.draw(pass, d.count, 1, d.first, 0, 0);
+              draw_mesh_range(pass,I.opaque,d.first,d.count,1,0);
         }
         draw_resources(pass, 4 + plane);
         draw_mesh(pass, I.foliage);
@@ -2293,11 +2406,8 @@ void Renderer::render(const Camera &camera, float time_s,
         batch.group(glass, 1, I.reflection_tex_bg, 0, nullptr);
         batch.pipeline(glass, I.p_glass1);
         if (!I.reflected_glass_draws.empty()) {
-          batch.vertex(glass, 0, I.opaque.vertices, 0, WGPU_WHOLE_SIZE);
-          batch.index(glass, I.opaque.indices, WGPUIndexFormat_Uint32, 0,
-                      WGPU_WHOLE_SIZE);
           for (const auto &[first, count] : I.reflected_glass_draws)
-            batch.draw(glass, count, 1, first, 0, 0);
+            draw_mesh_range(glass,I.opaque,first,count,1,0);
         }
         draw_resources(glass, 4 + plane, true);
         batch.end(glass);
@@ -2524,12 +2634,10 @@ void Renderer::render(const Camera &camera, float time_s,
       batch.group(pass, 1, I.scene_tex_bg, 0, nullptr);
       batch.pipeline(pass, msaa ? I.p_main : I.p_main1);
       if (occlusion && !I.cand.empty() && I.opaque.index_count > 0) {
-        batch.vertex(pass, 0, I.opaque.vertices, 0, WGPU_WHOLE_SIZE);
-        batch.index(pass, I.opaque.indices, WGPUIndexFormat_Uint32, 0,
-                    WGPU_WHOLE_SIZE);
         const std::uint32_t n = static_cast<std::uint32_t>(I.cand.size());
         for (std::uint32_t i = 0; i < n; ++i) {
-          if (I.cand[i].count / 3 > RenderBatch::triangle_budget)
+          bind_mesh_page(pass,I.opaque,I.cand[i].first);
+          if (I.cand_direct[i])
             batch.draw(pass, I.cand[i].count, 1, I.cand[i].first, 0, 0);
           else
             batch.indirect(pass, I.cull_args, i * 20ull, I.cand[i].count / 3);

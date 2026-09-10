@@ -120,7 +120,15 @@ int main() {
       expected += mesh->vertices.capacity() * sizeof(cb::Vertex) +
                   mesh->indices.capacity() * sizeof(std::uint32_t);
     }
-    require(cb::release_scene_mesh_storage(scene) == expected,
+    const auto opaque_bytes=std::uint64_t(scene.opaque.vertices.capacity())*sizeof(cb::Vertex)+
+                            std::uint64_t(scene.opaque.indices.capacity())*sizeof(std::uint32_t);
+    require(cb::release_mesh_storage(scene.opaque)==opaque_bytes &&
+                scene.opaque.vertices.capacity()==0 && scene.opaque.indices.capacity()==0 &&
+                !scene.foliage.vertices.empty() && !scene.foliage.indices.empty() &&
+                !scene.asset_library.resources[0].mesh.vertices.empty() &&
+                !scene.asset_library.resources[0].mesh.indices.empty(),
+            "per-mesh consumption released a resource before its own upload");
+    require(cb::release_scene_mesh_storage(scene) == expected-opaque_bytes,
             "CPU mesh release byte accounting differs from freed capacity");
     for (const auto *mesh : {&scene.opaque, &scene.foliage,
                              &scene.asset_library.resources[0].mesh})

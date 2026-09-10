@@ -33,7 +33,7 @@
 #include "renderer.hpp"
 #include "renderer_proof.hpp"
 #include "scene.hpp"
-#include "scene_storage.hpp"
+#include "sculpted_diagrid.hpp"
 #include "textures.hpp"
 
 namespace {
@@ -60,6 +60,7 @@ struct Args {
   int debug{0};
   float ev{0.0f};
   std::uint32_t tex_size{1024};
+  std::uint32_t mesh_page_mib{0};
   bool vsync{true};
   int bench{0};
   int stress{0};
@@ -172,6 +173,16 @@ Args parse(int argc, char **argv) {
       a.ev = static_cast<float>(std::atof(next("--ev")));
     else if (!std::strcmp(argv[i], "--tex-size"))
       a.tex_size = static_cast<std::uint32_t>(std::atoi(next("--tex-size")));
+    else if (!std::strcmp(argv[i], "--mesh-page-mib")) {
+      const char *value = next("--mesh-page-mib");
+      char *end = nullptr;
+      const unsigned long parsed = std::strtoul(value, &end, 10);
+      if (*value < '0' || *value > '9' || *end != '\0' || parsed < 1 || parsed > 4096) {
+        std::fprintf(stderr, "--mesh-page-mib requires an integer from 1 to 4096\n");
+        std::exit(2);
+      }
+      a.mesh_page_mib = static_cast<std::uint32_t>(parsed);
+    }
     else if (!std::strcmp(argv[i], "--no-vsync"))
       a.vsync = false;
     else if (!std::strcmp(argv[i], "--no-ssao"))
@@ -257,6 +268,7 @@ Args parse(int argc, char **argv) {
           "          [--no-bloom] (disable highlight scattering for transport controls)\n"
           "          [--cam x,y,z --target x,y,z --fov degrees] [--msaa 1|4] "
           "[--debug 0-20] [--ev bias]\n"
+          "          [--mesh-page-mib N] (bounded upload diagnostic; default adapter limit)\n"
           "          [--view final|clay|silhouette|neutral] [--kit "
           "file|--procedural-only]\n"
           "          [--capture-initial first.png] [--timings output.json] "
@@ -473,6 +485,7 @@ int main(int argc, char **argv) {
       args.asset.starts_with("reflection-proof-market-stone-");
   const bool market_blade_proof =
       args.asset.starts_with("reflection-proof-market-blade-");
+  const bool diagrid_sample = args.asset.starts_with("diagrid-sample-");
   if (environment_proof) {
     args.shot = cb::kEnvironmentProofShot;
     args.night = false;
@@ -482,7 +495,13 @@ int main(int argc, char **argv) {
     args.night = false;
   }
   try {
-    if (market_blade_proof)
+    if (diagrid_sample) {
+      std::string view = args.asset.substr(std::string("diagrid-sample-").size());
+      const bool shallow = view.ends_with("-shallow");
+      if (shallow)
+        view.resize(view.size() - std::string("-shallow").size());
+      scene = cb::make_sculpted_diagrid_sample(view, shallow);
+    } else if (market_blade_proof)
       scene = cb::generate_market_blade_finish_proof(args.asset);
     else if (market_stone_proof)
       scene = cb::generate_market_stone_finish_proof(args.asset, reviewed_material_maps);
@@ -507,7 +526,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   std::printf("  content tier: %s; %zu reusable resources, %zu instances\n",
-              renderer_proof         ? "isolated renderer proof"
+              diagrid_sample         ? "isolated production facade sample"
+              : renderer_proof       ? "isolated renderer proof"
               : sp.asset_kit.empty() ? "procedural preview"
                                      : "authored production kit",
               scene.asset_library.resources.size(),
@@ -805,6 +825,7 @@ int main(int argc, char **argv) {
   // ---------------------------------------------------------------------
   cb::RenderSettings settings;
   settings.msaa = args.msaa;
+  settings.mesh_page_bytes = std::uint64_t(args.mesh_page_mib) * 1024 * 1024;
   settings.debug_view = args.debug;
   settings.exposure_bias = args.ev;
   settings.ssao = !args.no_ssao;
@@ -831,18 +852,12 @@ int main(int argc, char **argv) {
     glfwTerminate();
     std::exit(2);
   };
-  auto release_cpu_meshes = [&] {
-    const auto bytes = cb::release_scene_mesh_storage(scene);
-    std::printf("  CPU mesh storage released after all consumers: %.1f MiB\n",
-                 double(bytes) / 1048576.0);
-  };
   try {
     if (!renderer.init(&gpu, shaders, settings, &error,
                        args.fullscreen ? args.width : 0,
                        args.fullscreen ? args.height : 0))
       stop_renderer("renderer init failed: " + error);
     renderer.set_scene(scene, arrays);
-    release_cpu_meshes();
   } catch (const std::exception &e) {
     stop_renderer(e.what());
   }
@@ -913,6 +928,7 @@ int main(int argc, char **argv) {
         << "\",\n  \"debug_view\": " << renderer.settings().debug_view
         << ",\n  \"taa\": " << (renderer.settings().taa ? "true" : "false")
         << ",\n  \"bloom\": " << (renderer.settings().bloom ? "true" : "false")
+        << ",\n  \"mesh_page_bytes_requested\": " << renderer.settings().mesh_page_bytes
         << ",\n  \"startup_seconds\": " << startup_seconds
         << ",\n  \"peak_rss_mib\": " << peak_kib / 1024.0
         << ",\n  \"frame_count\": " << sorted.size()
@@ -1568,7 +1584,6 @@ int main(int argc, char **argv) {
       try {
         scene = cb::generate_scene(sp);
         renderer.set_scene(scene, arrays);
-        release_cpu_meshes();
       } catch (const std::exception &e) {
         stop_renderer(e.what());
       }

@@ -116,11 +116,33 @@ Use `--view clay|silhouette|neutral`, `--no-indirect` and `--no-reflections` to
 isolate contributions. `--sweep 24 --sweep-step 0.12 --sweep-dir forward
 --sweep-blur 2 --sweep-out build/street-motion` records motion residuals.
 
+The foreground diagrid can be inspected with `--asset diagrid-sample-frontal`,
+`diagrid-sample-oblique` or `diagrid-sample-arrival`. These extract a bounded
+section of the production curved lattice with recessed glass and floor geometry.
+The Arrival option uses the actual shot camera to check apparent member width.
+Append `-shallow` for a reduced-depth control with the same layout and material;
+it is a geometry control, not a reconstruction of a previous complete scene.
+Use `--sky authored` for the Arrival environment and `--sky studio` for the
+built-in lighting comparison. Finite captures use the same `--capture` and
+`--frames` options as the city.
+
+Use `--asset arrival-blockout --view neutral` to inspect the production city's
+street and landmark composition with coarse facades and reduced dressing.
+This diagnostic shares the full city's layout; omit the asset option for the
+detailed city. The camera and geometry stay identical across lighting views.
+
+`--mesh-page-mib N` forces a smaller vertex upload page for graphics diagnostics.
+The normal setting uses the adapter's buffer limit. This divides storage without
+removing triangles or changing vertex attributes; a low cap can check page
+boundaries on an isolated facade before loading the complete city.
+
 ## Scene and rendering
 
-Coastal districts contain curved street ribbons, differently sized parcels,
-courtyards, merged masses, terraced frontage, separated skyline clusters and
-civic landmarks. Building massing is generated once; no four full copies of
+First Arrival uses a straight canal, connected bridges and two perpendicular
+street families with rectangular parcels. Differing building heights, courtyards,
+terraced frontage and civic landmarks provide variation within that survey;
+the outer coastal districts retain their shoreline response.
+Building massing is generated once; no four full copies of
 all tower details are stored. Foreground construction uses bevelled ceramic,
 bronze joints, recessed glazing, furnished rooms, railings, drains, roof plant
 and layered vegetation. The editable Blender kit and metric placement contract
@@ -164,9 +186,11 @@ Visual parity comes first; performance tuning follows that gate.
 
 Source and licensing: [assets/PROVENANCE.md](assets/PROVENANCE.md).
 
-The canonical manifest also includes camera waypoints along the civic-to-street
-walk, the landing access stair and the garden stair/bridge. Capture their
-continuous camera updates and representative images separately:
+The canonical manifest also includes camera waypoints along the market bridge
+approach, cylinder podium access, landing stairs and retained garden connections.
+The garden loggia route starts on its occupied elevated floor; the former east
+ground-access staircase and high connector have been retired with their tower.
+Capture continuous camera updates and representative images separately:
 
 ```sh
 uv run --script demos/human_tech_demo/tools/capture-routes.py \
@@ -178,8 +202,8 @@ uv run --script demos/human_tech_demo/tools/capture-routes.py \
 This retains the initial viewpoint and follows every connecting segment with
 at most one metre of translation and five degrees of rotation per update, with
 uninterrupted temporal history. It tests the actual fixed city; it does not add
-collision or pathfinding to the inspection camera. The long garden staircase is
-sampled at every tread and landing. A separate structural test checks support,
+collision or pathfinding to the inspection camera. Retained stairs are sampled
+at every tread and landing. A separate structural test checks support,
 headroom and wall crossings against the actual scene triangles along the full
 routes; botanical visibility still requires image review. Raw images and frame timings accompany
 the route definition for obstruction and temporal review.

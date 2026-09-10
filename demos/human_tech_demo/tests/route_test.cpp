@@ -92,7 +92,8 @@ int main(int argc,char** argv) {
  int failures=0;
  // The new market outriggers must actually bear in the existing level-23
  // floor. Exclude their own named steel geometry from this contact proof.
- for(float z:{84.f,84.f,97.f,113.f,129.f,132.f}) {
+ for(float source_z:{84.f,84.f,97.f,113.f,129.f,132.f}) {
+  const float z=source_z-20.f;
   bool contact=false;
   for(std::size_t i=0;i<sc.opaque.indices.size()&&!contact;i+=3) {
    const auto& va=sc.opaque.vertices[sc.opaque.indices[i]];
@@ -100,14 +101,20 @@ int main(int argc,char** argv) {
    Vec3 a=va.position,b=sc.opaque.vertices[sc.opaque.indices[i+1]].position,c=sc.opaque.vertices[sc.opaque.indices[i+2]].position;
    if(std::abs(a.y-23)>.025f||std::abs(b.y-23)>.025f||std::abs(c.y-23)>.025f||cross(b-a,c-a).y<=1e-7f)continue;
    const float den=(b.z-c.z)*(a.x-c.x)+(c.x-b.x)*(a.z-c.z);if(std::abs(den)<1e-8f)continue;
-   const float u=((b.z-c.z)*(-136-c.x)+(c.x-b.x)*(z-c.z))/den;
-   const float v=((c.z-a.z)*(-136-c.x)+(a.x-c.x)*(z-c.z))/den;
+   const float u=((b.z-c.z)*(-326-c.x)+(c.x-b.x)*(z-c.z))/den;
+   const float v=((c.z-a.z)*(-326-c.x)+(a.x-c.x)*(z-c.z))/den;
    contact=u>=-1e-5f&&v>=-1e-5f&&u+v<=1.00001f;
   }
-  std::printf("Market upper bearing x-136 y23 z%.0f: %s\n",z,contact?"supported":"UNSUPPORTED");
+  std::printf("Market upper bearing x-326 y23 z%.0f: %s\n",z,contact?"supported":"UNSUPPORTED");
   if(!contact)++failures;
  }
+ bool bridge_route=false,hex_route=false,loggia_route=false;
  for(const auto& route:scene_routes()) {
+  bridge_route|=route.id=="arrival_bridge_to_market";hex_route|=route.id=="canal_hex_podium_access";
+  loggia_route|=route.id=="garden_floor_loggia";
+  if(route.id=="garden_access") {std::printf("Retired east ground access must not remain in route metadata\n");++failures;}
+  if(route.id=="garden_floor_loggia")for(const auto& p:route.waypoints)
+   if(p.position.y<278.9f){std::printf("Garden loggia incorrectly claims ground access\n");++failures;}
   int points=0,unsupported=0,blocked=0,crossed=0;float minClear=1e9,maxClear=0;
   for(std::size_t segment=0;segment+1<route.waypoints.size();++segment) {
    Vec3 a=route.waypoints[segment].position,b=route.waypoints[segment+1].position;
@@ -140,5 +147,6 @@ int main(int argc,char** argv) {
   std::printf("%s: %d samples, clearance[%.4f,%.4f], support_failures%d, clearance_obstructions%d, wall_crossings%d\n",route.id.c_str(),points,minClear,maxClear,unsupported,blocked,crossed);
   failures+=unsupported+blocked+crossed;
  }
+ if(!bridge_route||!hex_route||!loggia_route){std::printf("Missing current Arrival access contract\n");++failures;}
  return failures?1:0;
 }

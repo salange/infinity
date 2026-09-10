@@ -69,6 +69,9 @@ else()
   add_test(NAME human_tech_routes COMMAND human_tech_route_test)
 endif()
 
+# Both checks build complete city scenes; serialize their peak memory use.
+set_tests_properties(human_tech_scene human_tech_routes PROPERTIES RUN_SERIAL TRUE)
+
 # Roof placement checks use the same complete geometry modules as the scene.
 get_target_property(_human_tech_roof_sources human_tech_scene_test SOURCES)
 list(REMOVE_ITEM _human_tech_roof_sources tests/scene_test.cpp)

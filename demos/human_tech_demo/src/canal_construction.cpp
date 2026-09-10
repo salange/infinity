@@ -1,4 +1,5 @@
 #include "canal_construction.hpp"
+#include "riverfront_layout.hpp"
 
 #include <algorithm>
 #include <array>
@@ -275,7 +276,8 @@ void build_canal_bank(Scene& scene, Vec2 a, Vec2 b, float land_sign,
   }
 }
 
-void build_canal_bridge_edge(Scene& scene, Vec3 a, Vec3 b, float width, bool arterial) {
+void build_canal_bridge_edge(Scene& scene, Vec3 a, Vec3 b, float width, bool arterial,
+                             bool arrival_bridge) {
   const Palette p(scene);
   const Vec3 direction = normalize(b - a);
   const Vec3 side = normalize(cross(direction, kUp));
@@ -286,6 +288,7 @@ void build_canal_bridge_edge(Scene& scene, Vec3 a, Vec3 b, float width, bool art
   // a full-width box behind it would bury its bevels and cause coplanar faces.
   stone.beam(a - kUp * .36f, b - kUp * .36f, width - .46f, .65f);
   stone.beam(a - kUp * .635f, b - kUp * .635f, width, .10f);
+  const float walk_height=arrival_bridge?.16f:0.f;
   for (float sign : {-1.f, 1.f}) {
     const Vec3 offset = side * (sign * (width * .5f - .12f));
     const Vec3 backing = side * (sign * (width * .5f - .185f));
@@ -295,10 +298,19 @@ void build_canal_bridge_edge(Scene& scene, Vec3 a, Vec3 b, float width, bool art
     bronze.beam(a + offset - kUp * .50f, b + offset - kUp * .50f, .16f, .22f);
     dark.beam(a + offset - kUp * .245f, b + offset - kUp * .245f, .18f, .065f);
     formed_edge(scene, p.stone, a + offset, b + offset, side * sign);
-    bronze.tube(a + offset + kUp * 1.08f, b + offset + kUp * 1.08f, .034f, 8, true);
-    bronze.tube(a + offset + kUp * .12f, b + offset + kUp * .12f, .025f, 8, true);
+    if(arrival_bridge) {
+      const Vec3 centre=side*(sign*(width*.5f-1.25f));
+      stone.beam(a+centre+kUp*.08f,b+centre+kUp*.08f,2.2f,.16f);
+      dark.beam(a+side*(sign*(width*.5f-2.36f))+kUp*.17f,
+                b+side*(sign*(width*.5f-2.36f))+kUp*.17f,.065f,.024f);
+      // A thin, continuous bearing rib keeps the span's underside readable.
+      stone.beam(a+side*(sign*width*.31f)-kUp*.79f,
+                 b+side*(sign*width*.31f)-kUp*.79f,.45f,.24f);
+    }
+    bronze.tube(a + offset + kUp * (1.08f+walk_height), b + offset + kUp * (1.08f+walk_height), .034f, 8, true);
+    bronze.tube(a + offset + kUp * (.12f+walk_height), b + offset + kUp * (.12f+walk_height), .025f, 8, true);
     if (arterial)
-      bronze.beam(a + offset + kUp * .59f, b + offset + kUp * .59f, .045f, .075f);
+      bronze.beam(a + offset + kUp * (.59f+walk_height), b + offset + kUp * (.59f+walk_height), .045f, .075f);
     else
       bronze.tube(a + offset + kUp * .55f, b + offset + kUp * .55f, .021f, 8, true);
     // Global dominant-axis stations prevent doubled posts at consecutive
@@ -311,7 +323,7 @@ void build_canal_bridge_edge(Scene& scene, Vec3 a, Vec3 b, float width, bool art
     for (int i = first; i <= last; ++i) {
       const float t = (i * spacing - start) / (end - start);
       if (t < 0 || t >= 1) continue;
-      const Vec3 base = lerp(a, b, t) + offset;
+      const Vec3 base = lerp(a, b, t) + offset + kUp*walk_height;
       bronze.box(base + kUp * .025f, {.08f, .045f, .095f}, direction, slab_up, side);
       bronze.box(base + kUp * .55f, {.026f, .53f, .031f}, direction, slab_up, side);
       if (!arterial) {
@@ -319,6 +331,40 @@ void build_canal_bridge_edge(Scene& scene, Vec3 a, Vec3 b, float width, bool art
           bronze.box(base + direction * delta + kUp * .59f, {.010f, .40f, .015f}, direction, slab_up, side);
       }
     }
+    if(arrival_bridge) {
+      for(int i=int(std::ceil(std::min(start,end)/1.8f));i<=int(std::floor(std::max(start,end)/1.8f));++i) {
+        const float t=(i*1.8f-start)/(end-start);
+        if(t<0||t>=1)continue;
+        const Vec3 at=lerp(a,b,t)+side*(sign*(width*.5f-1.25f))+kUp*.171f;
+        dark.box(at,{.012f,.004f,1.04f},direction,slab_up,side);
+      }
+      Emit light(&scene.opaque,p.light);
+      for(int i=int(std::ceil(std::min(start,end)/18.f));i<=int(std::floor(std::max(start,end)/18.f));++i) {
+        const float t=(i*18.f-start)/(end-start);
+        if(t<0||t>=1)continue;
+        const Vec3 foot=lerp(a,b,t)+side*(sign*(width*.5f-.38f))+kUp*walk_height;
+        bronze.tube(foot,foot+kUp*3.65f,.036f,8,true);
+        bronze.beam(foot+kUp*3.65f,foot+kUp*3.65f-side*(sign*.85f),.065f,.09f);
+        const Vec3 diffuser=foot+kUp*3.59f-side*(sign*.66f);
+        light.box(diffuser,{.12f,.025f,.19f},direction,slab_up,side);
+        scene.lights.push_back({diffuser-kUp*.12f,9,{1,.76f,.46f},1.8f});
+      }
+    }
+  }
+}
+void build_arrival_bridge_abutments(Scene& scene) {
+  const Palette p(scene);
+  Emit stone(&scene.opaque,p.stone),dark(&scene.opaque,p.joints),bronze(&scene.opaque,p.bronze);
+  const Vec3 across{riverfront::across.x,0,riverfront::across.y};
+  const Vec3 along{riverfront::along.x,0,riverfront::along.y};
+  for(float sign:{-1.f,1.f}) {
+    const Vec2 centre=riverfront::point(sign*24.f,0);
+    stone.box(at(centre,1.8f),{2.45f,2.55f,10.1f},across,kUp,along);
+    stone.box(at(centre,4.41f),{2.65f,.10f,10.3f},across,kUp,along);
+    for(float side:{-6.2f,6.2f})
+      bronze.box(at(centre,4.51f)+along*side,{1.9f,.075f,.35f},across,kUp,along);
+    for(float y:{.45f,1.35f,2.25f,3.15f})
+      dark.box(at(centre,y)-across*(sign*2.457f),{.008f,.014f,10.0f},across,kUp,along);
   }
 }
 }  // namespace cb

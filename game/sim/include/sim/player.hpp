@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 #include "sim/vec3.hpp"
+#include "sim/hyperdrive.hpp"
 #include "gen/effective_field.hpp"
 
 namespace inf::sim {
@@ -52,6 +54,8 @@ struct InputFrame {
   bool run = false;       // shift
   bool fire = false;      // held
   bool interact_pressed = false;  // E, edge-triggered
+  bool hyper_toggle = false;  // H, edge-triggered
+  bool hyper_cancel = false;  // Escape / focus loss
   // Projection info for reticle ray construction.
   double aspect = 16.0 / 9.0;
   double fov_y = 1.1;
@@ -80,7 +84,7 @@ class Player {
   static constexpr double kShipClearance = 2.5;
   static constexpr double kBeamSpeed = 500.0;
   static constexpr double kMachSix = 2058.0;     // atmosphere hard cap (Mach 6)
-  static constexpr double kLightSpeed = 299'792'458.0;  // space hard cap (c)
+  static constexpr double kLightSpeed = Hyperdrive::kLightSpeed;  // space hard cap (c)
   static constexpr double kBeamMaxDistance = 1500.0;
   static constexpr double kReticleMax = 0.42;  // NDC-vertical units
   // Landing window on airless worlds (no atmosphere band to gate E by).
@@ -92,6 +96,9 @@ class Player {
   Player(const gen::EffectiveField& field, Vec3 spawn_position);
 
   void update(const InputFrame& input);
+  const Hyperdrive& hyperdrive() const { return hyperdrive_; }
+  void cancel_hyperdrive() { if (hyperdrive_.active()) speed_ = 0; hyperdrive_.stop(true); }
+  void set_hyper_obstacles(std::vector<HyperObstacle> bodies) { hyper_obstacles_ = std::move(bodies); }
 
   PlayerMode mode() const { return mode_; }
   const Vec3& position() const { return position_; }
@@ -185,6 +192,9 @@ class Player {
 
   NearestBody nearest_;
   bool has_nearest_ = false;
+
+  Hyperdrive hyperdrive_;
+  std::vector<HyperObstacle> hyper_obstacles_;
 
   PlayerMode map_pushed_mode_ = PlayerMode::Flight;
 };

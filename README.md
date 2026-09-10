@@ -106,6 +106,13 @@ cmake -B build-headless -DUNENDLICH_BUILD_APP=OFF
 Rule of the house: `core`/`gen`/`world`/`cli` never depend on a window,
 GPU, or engine. Rendering is a view of the world, not part of it.
 
+### Hyperdrive
+
+Press **H** in flight for controllable **2–10c** travel. **W/S** selects speed;
+**H/Escape** stops. Body proximity automatically disengages the drive before
+ordinary approach flight. **J** remains the system handoff. See
+[controls, approach behavior and profiling](docs/hyperdrive.md).
+
 ### Galaxy traversal
 
 Press **F6** in flight mode for a live 120-second tour through the current galaxy

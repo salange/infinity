@@ -231,6 +231,151 @@ void roof_gardens(Scene& s,const ArrivalTowerPlacement& t,const Palette& p,Rng r
     if(line.size()>=3)slab(s.opaque,line,roof+.044f,.009f,p.joint);
   }
 }
+std::vector<std::vector<Vec2>> ground_domains() {
+  // These are complete public forecourts around the occupied buildings. Their
+  // corners follow the street survey; roads and retained entrances cut them
+  // back to the actual available ground at integration time.
+  std::vector<std::vector<Vec2>> domains;
+  domains.push_back(plan_rounded_rect(58,47,8,12,{74,196}));
+  constexpr std::array<float,6> extension{{18,17,20,22,23,23}};
+  for(const auto& t:placements) {
+    const auto& cfg=lots[index(t.id)];const float e=extension[index(t.id)];
+    domains.push_back(plan_transform(plan_rounded_rect(cfg.half.x+e,cfg.half.y+e,9,10),
+                                    t.centre,cfg.yaw));
+  }
+  return domains;
+}
+std::vector<Vec2> corridor(Vec2 a,Vec2 b,float half) {
+  const auto d=b-a;const Vec2 n=normalize(Vec2{-d.y,d.x})*half;
+  return {a-n,b-n,b+n,a+n};
+}
+void cut_out(std::vector<std::vector<Vec2>>& pieces,const std::vector<Vec2>& obstacle) {
+  if(obstacle.size()<3)return;
+  std::vector<std::vector<Vec2>> remaining;
+  for(auto& piece:pieces)for(auto part:subtract(std::move(piece),obstacle))
+    remaining.push_back(std::move(part));
+  pieces=std::move(remaining);
+}
+void ground_courts(Scene& s,const Palette& p,Rng rng,bool detailed,
+                   const std::vector<std::vector<Vec2>>& supplied_exclusions) {
+  const auto domains=ground_domains();
+  auto nearby=[&](const std::vector<Vec2>& shape) {
+    for(const auto& domain:domains)if(overlap(shape,domain))return true;
+    return false;
+  };
+  std::vector<std::vector<Vec2>> boundaries;
+  for(const auto& shape:supplied_exclusions)if(nearby(shape))boundaries.push_back(shape);
+  for(const auto& obstruction:s.roof_obstructions) {
+    if(obstruction.bottom>ground+8||obstruction.top<ground-.05f||!nearby(obstruction.polygon))continue;
+    bool contained=false;
+    for(const auto& old:boundaries) {
+      bool all=true;for(auto q:obstruction.polygon)if(!point_in_polygon(old,q)){all=false;break;}
+      if(all){contained=true;break;}
+    }
+    if(!contained)boundaries.push_back(inset(obstruction.polygon,-.45f));
+  }
+  std::vector<std::vector<Vec2>> paving_exclusions=boundaries;
+  std::vector<std::vector<Vec2>> garden_exclusions;
+  for(const auto& shape:boundaries)garden_exclusions.push_back(inset(shape,-3.5f));
+  for(const auto& t:placements) {
+    // Join the existing founded apron exactly, without a second coplanar slab
+    // or a public surface passing through the occupied socket.
+    paving_exclusions.push_back(arrival_tower_lot_footprint(t.id,-2.3f));
+    garden_exclusions.push_back(arrival_tower_lot_footprint(t.id,-4.5f));
+  }
+  const auto& walk=arrival_tower_public_walk();
+  for(std::size_t i=0;i+1<walk.size();++i) {
+    paving_exclusions.push_back(corridor(walk[i],walk[i+1],2));
+    garden_exclusions.push_back(corridor(walk[i],walk[i+1],5));
+  }
+  for(auto q:walk) {
+    paving_exclusions.push_back(plan_circle(2,24,q));
+    garden_exclusions.push_back(plan_circle(5,24,q));
+  }
+  std::vector<std::vector<Vec2>> paved;
+  const auto first=static_cast<std::uint32_t>(s.opaque.indices.size());
+  for(std::size_t domain=0;domain<domains.size();++domain) {
+    std::vector<std::vector<Vec2>> pieces{domains[domain]};
+    for(const auto& obstacle:paving_exclusions)cut_out(pieces,obstacle);
+    // A union of the seven courts: shared ground is emitted only once.
+    for(std::size_t previous=0;previous<domain;++previous)cut_out(pieces,domains[previous]);
+    for(auto& piece:pieces) {
+      if(piece.size()<3||std::abs(plan_area(piece))<.35f)continue;
+      slab(s.opaque,piece,ground,ground-.60f,p.paving);
+      paved.push_back(std::move(piece));
+    }
+  }
+  // Long planted bands and broad corner islands make outdoor rooms around
+  // the quiet pale courts. Keep compact sockets and their roof aprons legible.
+  struct GroundBed {std::vector<Vec2> shape;std::size_t domain;};
+  std::vector<GroundBed> bed_candidates;
+  for(const auto& t:placements) {
+    const auto& cfg=lots[index(t.id)];
+    auto bed=[&](Vec2 centre,Vec2 half,float radius) {
+      bed_candidates.push_back({plan_transform(plan_rounded_rect(half.x,half.y,radius,8),
+          t.centre+rotate(centre,cfg.yaw),cfg.yaw),index(t.id)+1});
+    };
+    for(float sign:{-1.f,1.f}) {
+      bed({sign*(cfg.half.x+10),0},{3.6f,std::max(8.f,cfg.half.y-5)},2.1f);
+      bed({0,sign*(cfg.half.y+10)},{std::max(8.f,cfg.half.x-6),3.6f},2.1f);
+      for(float end:{-1.f,1.f})
+        bed({sign*(cfg.half.x+9),end*(cfg.half.y+9)},{4.4f,4.4f},3);
+    }
+  }
+  std::vector<std::vector<Vec2>> planted;
+  for(std::size_t bed=0;bed<bed_candidates.size();++bed) {
+    auto within=intersect(bed_candidates[bed].shape,domains[bed_candidates[bed].domain]);
+    if(within.size()<3)continue;
+    // Clip each designed bed against the real obstacles, not the convex
+    // tessellation pieces of the paving; internal court cuts are not planters.
+    std::vector<std::vector<Vec2>> pieces{std::move(within)};
+    for(const auto& obstacle:garden_exclusions)cut_out(pieces,obstacle);
+    for(const auto& old:planted)cut_out(pieces,old);
+    unsigned part=0;
+    for(auto& shape:pieces) {
+      if(shape.size()<3||std::abs(plan_area(shape))<4||plan_inradius(shape)<.45f)continue;
+      auto bed_rng=rng.child(100,bed,part++);
+      garden_bed(s,bed_rng,shape,ground,p,detailed);
+      if(detailed) {
+        const auto usable=inset(shape,1.9f);
+        if(usable.size()>=3) {
+          // Several medium canopies along long bands create the reference's
+          // tree groups, with clear trunk intervals and low planting beneath.
+          Vec2 axis{1,0};float longest=0;
+          for(std::size_t edge=0;edge<shape.size();++edge) {
+            const auto d=shape[(edge+1)%shape.size()]-shape[edge];
+            if(length(d)>longest){longest=length(d);axis=normalize(d);}
+          }
+          const auto centre=plan_centroid(shape);float lo,hi;plan_extent(usable,axis,&lo,&hi);
+          const auto origin=centre-axis*dot(centre,axis);int tree_index=0;
+          for(float coordinate=lo+3;coordinate<hi-2;coordinate+=12) {
+            const auto q=origin+axis*coordinate;
+            if(length(q-centre)<8||!point_in_polygon(usable,q)||!shaft_clear(q,5)||!walk_clear(q,3))continue;
+            auto r=bed_rng.child(500,tree_index++);
+            tree(s,r,P3(q,ground+.414f),r.child(1).range(4.8f,6.5f),r.child(2).chance(.42f));
+          }
+        }
+      }
+      planted.push_back(std::move(shape));
+    }
+  }
+  // Sparse recessed joints articulate open paving at human scale. Their
+  // geometry is cut to the actual paved pieces and never runs across roads.
+  for(std::size_t site=0;site<placements.size();++site) {
+    const auto& t=placements[site];const auto& cfg=lots[site];
+    for(float offset=-cfg.half.x-17;offset<cfg.half.x+17;offset+=7) {
+      auto joint=plan_transform(plan_rect(.014f,cfg.half.y+18,{offset,0}),t.centre,cfg.yaw);
+      for(const auto& surface:paved) {
+        auto part=intersect(joint,surface);if(part.size()<3)continue;
+        std::vector<std::vector<Vec2>> pieces{std::move(part)};
+        for(const auto& bed:planted)cut_out(pieces,bed);
+        for(const auto& line:pieces)if(std::abs(plan_area(line))>.03f)
+          slab(s.opaque,line,ground+.008f,.009f,p.joint);
+      }
+    }
+  }
+  s.register_range(first,static_cast<std::uint32_t>(s.opaque.indices.size()),{155,4,210},245);
+}
 } // namespace
 
 const std::array<ArrivalTowerPlacement,6>& arrival_tower_placements() {return placements;}
@@ -255,12 +400,7 @@ std::vector<Vec2> arrival_tower_lot_footprint(ArrivalLotId id,float setback) {
   return inset(std::move(p),setback);
 }
 std::vector<std::vector<Vec2>> arrival_tower_cleanup_footprints() {
-  std::vector<std::vector<Vec2>> result;
-  for(const auto& t:placements)result.push_back(arrival_tower_lot_footprint(t.id,-2.5f));
-  // One quiet paved court joins the blade and ribbon gardens. It replaces
-  // fragmented infill only; its public route remains open and supported.
-  result.push_back(plan_rounded_rect(58,47,8,12,{74,196}));
-  return result;
+  return ground_domains();
 }
 bool arrival_tower_lot_overlap(const std::vector<Vec2>& polygon,float margin) {
   for(const auto& t:placements)if(overlap(polygon,arrival_tower_lot_footprint(t.id,-margin)))return true;
@@ -270,8 +410,10 @@ const std::vector<Vec2>& arrival_tower_public_walk() {
   static const std::vector<Vec2> path{{24,106.5f},{24,119},{24,194},{24,252},{124,252},{124,213},{128,213}};
   return path;
 }
-void build_arrival_tower_lots(Scene& s,Rng rng,bool detailed) {
+void build_arrival_tower_lots(Scene& s,Rng rng,bool detailed,
+                             const std::vector<std::vector<Vec2>>& ground_exclusions) {
   const Palette p(s);
+  ground_courts(s,p,rng.child(300),detailed,ground_exclusions);
   for(const auto& t:placements) {
     const auto begin=static_cast<std::uint32_t>(s.opaque.indices.size());
     const auto outer=arrival_tower_lot_footprint(t.id,-2.3f);

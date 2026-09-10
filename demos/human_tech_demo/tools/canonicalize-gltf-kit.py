@@ -23,7 +23,7 @@ def canonicalize(source,output):
     g=c.Gltf(source);d=g.doc
     materials=sorted(enumerate(d['materials']),key=lambda x:x[1].get('name',''))
     remap={old:new for new,(old,_) in enumerate(materials)}
-    buffer=bytearray();views=[];accessors=[];meshes=[];nodes=[];repaired_tangents=0
+    buffer=bytearray();views=[];accessors=[];meshes=[];nodes=[];repaired_tangents=0;repaired_room_signs=0
     def accessor(values,kind,position=False):
         offset=len(buffer);width=len(values[0]);code='I' if kind==5125 else 'f'
         for value in values:buffer.extend(struct.pack('<'+code*width,*value))
@@ -37,7 +37,7 @@ def canonicalize(source,output):
         name=d['nodes'][root]['name'];groups={}
         if d['nodes'][root].get('extras',{}).get('resource') is not True: raise ValueError('all roots must declare resource=true')
         def visit(i,parent,ancestors):
-            nonlocal repaired_tangents
+            nonlocal repaired_tangents,repaired_room_signs
             if i in ancestors:raise ValueError('node hierarchy cycle')
             node=d['nodes'][i];m=c.mul(parent,c.node_matrix(node));nm,det=c.normal_matrix(m)
             if 'mesh' in node:
@@ -68,6 +68,45 @@ def canonicalize(source,output):
                             recovered=(*c.unit(t),tangent[3]);break
                         if recovered is None:raise ValueError('cannot reconstruct tangent from geometry/UV')
                         tangents[j]=recovered;repaired_tangents+=1
+                    material=d['materials'][p['material']]
+                    flags=int(material.get('extras',{}).get('engine_flags',0))
+                    def textured(value):
+                        if isinstance(value,dict):return any(k.endswith('Texture') or textured(v) for k,v in value.items())
+                        if isinstance(value,list):return any(textured(v) for v in value)
+                        return False
+                    occupied=(flags&1 and not flags&128 and not textured(material)
+                              and material.get('alphaMode','OPAQUE')=='OPAQUE'
+                              and not material.get('extensions',{}).get('KHR_materials_transmission',{}).get('transmissionFactor',0))
+                    if occupied:
+                        # Procedural occupied rooms interpret V as a physical
+                        # metre coordinate, including the parallax basis.
+                        # An exporter may change V while retaining its original
+                        # tangent sign. Derive this room-only handedness from
+                        # the final UV chart; textured material frames stay intact.
+                        signs={}
+                        for at in range(0,len(ii),3):
+                            ia,ib,ic=ii[at:at+3]
+                            dp=[positions[ib][k]-positions[ia][k] for k in range(3)]
+                            dq=[positions[ic][k]-positions[ia][k] for k in range(3)]
+                            du,dv=uvs[ib][0]-uvs[ia][0],uvs[ib][1]-uvs[ia][1]
+                            eu,ev=uvs[ic][0]-uvs[ia][0],uvs[ic][1]-uvs[ia][1]
+                            detuv=du*ev-dv*eu
+                            if abs(detuv)<1e-12:continue
+                            bitangent=[(dq[k]*du-dp[k]*eu)/detuv for k in range(3)]
+                            if sum(v*v for v in bitangent)<1e-12:continue
+                            bitangent=c.unit(bitangent)
+                            for j in (ia,ib,ic):
+                                n=c.unit(normals[j]);t=c.unit(tangents[j][:3])
+                                cross=(n[1]*t[2]-n[2]*t[1],n[2]*t[0]-n[0]*t[2],n[0]*t[1]-n[1]*t[0])
+                                alignment=sum(cross[k]*bitangent[k] for k in range(3))
+                                if abs(alignment)<1e-7:continue
+                                sign=1. if alignment>0 else -1.
+                                if j in signs and signs[j]!=sign:raise ValueError('occupied tangent handedness conflicts across UV chart')
+                                signs[j]=sign
+                        if set(ii)-signs.keys():raise ValueError('cannot derive occupied room basis from geometry/UV')
+                        for j,sign in signs.items():
+                            if tangents[j][3]!=sign:repaired_room_signs+=1
+                            tangents[j]=(*tangents[j][:3],sign)
                     vv=[]
                     for j,pos in enumerate(positions):
                         n=c.unit(c.transform(nm,normals[j],True));t=c.unit(c.transform(m,tangents[j][:3],True))
@@ -105,7 +144,8 @@ def canonicalize(source,output):
     buffer+=b'\0'*(-len(buffer)%4)
     result=struct.pack('<III',0x46546c67,2,12+8+len(blob)+8+len(buffer))+struct.pack('<II',len(blob),0x4e4f534a)+blob+struct.pack('<II',len(buffer),0x004e4942)+buffer
     Path(output).write_bytes(result)
-    print('Canonical glTF:',len(nodes),'resources;',len(result),'bytes;',repaired_tangents,'UV tangent frames reconstructed')
+    print('Canonical glTF:',len(nodes),'resources;',len(result),'bytes;',repaired_tangents,
+          'UV tangent frames reconstructed;',repaired_room_signs,'occupied room handedness corrections')
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('source',type=Path);p.add_argument('output',type=Path);a=p.parse_args();canonicalize(a.source,a.output)

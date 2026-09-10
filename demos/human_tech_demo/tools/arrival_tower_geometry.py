@@ -73,11 +73,10 @@ def materials():
             mat['engine_flags']=1
             mat['engine_room']=[3.6,4.0,6.0,.32]
             mat['engine_normal_strength']=.06
-            # Match the reviewed native curtain-wall coating/transmission
-            # factors; applying the already-dark body tint twice suppresses
-            # the occupied interiors and the bronze window variation.
-            mat['engine_tint2']=list({'glass_dark':(.28,.34,.40),
-                'glass_bronze':(.50,.40,.30),'glass_blue':(.62,.78,.92)}[name])
+            # Pane transmission and coating belong to the factors above.
+            # The occupied-room tint matches the native scene palette;
+            # reusing a dark pane tint here attenuates the interior twice.
+            mat['engine_tint2']=[.94,.90,.81]
         if name=='light':
             bs.inputs['Emission Color'].default_value=(*color,1)
             bs.inputs['Emission Strength'].default_value=2.0
@@ -180,7 +179,13 @@ class Builder:
             mesh.materials.append(material);layer=mesh.uv_layers.new(name='Metric facade coordinates')
             for poly,uv in zip(mesh.polygons,uvs):
                 poly.use_smooth=smooth
-                for index,value in zip(poly.loop_indices,uv):layer.data[index].uv=value
+                for index,value in zip(poly.loop_indices,uv):
+                    # Native occupied rooms use metres with V increasing up
+                    # from the resource base. Blender exports glTF V as 1-V;
+                    # compensate only this procedural facade chart here.
+                    # Canonicalization aligns its room tangent handedness
+                    # with the exported upward metric UV derivatives.
+                    layer.data[index].uv=(value[0],1-value[1]) if mat.startswith('glass_') else value
             # Explicit triangles preserve the authoring UV charts and let
             # Blender calculate Mikk tangents for closed many-sided slabs.
             bm=bmesh.new();bm.from_mesh(mesh)

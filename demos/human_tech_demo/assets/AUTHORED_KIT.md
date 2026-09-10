@@ -123,3 +123,11 @@ fixtures. `human_tech_asset_test <kit>` checks the actual resource library,
 metre/Y-up orientation, material remapping, instance transforms and rejection
 of a corrupted payload. These data checks accompany engine visual reviews;
 they do not establish visual parity by themselves.
+
+The First Arrival tower library uses native occupied-room coordinates in metres:
+U follows the facade and V equals the resource-local floor height, increasing
+upward. Its Blender authoring compensates glTF's V conversion only for these
+procedural occupied-glass charts; ordinary textured materials retain their
+standard UV path. The imported geometry check verifies signed floor alignment
+and an upward tangent basis, as well as physical floor spacing. Interior tint
+uses the scene's warm room-light palette independently of pane transmission.

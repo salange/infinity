@@ -25,5 +25,6 @@ bool arrival_tower_lot_overlap(const std::vector<Vec2>& polygon,float margin=0);
 const std::vector<Vec2>& arrival_tower_public_walk();
 // Hero occupied socket is supplied by its separate mesh resource. The other
 // five sockets, their composed gardens and the supported public walk are here.
-void build_arrival_tower_lots(Scene& scene,Rng rng,bool detailed=true);
+void build_arrival_tower_lots(Scene& scene,Rng rng,bool detailed=true,
+    const std::vector<std::vector<Vec2>>& ground_exclusions={});
 } // namespace cb

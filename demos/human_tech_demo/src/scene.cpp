@@ -3702,6 +3702,43 @@ void transit_structure(Scene& sc) {
   sc.roof_obstructions.push_back({transit_plan(0,kTransitLength,-10.1f,10.1f),kDeck,kTransitRoofCrownY+.05f});
   sc.roof_obstructions.push_back({transit_access_plan(-7,17,9.5f,21),kDeck,kTransitWalkY+1.15f});
 }
+std::vector<std::vector<Vec2>> arrival_tower_ground_exclusions(Rng district_rng) {
+  std::vector<std::vector<Vec2>> result;
+  const auto domain=plan_rect(190,210,{145,190});
+  auto add=[&](std::vector<Vec2> shape) {
+    if(polygons_overlap(shape,domain))result.push_back(std::move(shape));
+  };
+  auto corridor=[&](Vec2 a,Vec2 b,float half_width) {
+    const auto d=b-a;if(length(d)<.01f)return;
+    const auto n=normalize(Vec2{-d.y,d.x})*half_width;
+    add({a-n,b-n,b+n,a+n});
+  };
+  // Read the same retained road segments and widths as district generation.
+  // New ground gardens must not cover asphalt, curb or occupied entrances.
+  const auto rows=coastal_rows(district_rng);
+  for(std::size_t column=0;column+1<kOffsets.size();++column) {
+    std::vector<Vec2> line;for(float row:rows)line.push_back(street(row,kOffsets[column]));
+    for(const auto& [a,b]:road_plan_segments(line))corridor(a,b,avenue_width(column)*.5f+.4f);
+  }
+  for(std::size_t row=0;row<rows.size();++row) {
+    std::vector<Vec2> line;for(float offset:kOffsets)line.push_back(street(rows[row],offset));
+    for(const auto& [a,b]:road_plan_segments(line))corridor(a,b,cross_width(rows[row],row)*.5f+.4f);
+  }
+  for(const auto& shape:transit_reserved_plans())add(shape);
+  add(plan_rounded_rect(18,22,4,8,{148,153}));
+  add({{171,135},{177,125},{212,118},{252,126},{275,145},{275,170},{260,180},{197,180},{185,173},{176,155}});
+  add(plan_rect(80,67,kDome+kDomeMove));
+  for(const auto& wing:civic_base_wings())add(moved_plan(wing.footprint,kDomeMove));
+  for(std::size_t i=0;i+1<west_public_route().size();++i)corridor(west_public_route()[i],west_public_route()[i+1],4);
+  for(std::size_t i=0;i+1<garden_approach().size();++i)corridor(garden_approach()[i],garden_approach()[i+1],4);
+  for(auto p:west_public_route())add(plan_circle(4,24,p));
+  for(auto p:garden_approach())add(plan_circle(4,24,p));
+  corridor({-68,94},{-15,109},4);corridor({-15,109},{-4,106.5f},4);corridor({-4,106.5f},{24,106.5f},4);
+  for(Vec2 p:std::array<Vec2,4>{{{-68,94},{-15,109},{-4,106.5f},{24,106.5f}}})add(plan_circle(4,24,p));
+  corridor({128,213},{kLandingEntryX,213},4);
+  corridor({kLandingEntryX,213},{kLandingEntryX,174},4);
+  return result;
+}
 } // namespace
 
 Scene generate_scene(const SceneParams& params) {
@@ -3743,7 +3780,10 @@ Scene generate_scene(const SceneParams& params) {
   }
   transit_structure(sc);stage_transit_concourse(sc,root.child(794));
   stage_landing_lounge(sc,root.child(795));
-  if(arrival_authored_towers) {build_arrival_tower_lots(sc,root.child(801));stage_arrival_towers(sc);}
+  if(arrival_authored_towers) {
+    build_arrival_tower_lots(sc,root.child(801),true,arrival_tower_ground_exclusions(root.child(1000)));
+    stage_arrival_towers(sc);
+  }
   if(!arrival_blockout)allocate_authored_roofs(sc);
   sc.finalize_draws();sc.city_size="coastal human-tech metropolis";sc.city_radius=10000;
   shot_camera(params.shot,sc.camera_position,sc.camera_target);

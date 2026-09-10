@@ -26,11 +26,18 @@ class CompilerContract(unittest.TestCase):
                   'nodes':[{'name':'fixture','extras':{'resource':True},'children':[1],'translation':[2,3,4]}, {'mesh':0,'scale':[2,3,4]}],
                   'scenes':[{'nodes':[0]}],'scene':0}
     def tearDown(self):self.tmp.cleanup()
-    def compile(self):
+    def write_source(self):
         d=json.dumps(self.doc).encode();d+=b' '*(-len(d)%4);b=self.blob+b'\0'*(-len(self.blob)%4)
         raw=struct.pack('<III',0x46546c67,2,12+8+len(d)+8+len(b))+struct.pack('<II',len(d),0x4e4f534a)+d+struct.pack('<II',len(b),0x004e4942)+b
         source=self.path/'fixture.glb';source.write_bytes(raw)
-        return compiler.compile_kit(source,self.path/'fixture.htkit')
+        return source
+    def compile(self):
+        return compiler.compile_kit(self.write_source(),self.path/'fixture.htkit')
+    def canonicalize(self):
+        canonical_spec=importlib.util.spec_from_file_location('canonical',Path(__file__).resolve().parents[1]/'tools'/'canonicalize-gltf-kit.py')
+        canonical=importlib.util.module_from_spec(canonical_spec);canonical_spec.loader.exec_module(canonical)
+        result=self.path/'canonical.glb';canonical.canonicalize(self.write_source(),result)
+        return compiler.Gltf(result)
     def test_transform_and_linear_material(self):
         r=self.compile();self.assertEqual(r['resources'][0]['bounds_m_y_up'],[[2,3,4],[4,6,4]])
         self.assertEqual(r['materials'][0]['base_color_linear'],[.8,.7,.6])
@@ -82,6 +89,35 @@ class CompilerContract(unittest.TestCase):
         result=self.path/'repaired.glb';canonical.canonicalize(self.path/'fixture.glb',result)
         report=compiler.compile_kit(result,self.path/'repaired.htkit')
         self.assertEqual(report['resources'][0]['triangles'],1)
+    def test_occupied_basis_follows_metric_uv_after_export(self):
+        self.doc['materials'][0]['extras']={'engine_flags':1}
+        for mirrored in (False,True):
+            self.doc['nodes'][1]['scale']=[-2 if mirrored else 2,3,4]
+            for uv_direction in (-1.,1.):
+                for exported_sign in (-1.,1.):
+                    with self.subTest(mirrored=mirrored,uv_direction=uv_direction,exported_sign=exported_sign):
+                        data=bytearray(self.blob)
+                        for offset in (84,100,116):struct.pack_into('<f',data,offset,exported_sign)
+                        struct.pack_into('<f',data,140,uv_direction)
+                        self.blob=bytes(data);g=self.canonicalize()
+                        attrs=g.doc['meshes'][0]['primitives'][0]['attributes']
+                        normals=g.accessor(attrs['NORMAL']);tangents=g.accessor(attrs['TANGENT'])
+                        for n,t in zip(normals,tangents):
+                            upward=(n[2]*t[0]-n[0]*t[2])*t[3]
+                            self.assertAlmostEqual(upward,uv_direction)
+    def test_nonoccupied_and_textured_tangent_signs_preserved(self):
+        cases=({'extras':{'engine_flags':0}},
+               {'extras':{'engine_flags':128}},
+               {'extras':{'engine_flags':129}},
+               {'extras':{'engine_flags':1},'normalTexture':{'index':0}})
+        data=bytearray(self.blob)
+        for offset in (84,100,116):struct.pack_into('<f',data,offset,-1.)
+        self.blob=bytes(data)
+        for material_fields in cases:
+            with self.subTest(material_fields=material_fields):
+                self.doc['materials'][0]={'name':'fixture',**material_fields}
+                g=self.canonicalize();attrs=g.doc['meshes'][0]['primitives'][0]['attributes']
+                self.assertEqual([t[3] for t in g.accessor(attrs['TANGENT'])],[-1.,-1.,-1.])
     def test_canonical_export_ignores_vertex_order(self):
         canonical_spec=importlib.util.spec_from_file_location('canonical',Path(__file__).resolve().parents[1]/'tools'/'canonicalize-gltf-kit.py')
         canonical=importlib.util.module_from_spec(canonical_spec);canonical_spec.loader.exec_module(canonical)

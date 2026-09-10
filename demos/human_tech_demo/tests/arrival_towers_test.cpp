@@ -67,7 +67,22 @@ void add_floors(Floors& floors,const Mesh& mesh,const AssetInstance* instance=nu
     floors.add({a,position(mesh.indices[i+1]),position(mesh.indices[i+2])});
   }
 }
+void check_room_coordinates(const cb::Scene& scene,const MeshResource& resource) {
+  std::size_t occupied=0;
+  for(const auto& v:resource.mesh.vertices)if(scene.materials[v.material].flags&kMatGlass) {
+    ++occupied;
+    require(std::abs(v.aux.y-v.position.y)<.002f,
+      resource.name+": occupied room height is inverted or offset from actual local floors");
+    if(std::abs(v.normal.y)<.9f) {
+      const Vec3 tangent{v.tangent.x,v.tangent.y,v.tangent.z};
+      const Vec3 upward=cross(v.normal,tangent)*v.tangent.w;
+      require(upward.y>.1f,resource.name+": occupied facade tangent basis points downward");
+    }
+  }
+  require(occupied>100,resource.name+": occupied coordinate audit found no facade");
+}
 void check_rooms(const cb::Scene& scene,const MeshResource& resource) {
+  check_room_coordinates(scene,resource);
   struct Span {float u0=1e30f,u1=-1e30f,v0=1e30f,v1=-1e30f,y0=1e30f,y1=-1e30f;};
   std::map<std::uint32_t,Span> spans;
   for(const auto& v:resource.mesh.vertices)if(scene.materials[v.material].flags&kMatGlass) {
@@ -149,7 +164,8 @@ int main(int argc,char** argv) {
     for(const auto& instance:scene.asset_instances) {
       const auto& resource=scene.asset_library.resources[instance.resource];
       if(resource.name!="arrival_hero_socket")continue;
-      ++socket_count;check_mesh(resource.mesh,scene.materials.size(),resource.name);add_floors(floors,resource.mesh,&instance);
+      ++socket_count;check_mesh(resource.mesh,scene.materials.size(),resource.name);
+      check_room_coordinates(scene,resource);add_floors(floors,resource.mesh,&instance);
     }
     require(socket_count==1,"Hero requires exactly one occupied rounded socket resource");
     std::size_t feet=0,roots=0,bearings=0;

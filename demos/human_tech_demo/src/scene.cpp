@@ -488,6 +488,16 @@ float canal_centre(float z) {
   return -259.6f+.155f*z;
 }
 float canal_halfwidth(float) {return 17.f;}
+std::vector<std::vector<Vec2>> arrival_promenade_plans() {
+  std::vector<std::vector<Vec2>> plans;
+  for (float sign : {-1.f, 1.f}) {
+    const Vec2 a{canal_centre(504) + sign * (canal_halfwidth(504) + 5), 504};
+    const Vec2 b{canal_centre(-446) + sign * (canal_halfwidth(-446) + 5), -446};
+    const Vec2 side = riverfront::across * 4.f;
+    plans.push_back({a - side, b - side, b + side, a + side});
+  }
+  return plans;
+}
 Vec2 street(float row,float offset) {
   float lateral=kGridLateralOrigin+offset;
   const Vec2 original{kGridCos*lateral+kGridSin*row,-kGridSin*lateral+kGridCos*row};
@@ -679,7 +689,7 @@ void terrain(Scene& sc,Rng district_rng) {
       for(float sign:{-1.f,1.f}) {
         Vec2 ba{ca+sign*wa,a.y},bb{cb+sign*wb,b.y};
         if(ba.x>a.x+4&&bb.x>b.x+4) {
-          if(ba.y<=280&&bb.y>=-450) {
+          if(ba.y<=504&&bb.y>=-450) {
             build_canal_bank(sc,ba,bb,sign,kDeck,canal_crossings,canal_exclusions);
             continue;
           }
@@ -1244,7 +1254,7 @@ std::vector<InfillPlot> infill_plots(Rng rng) {
 std::vector<CanalCrossing> canal_construction_crossings(Rng root) {
   std::vector<CanalCrossing> result;const auto rows=coastal_rows(root);
   auto segment=[&](Vec2 a,Vec2 b,float width) {
-    if(std::max(a.y,b.y)<-550||std::min(a.y,b.y)>380)return;
+    if(std::max(a.y,b.y)<-550||std::min(a.y,b.y)>550)return;
     // Include the real approach segments and longitudinal junctions as well as
     // the three spanning decks. A bench must not obstruct a road that ends at
     // the quay merely because that particular road has no crossing deck.
@@ -2892,7 +2902,12 @@ void foreground(Scene& sc,Rng rng) {
   // The eastern neighbor is a low-rise occupied frontage. Its obsolete high
   // connector is removed as a complete structure, and the tower guard closes.
   Vec2 neighbor{-125,490};
-  low_building(sc,rng.child(59),plan_rounded_rect(41,36,9,10,neighbor),neighbor,kDeck,4,1,true);
+  // Keep the occupied frontage behind the full quay, including facade-module
+  // overhangs. Its height, floor count and remaining rounded sides are retained.
+  const Vec2 quay_edge{canal_centre(neighbor.y)+22.f,neighbor.y};
+  const auto neighbor_plan=clip_halfplane(plan_rounded_rect(41,36,9,10,neighbor),
+      quay_edge+riverfront::across*4.75f,riverfront::across);
+  low_building(sc,rng.child(59),neighbor_plan,neighbor,kDeck,4,1,true);
 }
 void canal_hex_landmark(Scene& sc,Rng rng) {
   constexpr float base=13.2f,radius=18.117f,body_top=89.2f,roof=93.2f;
@@ -3636,6 +3651,7 @@ void public_access(Scene& sc,Rng rng) {
     slab(sc.opaque,{a-n,b-n,b+n,a+n},kDeck,.6f,M_SIDEWALK);
   }
   for(Vec2 p:market_walk)slab(sc.opaque,plan_circle(1.8f,24,p),kDeck,.6f,M_SIDEWALK);
+  const auto promenade_plans = arrival_promenade_plans();
   for(std::size_t segment=0;segment+1<kGardenApproach.size();++segment) {
     Vec2 a=kGardenApproach[segment],b=kGardenApproach[segment+1],d=normalize(b-a),side{-d.y,d.x};
     int count=int(length(b-a)/19);
@@ -3650,6 +3666,11 @@ void public_access(Scene& sc,Rng rng) {
       if(on_walk)continue;
       for(const auto& reserved:transit_reserved_plans())
         if(polygons_overlap(plan_rect(5,6,p),reserved)){on_walk=true;break;}
+      if(on_walk)continue;
+      // The earlier approach gardens must not occupy the continuous quay.
+      // Its own bank module now supplies supported planting and street furniture.
+      for(const auto& promenade : promenade_plans)
+        if(polygons_overlap(plan_rect(5,6,p),promenade)){on_walk=true;break;}
       if(on_walk)continue;
       Rng r=rng.child(10+segment*200+i*2+(sign>0?1:0));
       garden(sc,r,p,2.1f,3.5f,kDeck,i%3==0,true);
@@ -3792,6 +3813,20 @@ float shot_fov_degrees(const std::string& shot) {
 }
 std::vector<SceneRoute> scene_routes() {
   std::vector<SceneRoute> routes;
+  // Continuous ground-level walks also pass beneath the crossing decks.
+  // Their centres stay in the protected waterside band of the actual quay.
+  for (float sign : {-1.f, 1.f}) {
+    SceneRoute route{sign < 0 ? "arrival_west_promenade" : "arrival_east_promenade", false, {}};
+    const Vec2 land = riverfront::across * sign;
+    for (int i = 0; i <= 47; ++i) {
+      const float z = 500.f - i * 20.f;
+      const Vec2 bank{canal_centre(z) + sign * canal_halfwidth(z), z};
+      const Vec2 walk = bank + Vec2{sign * 5.f, 0} - land * 2.1f;
+      const Vec3 position = P3(walk, kDeck + 1.8f);
+      route.waypoints.push_back({position, position - Vec3{riverfront::along.x, 0, riverfront::along.y} * 5.f});
+    }
+    routes.push_back(std::move(route));
+  }
   SceneRoute civic_route{"civic_to_street",false,{}};
   for(std::size_t i=0;i<kWestPublicRoute.size();++i) {
     Vec3 p=P3(kWestPublicRoute[i],3),t=i+1<kWestPublicRoute.size()?P3(kWestPublicRoute[i+1],3):Vec3{128,3,213};

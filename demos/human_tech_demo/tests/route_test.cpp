@@ -11,9 +11,9 @@
 #include <vector>
 using namespace cb;
 struct Triangle {Vec3 a,b,c;};
-constexpr float loX=-430,loZ=-160,cell=4;
-// Include the complete landing pavilion, including its eastern stair treads.
-constexpr int nx=180,nz=167;
+constexpr float loX=-430,loZ=-480,cell=4;
+// Include both complete Arrival promenades and the landing stair treads.
+constexpr int nx=180,nz=250;
 std::array<std::vector<unsigned>,nx*nz> grid;
 std::vector<Triangle> triangles;
 int ix(float x) {return int(std::floor((x-loX)/cell));}
@@ -108,10 +108,11 @@ int main(int argc,char** argv) {
   std::printf("Market upper bearing x-326 y23 z%.0f: %s\n",z,contact?"supported":"UNSUPPORTED");
   if(!contact)++failures;
  }
- bool bridge_route=false,hex_route=false,loggia_route=false;
+ bool bridge_route=false,hex_route=false,loggia_route=false,west_promenade=false,east_promenade=false;
  for(const auto& route:scene_routes()) {
   bridge_route|=route.id=="arrival_bridge_to_market";hex_route|=route.id=="canal_hex_podium_access";
   loggia_route|=route.id=="garden_floor_loggia";
+  west_promenade|=route.id=="arrival_west_promenade";east_promenade|=route.id=="arrival_east_promenade";
   if(route.id=="garden_access") {std::printf("Retired east ground access must not remain in route metadata\n");++failures;}
   if(route.id=="garden_floor_loggia")for(const auto& p:route.waypoints)
    if(p.position.y<278.9f){std::printf("Garden loggia incorrectly claims ground access\n");++failures;}
@@ -147,6 +148,6 @@ int main(int argc,char** argv) {
   std::printf("%s: %d samples, clearance[%.4f,%.4f], support_failures%d, clearance_obstructions%d, wall_crossings%d\n",route.id.c_str(),points,minClear,maxClear,unsupported,blocked,crossed);
   failures+=unsupported+blocked+crossed;
  }
- if(!bridge_route||!hex_route||!loggia_route){std::printf("Missing current Arrival access contract\n");++failures;}
+ if(!bridge_route||!hex_route||!loggia_route||!west_promenade||!east_promenade){std::printf("Missing current Arrival access contract\n");++failures;}
  return failures?1:0;
 }

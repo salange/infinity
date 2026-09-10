@@ -28,7 +28,8 @@ struct Palette {
     s.materials[neck].lit_probability=.12f;
     ring=surface(s,s.materials[M_WHITE_METAL],"canal tower satin champagne crown rings",{.88f,.83f,.71f},.24f,.32f);
     deck=surface(s,s.materials[M_DARK_METAL],"canal tower recessed crown walk",{.12f,.09f,.055f},.49f,.35f);
-    roof=surface(s,s.materials[M_MARBLE_WHITE],"canal tower pale formed pavilion roof",{.87f,.81f,.68f},.42f,.035f);
+    roof=surface(s,s.materials[M_WHITE_METAL],"canal tower pale formed pavilion roof",{.97f,.90f,.76f},.38f,0);
+    s.materials[roof].normal_strength=.025f;
   }
 };
 Vec3 radial(float a) {return {std::cos(a),0,std::sin(a)};}

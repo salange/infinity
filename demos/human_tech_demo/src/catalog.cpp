@@ -374,6 +374,7 @@ bool generate_asset(Scene& sc, const std::string& text, Rng root, int detail, st
 std::string asset_catalog_text() {
   return
       "asset kinds (cityblock --asset KIND:NAME[;key=value...]):\n"
+      "  arrival-six-towers             six Blender-authored Arrival towers and their lots\n"
       "  tower:diagrid|lens|sail|finweave|xframe|hex|curtain|louvre|ribbon|random\n"
       "      keys: half floors facade base crown plan exponent sides taper tip twist setback setback_scale\n"
       "            floor_h module spandrel fin_depth member_r lattice_rows bands base_floors base_scale a b rot_deg detail\n"

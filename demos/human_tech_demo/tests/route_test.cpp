@@ -109,7 +109,7 @@ int main(int argc,char** argv) {
   if(!contact)++failures;
  }
  bool bridge_route=false,hex_route=false,loggia_route=false,west_promenade=false,east_promenade=false;
- for(const auto& route:scene_routes()) {
+ for(const auto& route:scene_routes(!params.asset_kit.empty())) {
   bridge_route|=route.id=="arrival_bridge_to_market";hex_route|=route.id=="canal_hex_podium_access";
   loggia_route|=route.id=="garden_floor_loggia";
   west_promenade|=route.id=="arrival_west_promenade";east_promenade|=route.id=="arrival_east_promenade";

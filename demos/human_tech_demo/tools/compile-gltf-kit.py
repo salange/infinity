@@ -108,18 +108,25 @@ def compile_kit(source, output, manifest=None):
         if spec.get('specularFactor',1)!=1 or spec.get('specularColorFactor',[1,1,1])!=[1,1,1]: raise ValueError('non-default specular not mapped')
         if m.get('alphaMode','OPAQUE') not in ('OPAQUE','BLEND'): raise ValueError('alpha masking requires a compiled map')
         color=p.get('baseColorFactor',[1,1,1,1]);rough=p.get('roughnessFactor',1);metal=p.get('metallicFactor',1)
-        flags=int(m.get('extras',{}).get('engine_flags',0));trans=ext.get('KHR_materials_transmission',{}).get('transmissionFactor',0)
+        extras=m.get('extras',{})
+        flags=int(extras.get('engine_flags',0));trans=ext.get('KHR_materials_transmission',{}).get('transmissionFactor',0)
         if trans>0 or m.get('alphaMode')=='BLEND': flags|=128
         emit=m.get('emissiveFactor',[0,0,0]);strength=ext.get('KHR_materials_emissive_strength',{}).get('emissiveStrength',1)
         peak=max(emit)*strength
         if peak>0: flags|=2
-        tint=[x*strength/peak for x in emit] if peak>0 else color[:3]
+        tint=[x*strength/peak for x in emit] if peak>0 else extras.get('engine_tint2',color[:3])
+        if len(tint)!=3 or not all(math.isfinite(x) and x>=0 for x in tint):raise ValueError('invalid material tint')
+        normal_strength=extras.get('engine_normal_strength',.35)
+        if not math.isfinite(normal_strength) or not 0<=normal_strength<=1:raise ValueError('invalid normal strength')
         # Factors in glTF are linear. No extra gamma transform is applied.
-        string(m.get('name','material'));f32(*color[:3],rough,metal,peak,0.35);u32(flags)
-        optical=[ior,trans,color[3],m.get('extras',{}).get('engine_thickness_m',.012)] if flags&128 else [4.5,3.6,6.,.7]
+        string(m.get('name','material'));f32(*color[:3],rough,metal,peak,normal_strength);u32(flags)
+        if flags&128 and flags&1:raise ValueError('occupied glass and thin glass are distinct material models')
+        optical=[ior,trans,color[3],extras.get('engine_thickness_m',.012)] if flags&128 else extras.get('engine_room',[4.5,3.6,6.,.7])
         if flags&128 and (not 0<=trans<=1 or not 0<=color[3]<=1 or not 0<optical[3]<1): raise ValueError('invalid glass optical factors')
+        if not flags&128 and (len(optical)!=4 or not all(math.isfinite(x) for x in optical) or min(optical[:3])<=0 or not 0<=optical[3]<=1):raise ValueError('invalid occupied room factors')
         f32(*tint,*optical);string(m.get('extras',{}).get('engine_albedo_set',''));f32(1.)
-        material_records.append({'name':m.get('name'),'base_color_linear':color[:3],'roughness':rough,'metallic':metal,'flags':flags,'double_sided':m.get('doubleSided',False),'glass_optical':dict(zip(('ior','transmission','alpha','thickness_m'),optical)) if flags&128 else None})
+        material_records.append({'name':m.get('name'),'base_color_linear':color[:3],'roughness':rough,'metallic':metal,'flags':flags,'double_sided':m.get('doubleSided',False),'glass_optical':dict(zip(('ior','transmission','alpha','thickness_m'),optical)) if flags&128 else None,
+                                 'occupied_room':dict(zip(('width_m','height_m','depth_m','lit_probability'),optical)) if flags&1 else None})
     resources=[]
     for root in doc['scenes'][doc.get('scene',0)]['nodes']:
         n=doc['nodes'][root]

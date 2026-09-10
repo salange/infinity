@@ -776,7 +776,9 @@ int main(int argc, char **argv) {
     env_day.specular.release();
   };
   if (!args.scene_manifest.empty()) {
-    const auto geometry = cb::scene_layout_manifest(sp.seed);
+    const bool authored_arrival = std::any_of(scene.asset_instances.begin(),scene.asset_instances.end(),
+        [&](const auto& instance){return scene.asset_library.resources[instance.resource].name=="arrival_hero";});
+    const auto geometry = cb::scene_layout_manifest(sp.seed,authored_arrival);
     std::ofstream manifest(args.scene_manifest);
     manifest << geometry.substr(0, geometry.rfind('}'))
              << ",\"lighting_presets\":[";

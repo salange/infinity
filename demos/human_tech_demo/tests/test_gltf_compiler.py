@@ -58,6 +58,22 @@ class CompilerContract(unittest.TestCase):
         material['alphaMode']='BLEND';material['pbrMetallicRoughness']['baseColorFactor'][3]=.18
         material['extensions']={'KHR_materials_transmission':{'transmissionFactor':.86}}
         r=self.compile();self.assertEqual(r['materials'][0]['glass_optical'],{'ior':1.5,'transmission':.86,'alpha':.18,'thickness_m':.012})
+    def test_authored_occupied_room_factors_retained(self):
+        self.doc['materials'][0]['extras']={'engine_flags':1,'engine_room':[3.2,4.125,7,.28],
+                                          'engine_tint2':[.2,.3,.4],'engine_normal_strength':.06}
+        r=self.compile();m=r['materials'][0]
+        self.assertEqual(m['occupied_room'],dict(width_m=3.2,height_m=4.125,depth_m=7,lit_probability=.28))
+        self.assertIsNone(m['glass_optical'])
+        raw=(self.path/'fixture.htkit').read_bytes();offset=148+4+len('ivory')
+        factors=struct.unpack_from('<7fI7f',raw,offset)
+        self.assertAlmostEqual(factors[6],.06)
+        self.assertAlmostEqual(factors[12],4.125)
+        self.assertAlmostEqual(factors[8],.2)
+    def test_invalid_occupied_material_rejected(self):
+        self.doc['materials'][0]['extras']={'engine_flags':1,'engine_room':[3.2,0,7,.28]}
+        with self.assertRaisesRegex(ValueError,'occupied room'):self.compile()
+        self.doc['materials'][0]['extras']={'engine_flags':129}
+        with self.assertRaisesRegex(ValueError,'distinct material'):self.compile()
     def test_zero_tangent_reconstructed_from_uv(self):
         canonical_spec=importlib.util.spec_from_file_location('canonical',Path(__file__).resolve().parents[1]/'tools'/'canonicalize-gltf-kit.py')
         canonical=importlib.util.module_from_spec(canonical_spec);canonical_spec.loader.exec_module(canonical)

@@ -205,6 +205,33 @@ scene. The exported geometry and normals are exact; Blender materials and
 lighting are simplified for shape inspection. The native module remains the
 source of the rendered tower.
 
+The six buildings opposite the First Arrival station are separate Blender-authored
+assets: a deep cellular ivory tower, narrow dark blade, curved white ribbon tower,
+graphite ellipse with an inclined rounded crown, bronze oval and white diamond
+lattice tower. The graphite tower's rounded three-storey socket is a seventh
+resource. Their native instances replace the old fragmented parcels, with
+supported planted terraces and a clear route around the new occupied footprints.
+
+The normal asset build also builds `arrival_towers.htkit` beside the original kit.
+To rebuild only this architectural group and its editable source:
+
+```sh
+uv run --script demos/human_tech_demo/tools/build-arrival-towers.py --inspect
+```
+
+This creates an editable library, raw/canonical glTF, native kit and manifest.
+`--inspect` additionally saves a Blender layout and diagnostic image at the fixed
+First Arrival camera. The scene imports the adjacent tower kit with checked
+material remapping; occupied glazing keeps continuous metric UVs and actual
+floor heights. Custom base-kit paths require the adjacent `arrival_towers.htkit`
+for full city views. Missing or corrupt resources produce an error.
+
+Use `--asset arrival-six-towers` for a small native assembly inspection, or the
+normal `--shot aerial` for the complete city. Assembly timing and Blender images
+do not establish the complete city's performance or visual parity. The new
+`human_tech_arrival_towers` check measures actual imported shaft and socket
+bearings, foundation/plant contacts, tangent frames and window-floor coordinates.
+
 The canonical manifest also includes camera waypoints along the market bridge
 approach, cylinder podium access, landing stairs and retained garden connections.
 The garden loggia route starts on its occupied elevated floor; the former east

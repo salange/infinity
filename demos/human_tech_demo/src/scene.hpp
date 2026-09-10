@@ -32,6 +32,6 @@ struct SceneParams {
 bool shot_camera(const std::string &shot, Vec3 &position, Vec3 &target);
 float shot_fov_degrees(const std::string &shot);
 std::string scene_layout_manifest();
-std::string scene_layout_manifest(const std::string &seed);
+std::string scene_layout_manifest(const std::string &seed, bool authored_arrival_district = true);
 Scene generate_scene(const SceneParams &params);
 } // namespace cb

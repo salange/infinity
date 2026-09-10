@@ -17,6 +17,7 @@ struct AssetLibrary {
   std::vector<MaterialDesc> materials;
   std::vector<MeshResource> resources;
   std::string source_sha256;
+  std::vector<std::string> additional_source_sha256;
 };
 struct AssetInstance {
   std::uint32_t resource{0};
@@ -32,6 +33,7 @@ std::uint32_t asset_resource(const AssetLibrary& library, std::string_view name)
 Vec3 asset_transform_point(const AssetInstance& instance, Vec3 p);
 Vec3 asset_transform_normal(const AssetInstance& instance, Vec3 n);
 struct Scene;
+void append_asset_library(Scene& scene, const std::filesystem::path& path);
 void add_asset_instance(Scene& scene, std::string_view name, Vec3 position,
                         float yaw = 0, Vec3 scale = {1,1,1}, Vec3 tint = {1,1,1});
 inline void add_asset_instance(Scene& scene, std::string_view name, Vec3 position,

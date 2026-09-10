@@ -26,6 +26,16 @@ editable source hashes, material factors and resource bounds. Blender save
 metadata can change a `.blend` file hash; runtime content is checked separately.
 `--compile-only` rebuilds the runtime file from the existing glTF without Blender.
 
+The same build also creates a separate `arrival_towers` library, containing the
+six concept01 near-station shafts and the graphite tower's rounded socket.
+`arrival-towers-manifest.json` pins its recipes and derivative hashes. Each shaft
+is a complete editable mesh assembly with physical floors, facade relief, core
+and crown. `build-arrival-towers.py` rebuilds this addition independently.
+The native city appends its named resources and materials to the unchanged base
+library, retaining both source hashes and rejecting duplicate resource names.
+Occupied-glass metadata explicitly carries the room width, height, depth,
+lighting probability and tint. It is distinct from the thin-sheet optical model.
+
 ## Coordinates and representation
 
 Architectural measurements are metres at 1:1 scale. The authoring helpers

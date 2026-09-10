@@ -6,6 +6,8 @@
 #include "civic_forecourt.hpp"
 #include "canal_construction.hpp"
 #include "canal_tower.hpp"
+#include "arrival_towers.hpp"
+#include "arrival_tower_lots.hpp"
 
 #include <algorithm>
 #include <array>
@@ -44,6 +46,11 @@ namespace {
 // addresses remain stable when new detail layers are added to this visual set.
 constexpr float kDeck = 1.2f;
 thread_local bool arrival_blockout = false;
+thread_local bool arrival_authored_towers = false;
+bool arrival_replaced_address(int address) {
+  return arrival_authored_towers&&(address==253||address==270||address==287||
+                                  address==290||address==307||address==344);
+}
 // Orthogonal survey axes: cross streets point east-southeast; the broad
 // boulevard follows the perpendicular northeast-southwest street family.
 constexpr float kGridCos=.963518f,kGridSin=.267645f;
@@ -93,6 +100,14 @@ const std::array<Vec2,12> kWestPublicRoute{{{-187.3f,-99},{-127,-99},{-99,-90},{
     {-113,60},riverfront::point(146,11.5f),riverfront::point(176.5f,11.5f),
     riverfront::point(176.5f,108),riverfront::point(176.5f,130),
     riverfront::point(216,130),{44,194}}};
+const auto& west_public_route(bool authored=arrival_authored_towers) {
+  static const auto revised=[] {auto path=kWestPublicRoute;path.back()={24,219};return path;}();
+  return authored?revised:kWestPublicRoute;
+}
+const auto& garden_approach(bool authored=arrival_authored_towers) {
+  static const auto revised=[] {auto path=kGardenApproach;path.front()={24,219};return path;}();
+  return authored?revised:kGardenApproach;
+}
 const std::vector<Vec2> kWestCivicCourt{{-207,-130},{-125,-140},{-96,-92},{-124,-53},{-207,-72}};
 const std::vector<Vec2> kWestMarketReservation{{-172,55},{-117,55},{-117,163},{-172,163}};
 const std::vector<Vec2> kMarketPromenade{{-121,163},{-84,163},{-35,84},{-111,84}};
@@ -299,6 +314,7 @@ bool polygons_overlap(const std::vector<Vec2>& a,const std::vector<Vec2>& b) {
   return !separated(a)&&!separated(b);
 }
 bool reserved_plot(const std::vector<Vec2>& plot) {
+  if(arrival_authored_towers&&arrival_tower_lot_overlap(plot,3))return true;
   // Reservations apply to complete occupied footprints, including balconies
   // and roof overhangs, rather than just the parcel centroid.
   const std::array<std::array<float,4>,8> reservations{{
@@ -312,8 +328,8 @@ bool reserved_plot(const std::vector<Vec2>& plot) {
   if(polygons_overlap(plot,plan_rect(80,67,kDome+kDomeMove)))return true;
   for(const auto& reserved:transit_reserved_plans())if(polygons_overlap(plot,reserved))return true;
   for(const auto& reserved:market_approach_footprints())if(polygons_overlap(plot,reserved))return true;
-  for(std::size_t i=0;i+1<kWestPublicRoute.size();++i) {
-    Vec2 a=kWestPublicRoute[i],b=kWestPublicRoute[i+1],d=normalize(b-a),n{-d.y*9,d.x*9};
+  for(std::size_t i=0;i+1<west_public_route().size();++i) {
+    Vec2 a=west_public_route()[i],b=west_public_route()[i+1],d=normalize(b-a),n{-d.y*9,d.x*9};
     if(polygons_overlap(plot,{a-n,b-n,b+n,a+n}))return true;
   }
   Vec2 lo,hi;plan_bounds(plot,&lo,&hi);
@@ -325,8 +341,8 @@ bool reserved_plot(const std::vector<Vec2>& plot) {
       if(polygons_overlap(plot,{{ca-wa,a},{cb-wb,b},{cb+wb,b},{ca+wa,a}}))return true;
     }
   }
-  for(std::size_t i=0;i+1<kGardenApproach.size();++i) {
-    Vec2 a=kGardenApproach[i],b=kGardenApproach[i+1],d=normalize(b-a),n{-d.y*8,d.x*8};
+  for(std::size_t i=0;i+1<garden_approach().size();++i) {
+    Vec2 a=garden_approach()[i],b=garden_approach()[i+1],d=normalize(b-a),n{-d.y*8,d.x*8};
     if(polygons_overlap(plot,{a-n,b-n,b+n,a+n}))return true;
   }
   // The civic ribbon building stands on its own podium beside the square.
@@ -1049,6 +1065,7 @@ void foreground_dark_slab(Scene& sc,Rng rng,const std::vector<Vec2>& land) {
 }
 void parcel(Scene& sc,Rng rng,const std::vector<Vec2>& land,int address) {
   Vec2 c=plan_centroid(land);float distance=length(c);
+  if(arrival_replaced_address(address))return;
   if(reserved_plot(land))return;
   if(c.x<shore(c.y)+24||c.x>east_shore(c.y)-24||std::abs(plan_area(land))<450) return;
   if(address==253) {foreground_dark_slab(sc,rng,land);return;}
@@ -1153,6 +1170,9 @@ std::vector<CoastalPlot> coastal_plots(Rng root) {
 }
 std::vector<std::vector<Vec2>> protected_footprints(bool include_canal=true) {
   std::vector<std::vector<Vec2>> result{plan_rect(80,67,kDome+kDomeMove)};
+  if(arrival_authored_towers) {
+    const auto cleanup=arrival_tower_cleanup_footprints();result.insert(result.end(),cleanup.begin(),cleanup.end());
+  }
   for(const auto& reserved:transit_reserved_plans())result.push_back(reserved);
   for(const auto& corridor:arrival_primary_corridors())result.push_back(corridor);
   for(const auto& corridor:market_approach_footprints())result.push_back(corridor);
@@ -1172,10 +1192,14 @@ std::vector<std::vector<Vec2>> protected_footprints(bool include_canal=true) {
     Vec2 d=normalize(b-a),n{-d.y*half,d.x*half};
     result.push_back({a-n,b-n,b+n,a+n});
   };
-  for(std::size_t i=0;i+1<kGardenApproach.size();++i)corridor(kGardenApproach[i],kGardenApproach[i+1],8);
-  for(std::size_t i=0;i+1<kWestPublicRoute.size();++i)corridor(kWestPublicRoute[i],kWestPublicRoute[i+1],7);
+  for(std::size_t i=0;i+1<garden_approach().size();++i)corridor(garden_approach()[i],garden_approach()[i+1],8);
+  for(std::size_t i=0;i+1<west_public_route().size();++i)corridor(west_public_route()[i],west_public_route()[i+1],7);
   const std::array<Vec2,10> walking{{{-68,94},{-15,109},{-4,106.5f},{34,106.5f},{44,119},{44,194},{128,213},{kLandingEntryX,213},{kLandingEntryX,174},{200,166}}};
   for(std::size_t i=0;i+1<walking.size();++i)corridor(walking[i],walking[i+1],7);
+  if(arrival_authored_towers) {
+    const auto& walk=arrival_tower_public_walk();
+    for(std::size_t i=0;i+1<walk.size();++i)corridor(walk[i],walk[i+1],5);
+  }
   if(include_canal)for(int i=0;i<44;++i) {
     float za=-1350+i*60.f,zb=za+60;
     float a=canal_centre(za),b=canal_centre(zb),wa=canal_halfwidth(za)+15,wb=canal_halfwidth(zb)+15;
@@ -1234,6 +1258,7 @@ std::vector<InfillPlot> infill_plots(Rng rng) {
   auto protected_plans=protected_footprints();std::vector<InfillPlot> result;
   for(const auto& plot:coastal_plots(rng)) {
     Vec2 c=plan_centroid(plot.footprint);
+    if(arrival_replaced_address(plot.address))continue;
     if(length(c)>1100||!reserved_plot(plot.footprint))continue;
     std::vector<std::vector<Vec2>> pieces{plan_scale(plot.footprint,.97f,c)};
     for(const auto& obstacle:protected_plans) {
@@ -2638,10 +2663,10 @@ void civic_landscape(Scene& sc,Rng rng,Rng district_rng) {
     };
     for(std::size_t i=0;i+1<civic_route.size();++i)
       if(intersects(civic_route[i],civic_route[i+1],6))return false;
-    for(std::size_t i=0;i+1<kGardenApproach.size();++i)
-      if(intersects(kGardenApproach[i],kGardenApproach[i+1],6))return false;
-    for(std::size_t i=0;i+1<kWestPublicRoute.size();++i)
-      if(intersects(kWestPublicRoute[i],kWestPublicRoute[i+1],7))return false;
+    for(std::size_t i=0;i+1<garden_approach().size();++i)
+      if(intersects(garden_approach()[i],garden_approach()[i+1],6))return false;
+    for(std::size_t i=0;i+1<west_public_route().size();++i)
+      if(intersects(west_public_route()[i],west_public_route()[i+1],7))return false;
     if(polygons_overlap(shape,kWestCivicCourt)||polygons_overlap(shape,moved_plan(kWestMarketReservation,kMarketMove))||polygons_overlap(shape,moved_plan(kMarketPromenade,kMarketMove))||polygons_overlap(shape,moved_plan(kCanalHexParcel,kHexMove))||polygons_overlap(shape,moved_plan(kCanalHexAccess,kHexMove))||polygons_overlap(shape,kGardenCompanionParcel))return false;
     for(const auto& reserved:transit_reserved_plans())if(polygons_overlap(shape,reserved))return false;
     for(const auto& corridor:arrival_primary_corridors())if(polygons_overlap(shape,corridor))return false;
@@ -2649,6 +2674,14 @@ void civic_landscape(Scene& sc,Rng rng,Rng district_rng) {
     return true;
   };
   auto available=[&](const std::vector<Vec2>& shape) {
+    if(arrival_authored_towers) {
+      for(const auto& area:arrival_tower_cleanup_footprints())if(polygons_overlap(shape,area))return false;
+      const auto& walk=arrival_tower_public_walk();
+      for(std::size_t i=0;i+1<walk.size();++i) {
+        Vec2 a=walk[i],b=walk[i+1],side=normalize(Vec2{-(b-a).y,(b-a).x})*5;
+        if(polygons_overlap(shape,{a-side,b-side,b+side,a+side}))return false;
+      }
+    }
     if(!route_clear(shape))return false;
     for(const auto& wing:civic_base_wings())if(polygons_overlap(shape,moved_plan(wing.footprint,kDomeMove)))return false;
     for(const auto& p:shape) {
@@ -3309,6 +3342,12 @@ void west_market(Scene& sc,Rng rng) {
   }
 }
 void street_detail(Scene& sc,Rng rng) {
+  if(arrival_authored_towers) {
+    // The former market/canopy occupied the new hex tower's address. Its
+    // replacement belongs to the coherent six-tower district, not an overlay.
+    slab(sc.opaque,{{-103,89},{-32,89},{-21,116},{-95,116}},kDeck,.60f,M_PLAZA);
+    return;
+  }
   // A continuous pedestrian surface joins the square to the occupied shop
   // frontages. Planting remains inside its retained beds at either edge.
   std::vector<Vec2> promenade{{-9,89},{62,89},{65,160},{108,211},{109,225},{-9,225}};
@@ -3532,9 +3571,10 @@ void public_access(Scene& sc,Rng rng) {
       slab(sc.opaque,plan_circle(radius,24,p),kDeck,.12f,M_PLAZA);
     }
   };
-  walk({{-68,94},{-15,109},{-4,106.5f},{34,106.5f},{44,119},{44,194},{128,213}});
-  walk(std::vector<Vec2>(kGardenApproach.begin(),kGardenApproach.end()));
-  walk(std::vector<Vec2>(kWestPublicRoute.begin(),kWestPublicRoute.end()));
+  if(arrival_authored_towers)walk({{-68,94},{-15,109},{-4,106.5f},{24,106.5f}});
+  else walk({{-68,94},{-15,109},{-4,106.5f},{34,106.5f},{44,119},{44,194},{128,213}});
+  walk(std::vector<Vec2>(garden_approach().begin(),garden_approach().end()));
+  walk(std::vector<Vec2>(west_public_route().begin(),west_public_route().end()));
   // A founded footway joins the bridge block edge to a real open market bay.
   const auto market_walk=relocated_market_approach();
   for(std::size_t i=0;i+1<market_walk.size();++i) {
@@ -3543,14 +3583,23 @@ void public_access(Scene& sc,Rng rng) {
   }
   for(Vec2 p:market_walk)slab(sc.opaque,plan_circle(1.8f,24,p),kDeck,.6f,M_SIDEWALK);
   const auto promenade_plans = arrival_promenade_plans();
-  for(std::size_t segment=0;segment+1<kGardenApproach.size();++segment) {
-    Vec2 a=kGardenApproach[segment],b=kGardenApproach[segment+1],d=normalize(b-a),side{-d.y,d.x};
+  for(std::size_t segment=0;segment+1<garden_approach().size();++segment) {
+    Vec2 a=garden_approach()[segment],b=garden_approach()[segment+1],d=normalize(b-a),side{-d.y,d.x};
     int count=int(length(b-a)/19);
     for(int i=0;i<count;++i)for(int sign:{-1,1}) {
       Vec2 p=a+(b-a)*((i+.5f)/count)+side*(sign*9.f);
+      if(arrival_authored_towers&&arrival_tower_lot_overlap(plan_rect(6,7,p),3))continue;
       bool on_walk=false;
-      for(std::size_t j=0;j+1<kWestPublicRoute.size();++j) {
-        Vec2 wa=kWestPublicRoute[j],wb=kWestPublicRoute[j+1],wd=wb-wa;
+      if(arrival_authored_towers) {
+        const auto& route=arrival_tower_public_walk();
+        for(std::size_t j=0;j+1<route.size();++j) {
+          const Vec2 direction=route[j+1]-route[j];
+          const float t=std::clamp(dot(p-route[j],direction)/dot(direction,direction),0.f,1.f);
+          if(length(p-(route[j]+direction*t))<10){on_walk=true;break;}
+        }
+      }
+      for(std::size_t j=0;j+1<west_public_route().size();++j) {
+        Vec2 wa=west_public_route()[j],wb=west_public_route()[j+1],wd=wb-wa;
         float wt=std::clamp(dot(p-wa,wd)/dot(wd,wd),0.f,1.f);
         if(length(p-(wa+wd*wt))<9.f){on_walk=true;break;}
       }
@@ -3656,13 +3705,24 @@ void transit_structure(Scene& sc) {
 } // namespace
 
 Scene generate_scene(const SceneParams& params) {
-  struct ModeRestore {bool old=arrival_blockout;~ModeRestore(){arrival_blockout=old;}} restore;
+  struct ModeRestore {bool old=arrival_blockout,old_towers=arrival_authored_towers;
+    ~ModeRestore(){arrival_blockout=old;arrival_authored_towers=old_towers;}} restore;
   arrival_blockout=params.asset=="arrival-blockout";
+  const bool tower_sample=params.asset=="arrival-six-towers";
+  arrival_authored_towers=!params.asset_kit.empty()&&!arrival_blockout&&(params.asset.empty()||tower_sample);
   Scene sc;sc.reviewed_material_maps=params.reviewed_material_maps;palette(sc);
   Rng root=root_rng(params.seed);set_far_patterns(params.far_patterns);
   if(!params.asset_kit.empty()&&!arrival_blockout) {
     sc.asset_library=load_asset_library(params.asset_kit,std::uint32_t(sc.materials.size()));
     sc.materials.insert(sc.materials.end(),sc.asset_library.materials.begin(),sc.asset_library.materials.end());
+    if(arrival_authored_towers)
+      append_asset_library(sc,std::filesystem::path(params.asset_kit).parent_path()/"arrival_towers.htkit");
+  }
+  if(tower_sample) {
+    slab(sc.opaque,plan_rect(450,450,{120,160}),.65f,.5f,M_PLAZA);
+    build_arrival_tower_lots(sc,root.child(801));stage_arrival_towers(sc);
+    sc.finalize_draws();shot_camera(params.shot,sc.camera_position,sc.camera_target);
+    sc.city_size="six authored First Arrival towers";sc.city_radius=500;return sc;
   }
   if(!params.asset.empty()&&!arrival_blockout) {
     std::string error;
@@ -3683,6 +3743,7 @@ Scene generate_scene(const SceneParams& params) {
   }
   transit_structure(sc);stage_transit_concourse(sc,root.child(794));
   stage_landing_lounge(sc,root.child(795));
+  if(arrival_authored_towers) {build_arrival_tower_lots(sc,root.child(801));stage_arrival_towers(sc);}
   if(!arrival_blockout)allocate_authored_roofs(sc);
   sc.finalize_draws();sc.city_size="coastal human-tech metropolis";sc.city_radius=10000;
   shot_camera(params.shot,sc.camera_position,sc.camera_target);
@@ -3702,7 +3763,7 @@ float shot_fov_degrees(const std::string& shot) {
   return shot=="garden"?53.f:shot=="civic"?62.2f:shot=="street"?65.f:shot=="galaxy"?62.f:
       shot=="landing"||shot=="terrace"?48.f:46.f;
 }
-std::vector<SceneRoute> scene_routes() {
+std::vector<SceneRoute> scene_routes(bool authored_arrival_district) {
   std::vector<SceneRoute> routes;
   // Continuous ground-level walks also pass beneath the crossing decks.
   // Their centres stay in the protected waterside band of the actual quay.
@@ -3719,8 +3780,8 @@ std::vector<SceneRoute> scene_routes() {
     routes.push_back(std::move(route));
   }
   SceneRoute civic_route{"civic_to_street",false,{}};
-  for(std::size_t i=0;i<kWestPublicRoute.size();++i) {
-    Vec3 p=P3(kWestPublicRoute[i],3),t=i+1<kWestPublicRoute.size()?P3(kWestPublicRoute[i+1],3):Vec3{128,3,213};
+  for(std::size_t i=0;i<west_public_route(authored_arrival_district).size();++i) {
+    Vec3 p=P3(west_public_route(authored_arrival_district)[i],3),t=i+1<west_public_route(authored_arrival_district).size()?P3(west_public_route(authored_arrival_district)[i+1],3):Vec3{128,3,213};
     if(i==0)t={102.5f,67.3f,-56};
     if(i==6)t={-128,38,-90};
     civic_route.waypoints.push_back({p,t});
@@ -3778,8 +3839,14 @@ std::vector<SceneRoute> scene_routes() {
   const Vec3 hex_door=P3(kCanalHex+kHexMove+Vec2{CanalTowerSpec{}.base_radius+1,0},15);
   hex_route.waypoints.push_back({hex_door,P3(kCanalHex+kHexMove,15)});
   routes.push_back(std::move(hex_route));
-  SceneRoute landing_route{"landing_access",true,{
-    {{44,3,194},{128,3,213}},{{128,3,213},{160,20,213}}}};
+  SceneRoute landing_route{"landing_access",true,{}};
+  if(authored_arrival_district) {
+    const auto& arrival_walk=arrival_tower_public_walk();
+    for(std::size_t i=0;i<arrival_walk.size();++i) {
+      const Vec3 p=P3(arrival_walk[i],3),target=i+1<arrival_walk.size()?P3(arrival_walk[i+1],3):Vec3{160,20,213};
+      landing_route.waypoints.push_back({p,target});
+    }
+  } else landing_route.waypoints={{{44,3,194},{128,3,213}},{{128,3,213},{160,20,213}}};
   constexpr int landing_steps=196;
   constexpr float landing_rise=(34-kDeck)/landing_steps;
   for(int i=0;i<landing_steps;++i) {
@@ -3927,7 +3994,9 @@ std::vector<SceneRoute> scene_routes() {
   routes.push_back(std::move(transit_route));
   return routes;
 }
-std::string scene_layout_manifest(const std::string& seed) {
+std::string scene_layout_manifest(const std::string& seed,bool authored_arrival_district) {
+  struct ModeRestore {bool old=arrival_authored_towers;~ModeRestore(){arrival_authored_towers=old;}} restore;
+  arrival_authored_towers=authored_arrival_district;
   std::ostringstream out;out.precision(9);
   auto json_string=[](const std::string& value) {
     constexpr char hex[]="0123456789abcdef";std::string result="\"";
@@ -3939,6 +4008,7 @@ std::string scene_layout_manifest(const std::string& seed) {
     result.push_back('"');return result;
   };
   out << "{\"version\":1,\"seed\":"<<json_string(seed)<<",\"units\":\"metres\",\"up\":\"y\",\"water_height\":0,"
+      << "\"arrival_authored_towers\":"<<(authored_arrival_district?arrival_towers_manifest():"[]")<<','
       << "\"anchors\":[{\"id\":\"civic_ring\",\"position\":[171.883,1.2,-166.568],\"radius\":51.064,\"height_scale\":1.9},"
       << "{\"id\":\"civic_dome\",\"position\":[4,2.4,-120],\"radius\":42},"
       << "{\"id\":\"foreground_lattice\",\"position\":[-345,17.2,405],\"height\":544,\"north_elevation\":\"snapped_graphite_structure_and_solar_control_sector\",\"south_elevation\":\"ivory_ceramic_lattice\",\"west_elevation\":\"ivory_lattice_and_open_loggias_outside_occupied_inner_curtain\",\"north_arc_degrees\":["
@@ -3949,7 +4019,8 @@ std::string scene_layout_manifest(const std::string& seed) {
       << "{\"id\":\"west_market\",\"position\":[-334,1.2,88],\"facade_x\":-312.5},"
       << "{\"id\":\"south_civic_arcade\",\"position\":[70.884,1.2,7.64],\"occupied_floor_count\":2,\"asymmetric_upper_wings\":true,\"public_colonnade_roof_y\":5.2},"
       << "{\"id\":\"secondary_curved_slab\",\"position\":[410,13.2,95],\"shaft_floors\":44,\"shaft_crown_y\":197.2},"
-      << "{\"id\":\"foreground_graphite_slab\",\"parcel\":\"coastal_ribbon/4/5\",\"position\":[43.17630,13.2,342.26577],\"crown_centre\":[26.05630,206.8,340.00577],\"half_axes\":[21.83,29.47],\"yaw_radians\":0.18,\"crown_scale\":0.8,\"occupied_shaft_floors\":47,\"supporting_frontage_floors\":3,\"parapet_top_y\":207.45},"
+      << (authored_arrival_district?"{\"id\":\"foreground_graphite_slab\",\"resource\":\"arrival_hero\",\"replaces_parcel\":\"coastal_ribbon/4/5\",\"position\":[72.82,13.2,301.39],\"half_axes\":[28.80,16.74],\"instance_yaw\":0.27,\"occupied_shaft_floors\":45,\"supporting_frontage_floors\":3,\"crown\":\"rounded inclined closure\",\"socket\":\"rounded Blender-authored occupied building\"},"
+      : "{\"id\":\"foreground_graphite_slab\",\"parcel\":\"coastal_ribbon/4/5\",\"position\":[43.17630,13.2,342.26577],\"crown_centre\":[26.05630,206.8,340.00577],\"half_axes\":[21.83,29.47],\"yaw_radians\":0.18,\"crown_scale\":0.8,\"occupied_shaft_floors\":47,\"supporting_frontage_floors\":3,\"parapet_top_y\":207.45},")
       << "{\"id\":\"bronze_needle\",\"position\":[190,13.2,-300],\"height\":440},"
       << "{\"id\":\"lattice_garden\",\"position\":[-402.5,277.2,403],\"tower_side\":\"west\"},"
       << "{\"id\":\"garden_companion\",\"position\":[-386,1.2,300],\"radius\":18,\"roof_y\":321.2},"
@@ -3980,12 +4051,12 @@ std::string scene_layout_manifest(const std::string& seed) {
   first=true;
   for(const auto& plot:coastal_plots(root_rng(seed).child(1000))) {
     Vec2 c=plan_centroid(plot.footprint);
-    bool occupied=!reserved_plot(plot.footprint)&&c.x>=shore(c.y)+24&&c.x<=east_shore(c.y)-24;
+    bool occupied=!arrival_replaced_address(plot.address)&&!reserved_plot(plot.footprint)&&c.x>=shore(c.y)+24&&c.x<=east_shore(c.y)-24;
     if(!first)out<<',';
     first=false;
     out<<"{\"id\":\"coastal_ribbon/"<<plot.column<<'/'<<plot.row<<"\",\"family\":"<<plot.address%16
        <<",\"authored_shaft_floor_override\":"<<rear_middle_floors(plot.address)
-       <<",\"facade_override\":"<<json_string(plot.address==253?"curved_graphite_foreground_slab":plot.address==478||plot.address==475?"ivory_hex_lattice":plot.address==398?"ivory_diagrid":plot.address==529?"ivory_hex_members":"none")
+       <<",\"facade_override\":"<<json_string(arrival_replaced_address(plot.address)?"replaced_by_authored_arrival_district":plot.address==253?"curved_graphite_foreground_slab":plot.address==478||plot.address==475?"ivory_hex_lattice":plot.address==398?"ivory_diagrid":plot.address==529?"ivory_hex_members":"none")
        <<",\"occupied\":"<<(occupied?"true":"false")<<",\"centre\":["<<c.x<<','<<c.y
        <<"],\"tier\":\""<<(length(c)<900?"foreground":length(c)<1800?"middle":"far")<<"\",\"footprint\":[";
     for(std::size_t i=0;i<plot.footprint.size();++i) {
@@ -4114,7 +4185,7 @@ std::string scene_layout_manifest(const std::string& seed) {
   }
   out<<"],\"routes\":[";
   bool first_route=true;
-  for(const auto& route:scene_routes()) {
+  for(const auto& route:scene_routes(authored_arrival_district)) {
     if(!first_route)out<<',';
     first_route=false;
     out<<"{\"id\":"<<json_string(route.id)

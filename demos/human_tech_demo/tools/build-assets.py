@@ -37,3 +37,5 @@ manifest['recipe']={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (
 manifest['artifacts']={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in args.output.iterdir() if p.suffix in ('.blend','.glb','.htkit')}
 manifest_path.write_text(json.dumps(manifest,indent=2)+'\n')
 print('Ready:',args.output/'human_tech_kit.htkit')
+subprocess.run([sys.executable,str(here/'build-arrival-towers.py'),'--blender',args.blender,'--output',str(args.output)]+
+               (['--compile-only'] if args.compile_only else []),check=True)

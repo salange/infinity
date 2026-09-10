@@ -10,6 +10,8 @@
 | Stocked corner market, cafe and static products | `../src/market_staging.cpp` | Project-authored reusable geometry and placements, repository license |
 | Curved landing pavilion furnishings, library shelves and lighting | `../src/landing_lounge.cpp` | Project-authored reusable furniture, metric geometry and placements, repository license |
 | Architectural and botanical mesh library | `../tools/author-kit-blender.py` | Project-authored Blender construction, repository license |
+| Six near-station tower meshes and rounded graphite socket | `../tools/author-arrival-towers-blender.py`, `arrival-towers-manifest.json` | Project-authored Blender construction; three design recipes use shared metric mesh primitives; repository license |
+| Coordinated six-tower terraces, planted beds and public circulation | `../src/arrival_tower_lots.cpp`, `../src/arrival_towers.cpp` | Project-authored occupied construction and native instances, repository license |
 | Native kit | `../tools/build-assets.py`, `authored-kit-manifest.json` | Validated canonical glTF derivative of the editable Blender source |
 | Ceramic, stone, soil, bark and brushed-metal material maps | `../src/textures.cpp` | Project-authored generated surface library, repository license |
 | Reviewed marble, paving and terrazzo maps | `surface-manifest.json`; UM `design/assets/human-tech-materials/` | ambientCG Marble012, PavingStones136 and Tiles043, unchanged source JPGs, CC0-1.0 |

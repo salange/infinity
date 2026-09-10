@@ -17,5 +17,5 @@ struct SceneRoute {
 
 // Authored walking camera paths through the same scene as the six stills.
 // A runtime character controller/navmesh is not supplied by this benchmark.
-std::vector<SceneRoute> scene_routes();
+std::vector<SceneRoute> scene_routes(bool authored_arrival_district = true);
 } // namespace cb

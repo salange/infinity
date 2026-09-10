@@ -83,6 +83,17 @@ std::uint32_t asset_resource(const AssetLibrary& library,std::string_view name){
   for(std::uint32_t i=0;i<library.resources.size();++i)if(library.resources[i].name==name)return i;
   invalid("required named resource missing: "+std::string(name));
 }
+void append_asset_library(Scene& scene,const std::filesystem::path& path){
+  auto extra=load_asset_library(path,static_cast<std::uint32_t>(scene.materials.size()));
+  for(const auto& resource:extra.resources)
+    if(std::any_of(scene.asset_library.resources.begin(),scene.asset_library.resources.end(),
+       [&](const auto& existing){return existing.name==resource.name;}))
+      invalid("duplicate appended resource: "+resource.name);
+  scene.materials.insert(scene.materials.end(),extra.materials.begin(),extra.materials.end());
+  scene.asset_library.materials.insert(scene.asset_library.materials.end(),extra.materials.begin(),extra.materials.end());
+  scene.asset_library.additional_source_sha256.push_back(extra.source_sha256);
+  for(auto& resource:extra.resources)scene.asset_library.resources.push_back(std::move(resource));
+}
 Vec3 asset_transform_point(const AssetInstance& v,Vec3 p){
   p={p.x*v.scale.x,p.y*v.scale.y,p.z*v.scale.z};const float c=std::cos(v.yaw),s=std::sin(v.yaw);
   return {c*p.x+s*p.z+v.translation.x,p.y+v.translation.y,-s*p.x+c*p.z+v.translation.z};

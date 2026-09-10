@@ -1,0 +1,590 @@
+{
+  "schema_version": 2,
+  "source_format": "glTF 2.0",
+  "source_sha256": "52b96fe600d0d63235ccd413785dc5444d8f929b57c8d72c6ea387b3b2d3fc1e",
+  "runtime_sha256": "5f23cb49cc8b262664979320afdf62963d6dd965a82c1d3fbefbaf0f1c379608",
+  "units": "metres",
+  "up_axis": "Y",
+  "license": "Project-authored geometry; same license as repository",
+  "materials": [
+    {
+      "name": "arrival_blade_glass_bronze",
+      "base_color_linear": [
+        0.7799999713897705,
+        0.5799999833106995,
+        0.36000001430511475
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.6000000238418579,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.082903225806452,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_bronze",
+      "base_color_linear": [
+        0.49000000953674316,
+        0.28999999165534973,
+        0.10000000149011612
+      ],
+      "roughness": 0.25,
+      "metallic": 0.699999988079071,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    },
+    {
+      "name": "arrival_bronze_dark",
+      "base_color_linear": [
+        0.1599999964237213,
+        0.10499999672174454,
+        0.052000001072883606
+      ],
+      "roughness": 0.3100000023841858,
+      "metallic": 0.6200000047683716,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    },
+    {
+      "name": "arrival_bronze_glass_bronze",
+      "base_color_linear": [
+        0.7799999713897705,
+        0.5799999833106995,
+        0.36000001430511475
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.6000000238418579,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.033333333333333,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_bronze_glass_dark",
+      "base_color_linear": [
+        0.5,
+        0.6000000238418579,
+        0.6600000262260437
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.3100000023841858,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.033333333333333,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_diamond_glass_bronze",
+      "base_color_linear": [
+        0.7799999713897705,
+        0.5799999833106995,
+        0.36000001430511475
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.6000000238418579,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.0094594594594595,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_diamond_glass_dark",
+      "base_color_linear": [
+        0.5,
+        0.6000000238418579,
+        0.6600000262260437
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.3100000023841858,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.0094594594594595,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_graphite",
+      "base_color_linear": [
+        0.0430000014603138,
+        0.05000000074505806,
+        0.0560000017285347
+      ],
+      "roughness": 0.2800000011920929,
+      "metallic": 0.41999998688697815,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    },
+    {
+      "name": "arrival_hero_glass_dark",
+      "base_color_linear": [
+        0.5,
+        0.6000000238418579,
+        0.6600000262260437
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.3100000023841858,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.041333333333333,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_hero_socket_glass_bronze",
+      "base_color_linear": [
+        0.7799999713897705,
+        0.5799999833106995,
+        0.36000001430511475
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.6000000238418579,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.0,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_hex_glass_bronze",
+      "base_color_linear": [
+        0.7799999713897705,
+        0.5799999833106995,
+        0.36000001430511475
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.6000000238418579,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.1628125,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_ivory",
+      "base_color_linear": [
+        0.8600000143051147,
+        0.8399999737739563,
+        0.7699999809265137
+      ],
+      "roughness": 0.2800000011920929,
+      "metallic": 0.15000000596046448,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    },
+    {
+      "name": "arrival_ivory_edge",
+      "base_color_linear": [
+        0.6399999856948853,
+        0.6200000047683716,
+        0.550000011920929
+      ],
+      "roughness": 0.3499999940395355,
+      "metallic": 0.25,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    },
+    {
+      "name": "arrival_ribbon_glass_dark",
+      "base_color_linear": [
+        0.5,
+        0.6000000238418579,
+        0.6600000262260437
+      ],
+      "roughness": 0.07500000298023224,
+      "metallic": 0.3100000023841858,
+      "flags": 1,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": {
+        "width_m": 3.6,
+        "height_m": 4.017894736842106,
+        "depth_m": 6.0,
+        "lit_probability": 0.32
+      }
+    },
+    {
+      "name": "arrival_roof_dark",
+      "base_color_linear": [
+        0.08500000089406967,
+        0.09700000286102295,
+        0.0949999988079071
+      ],
+      "roughness": 0.7200000286102295,
+      "metallic": 0,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    },
+    {
+      "name": "arrival_stone",
+      "base_color_linear": [
+        0.6299999952316284,
+        0.5699999928474426,
+        0.46000000834465027
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0,
+      "flags": 0,
+      "double_sided": false,
+      "glass_optical": null,
+      "occupied_room": null
+    }
+  ],
+  "resources": [
+    {
+      "name": "arrival_blade",
+      "vertices": 37743,
+      "triangles": 22096,
+      "bounds_m_y_up": [
+        [
+          -15.242600440979004,
+          -0.1899999976158142,
+          -5.3719801902771
+        ],
+        [
+          14.140000343322754,
+          127.20999908447266,
+          8.600910186767578
+        ]
+      ]
+    },
+    {
+      "name": "arrival_bronze",
+      "vertices": 80934,
+      "triangles": 51272,
+      "bounds_m_y_up": [
+        [
+          -22.854990005493164,
+          -0.18000000715255737,
+          -18.476959228515625
+        ],
+        [
+          21.40472984313965,
+          86.27999877929688,
+          17.066469192504883
+        ]
+      ]
+    },
+    {
+      "name": "arrival_diamond",
+      "vertices": 302300,
+      "triangles": 139148,
+      "bounds_m_y_up": [
+        [
+          -30.242490768432617,
+          -0.42340001463890076,
+          -26.88088035583496
+        ],
+        [
+          22.70408058166504,
+          150.3300018310547,
+          20.402589797973633
+        ]
+      ]
+    },
+    {
+      "name": "arrival_hero",
+      "vertices": 299662,
+      "triangles": 161834,
+      "bounds_m_y_up": [
+        [
+          -28.90498924255371,
+          -0.1550000011920929,
+          -16.84000015258789
+        ],
+        [
+          28.904979705810547,
+          195.1199951171875,
+          16.83997917175293
+        ]
+      ]
+    },
+    {
+      "name": "arrival_hero_socket",
+      "vertices": 26926,
+      "triangles": 13216,
+      "bounds_m_y_up": [
+        [
+          -36.5,
+          -0.550000011920929,
+          -26.0
+        ],
+        [
+          36.5,
+          12.279999732971191,
+          26.0
+        ]
+      ]
+    },
+    {
+      "name": "arrival_hex",
+      "vertices": 226010,
+      "triangles": 115844,
+      "bounds_m_y_up": [
+        [
+          -22.683080673217773,
+          -0.1899999976158142,
+          -21.312480926513672
+        ],
+        [
+          20.406269073486328,
+          134.02999877929688,
+          19.5789794921875
+        ]
+      ]
+    },
+    {
+      "name": "arrival_ribbon",
+      "vertices": 252755,
+      "triangles": 137980,
+      "bounds_m_y_up": [
+        [
+          -24.58629035949707,
+          -0.3799999952316284,
+          -17.696819305419922
+        ],
+        [
+          21.856449127197266,
+          153.8300018310547,
+          15.355369567871094
+        ]
+      ]
+    }
+  ],
+  "placements": {
+    "arrival_hero": {
+      "center": [
+        72.82,
+        301.39
+      ],
+      "base_y": 13.2,
+      "yaw": -0.27,
+      "rx": 28.8,
+      "rz": 16.74,
+      "height": 195.0,
+      "floors": 45,
+      "lean_world": [
+        -2.5,
+        -1.17
+      ],
+      "features": [
+        "elliptical plan",
+        "inclined rounded crown",
+        "continuous recessed graphite curtain wall",
+        "fine bronze vertical framing",
+        "rounded occupied socket"
+      ]
+    },
+    "arrival_hero_socket": {
+      "center": [
+        72.82,
+        301.39
+      ],
+      "base_y": 1.2,
+      "yaw": -0.27,
+      "rx": 36.5,
+      "rz": 26,
+      "height": 12,
+      "floors": 3
+    },
+    "arrival_hex": {
+      "rx": 19.71,
+      "rz": 18.6,
+      "height": 134.03,
+      "floors": 32,
+      "center": [
+        73.69,
+        13.2,
+        82.4
+      ],
+      "yaw": -0.27,
+      "world_lean": [
+        -3.07,
+        -1.43
+      ],
+      "features": [
+        "elongated hexagonal ivory exoskeleton",
+        "alternating full-width short hexagonal openings",
+        "bronze recessed structural webs",
+        "bronze occupied glass",
+        "rounded plan and clean flat crown"
+      ],
+      "constraints": [
+        "crown saucer in reference belongs to a distant building",
+        "no antenna, generic roof boxes or diamond substitution"
+      ],
+      "lean": [
+        -2.577350697378255,
+        -2.197057892437935
+      ],
+      "yaw_convention": "+X toward +Z"
+    },
+    "arrival_blade": {
+      "rx": 13.78,
+      "rz": 4.92,
+      "height": 127.21,
+      "floors": 31,
+      "center": [
+        52.32,
+        13.2,
+        184.89
+      ],
+      "yaw": 1.3,
+      "world_lean": [
+        -3.9,
+        -1.82
+      ],
+      "features": [
+        "thin rounded blade with tapered crown",
+        "broad charcoal panels",
+        "deep vertical window reveals",
+        "subtle bronze jambs and flat roof"
+      ],
+      "constraints": [
+        "retain the thin footprint",
+        "no horizontal white ribbons"
+      ],
+      "lean": [
+        -2.7969213290951815,
+        3.2710290550303034
+      ],
+      "yaw_convention": "+X toward +Z"
+    },
+    "arrival_ribbon": {
+      "rx": 20.34,
+      "rz": 14.74,
+      "height": 153.83,
+      "floors": 38,
+      "center": [
+        95.51,
+        13.2,
+        207.87
+      ],
+      "yaw": -0.27,
+      "world_lean": [
+        -1.64,
+        -0.77
+      ],
+      "features": [
+        "curved continuous ivory floor ribbons",
+        "lower-third waist and flared upper shaft",
+        "recessed occupied glazing",
+        "layered flat crown"
+      ],
+      "constraints": [
+        "all 38 floor bands are continuous geometry",
+        "crown flare is modest, not a separate saucer"
+      ],
+      "lean": [
+        -1.3752010637896603,
+        -1.1795431463714188
+      ],
+      "yaw_convention": "+X toward +Z"
+    },
+    "arrival_bronze": {
+      "rx": 21.18,
+      "rz": 16.94,
+      "height": 86.7,
+      "floors": 21,
+      "center": [
+        145.65,
+        314.38
+      ],
+      "yaw": -0.27,
+      "lean": [
+        -1.89,
+        -0.88
+      ],
+      "features": [
+        "broad oval bronze curtain wall",
+        "fine pale floor bands with independent bronze window uprights",
+        "recessed pale roof, low perimeter rail and inset service pavilion",
+        "continuous metric glazing, supported floor plates and central core"
+      ]
+    },
+    "arrival_diamond": {
+      "rx": 22.46,
+      "rz": 20.05,
+      "height": 150.35,
+      "floors": 37,
+      "center": [
+        271.17,
+        253.2
+      ],
+      "yaw": -0.27,
+      "lean": [
+        -7.9,
+        -3.69
+      ],
+      "features": [
+        "oval bronze glass shaft with a gently widened upper profile",
+        "eight diamond courses in deep curved faceted ivory members",
+        "separate dark bronze glazing grid behind the exoskeleton",
+        "exposed ivory crown rim with an inset occupied roof pavilion",
+        "continuous metric glazing, supported floor plates and central core"
+      ]
+    }
+  },
+  "recipe": {
+    "arrival_tower_geometry.py": "5ce76bc854c2793faf17f17d497d41c12f146ab75bd12ad7481b65f175969bfc",
+    "arrival_hero_tower.py": "0a605fe443d62770229cc1b4a55a6654793187d7e2bfc144a62b3d4b0cca2a61",
+    "arrival_left_towers.py": "debb5724f7aafefef3b534dab97ca1e111606c6b5d584fe9a1e8cae011ea1020",
+    "arrival_right_towers.py": "37294671afae80884a4fc3fbb17d0511b5fdddb10151cc76aa4ad1d4772ac30c",
+    "author-arrival-towers-blender.py": "43e75e19e1708488a3a67b9abdcd825c201f4ea14b3d6790ef261a05d34c6275",
+    "canonicalize-gltf-kit.py": "336af08e33a57a97e125396f1e1a9d901e4522bbea8b080d7c7a622bb8682f80",
+    "compile-gltf-kit.py": "3cda4f2d6fc98adf02ba586c6b93ff2d2c1b73d9278721392afe19a13720b482"
+  },
+  "artifacts": {
+    "arrival_towers.authoring.glb": "aeb65126e6a880db26e283f495da6d34a7862b2998a0655f860e0e7b9a8e7dba",
+    "arrival_towers.blend": "eb48a9c47d7ead5a471ba253837b10ca27f2228ebcd91ef79119ff391c902dd3",
+    "arrival_towers.glb": "52b96fe600d0d63235ccd413785dc5444d8f929b57c8d72c6ea387b3b2d3fc1e",
+    "arrival_towers.htkit": "5f23cb49cc8b262664979320afdf62963d6dd965a82c1d3fbefbaf0f1c379608"
+  }
+}

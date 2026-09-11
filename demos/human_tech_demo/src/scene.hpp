@@ -6,6 +6,7 @@
 #include "city/materials.hpp"
 #include "city/scene.hpp"
 #include <string>
+#include <string_view>
 namespace cb {
 using namespace inf::city;
 struct Scene : inf::city::Scene {
@@ -34,4 +35,6 @@ float shot_fov_degrees(const std::string &shot);
 std::string scene_layout_manifest();
 std::string scene_layout_manifest(const std::string &seed, bool authored_arrival_district = true);
 Scene generate_scene(const SceneParams &params);
+// Actual source geometry for isolated asset documentation; no city or camera framing.
+Scene make_tower_inventory_sample(std::string_view name,const std::string& asset_kit);
 } // namespace cb

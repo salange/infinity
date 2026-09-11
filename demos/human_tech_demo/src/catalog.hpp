@@ -19,7 +19,8 @@ namespace cb {
 // Builds the asset into `sc` (materials must be set), places the plate
 // under it and sets the scene camera. Returns false with a message when
 // the spec is unknown.
-bool generate_asset(Scene& sc, const std::string& spec, Rng root, int detail, std::string* error);
+// Inventory export can omit the diagnostic plate/camera with studio_frame=false.
+bool generate_asset(Scene& sc, const std::string& spec, Rng root, int detail, std::string* error, bool studio_frame=true);
 
 // The catalog as text (kinds, names, keys), for `--asset list`.
 std::string asset_catalog_text();

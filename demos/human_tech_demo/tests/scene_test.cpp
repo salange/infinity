@@ -1,6 +1,9 @@
 // Headless validation of the authored set and renderer-facing scene contract.
 #include "scene.hpp"
+#include "arrival_tower_lots.hpp"
 #include "city_routes.hpp"
+#include "riverfront_layout.hpp"
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -9,6 +12,118 @@
 #include <string>
 
 namespace {
+struct PlanPoint { double s,t; };
+using Plan = std::vector<PlanPoint>;
+PlanPoint survey(cb::Vec2 p) {
+  const auto q=cb::riverfront::coordinates(p);return {q.x,q.y};
+}
+double area(const Plan& p) {
+  double result=0;
+  for(std::size_t i=0;i<p.size();++i) {
+    const auto a=p[i],b=p[(i+1)%p.size()];result+=a.s*b.t-a.t*b.s;
+  }
+  return result*.5;
+}
+Plan halfplane(const Plan& input,PlanPoint a,PlanPoint b,double sign) {
+  Plan output;
+  auto distance=[&](PlanPoint p){return ((b.s-a.s)*(p.t-a.t)-(b.t-a.t)*(p.s-a.s))*sign;};
+  for(std::size_t i=0;i<input.size();++i) {
+    const auto p=input[i],q=input[(i+1)%input.size()];
+    const double dp=distance(p),dq=distance(q);
+    if(dp>=0)output.push_back(p);
+    if((dp<0)!=(dq<0)) {
+      const double t=dp/(dp-dq);output.push_back({p.s+(q.s-p.s)*t,p.t+(q.t-p.t)*t});
+    }
+  }
+  return output;
+}
+Plan intersection(Plan p,const Plan& boundary) {
+  const double sign=area(boundary)>0?1:-1;
+  for(std::size_t i=0;i<boundary.size()&&!p.empty();++i)
+    p=halfplane(p,boundary[i],boundary[(i+1)%boundary.size()],sign);
+  return p;
+}
+std::vector<Plan> subtract(Plan p,const Plan& boundary) {
+  std::vector<Plan> result;const double sign=area(boundary)>0?1:-1;
+  for(std::size_t i=0;i<boundary.size()&&!p.empty();++i) {
+    const auto a=boundary[i],b=boundary[(i+1)%boundary.size()];
+    auto outside=halfplane(p,a,b,-sign);
+    if(std::abs(area(outside))>.000001)result.push_back(std::move(outside));
+    p=halfplane(p,a,b,sign);
+  }
+  return result;
+}
+void subtract(std::vector<Plan>& pieces,const Plan& boundary) {
+  std::vector<Plan> result;
+  for(auto& piece:pieces)for(auto remainder:subtract(std::move(piece),boundary))
+    result.push_back(std::move(remainder));
+  pieces=std::move(result);
+}
+std::string arrival_street_geometry(const cb::Scene& scene) {
+  std::vector<Plan> domains,roads;
+  for(const auto& footprint:cb::arrival_tower_cleanup_footprints()) {
+    Plan p;for(auto q:footprint)p.push_back(survey(q));domains.push_back(std::move(p));
+  }
+  for(const auto& road:cb::arrival_tower_block_roads()) {
+    const auto a=survey(road.a),b=survey(road.b);
+    const double length=std::hypot(b.s-a.s,b.t-a.t);
+    const PlanPoint n{-(b.t-a.t)*road.width/(2*length),(b.s-a.s)*road.width/(2*length)};
+    roads.push_back({{a.s-n.s,a.t-n.t},{b.s-n.s,b.t-n.t},{b.s+n.s,b.t+n.t},{a.s+n.s,a.t+n.t}});
+  }
+  double expected_area=0,physical_area=0;
+  for(const auto& domain:domains)for(std::size_t i=0;i<roads.size();++i) {
+    std::vector<Plan> parts{intersection(roads[i],domain)};
+    for(std::size_t j=0;j<i;++j)subtract(parts,roads[j]);
+    for(const auto& part:parts)expected_area+=std::abs(area(part));
+  }
+  const auto& mesh=scene.opaque;std::size_t checked=0;
+  for(std::size_t i=0;i<mesh.indices.size();i+=3) {
+    const auto& va=mesh.vertices[mesh.indices[i]];
+    if(va.material!=cb::M_ASPHALT)continue;
+    const auto a=va.position,b=mesh.vertices[mesh.indices[i+1]].position,c=mesh.vertices[mesh.indices[i+2]].position;
+    if(std::min({a.y,b.y,c.y})<.6f||std::max({a.y,b.y,c.y})>1.3f||cb::cross(b-a,c-a).y<=0)continue;
+    const Plan triangle{survey({a.x,a.z}),survey({b.x,b.z}),survey({c.x,c.z})};
+    for(const auto& domain:domains) {
+      auto clipped=intersection(triangle,domain);const double surface=std::abs(area(clipped));
+      if(surface<.00001)continue;
+      ++checked;physical_area+=surface;
+      std::vector<Plan> remainder{std::move(clipped)};
+      for(const auto& road:roads)subtract(remainder,road);
+      double undeclared=0;for(const auto& part:remainder)undeclared+=std::abs(area(part));
+      if(undeclared>.02) {
+        const auto p=remainder.front().front();
+        return "legacy asphalt remains inside the square district cleanup at survey ("+
+          std::to_string(p.s)+","+std::to_string(p.t)+"), "+std::to_string(undeclared)+" square metres outside the six intended streets";
+      }
+    }
+  }
+  if(std::abs(physical_area-expected_area)>2)
+    return "square district asphalt is duplicated or missing: actual area "+std::to_string(physical_area)+
+      ", six-street union "+std::to_string(expected_area);
+  std::printf("square district streets: %zu actual asphalt triangles, %.2f square metres, no legacy road fragments\n",checked,physical_area);
+  return {};
+}
+std::string arrival_route_metadata() {
+  const auto routes=cb::scene_routes(true);
+  const cb::SceneRoute* circuit=nullptr;const cb::SceneRoute* civic=nullptr;
+  for(const auto& route:routes) {
+    if(route.id=="landing_access"||route.id=="landing_internal_stair")
+      return "retired landing stairs still appear in the authored district routes";
+    if(route.id=="arrival_block_promenade")circuit=&route;
+    if(route.id=="civic_public_walk")civic=&route;
+  }
+  if(!circuit||circuit->stairs||circuit->waypoints.size()<5)
+    return "square district requires its continuous ground promenade";
+  if(!civic||civic->waypoints.empty()||
+     cb::length(civic->waypoints.back().position-circuit->waypoints.front().position)>.01f)
+    return "square district promenade is disconnected from the civic public walk";
+  if(cb::length(circuit->waypoints.front().position-circuit->waypoints.back().position)>.01f)
+    return "square district promenade is not a closed circuit";
+  for(const auto& waypoint:circuit->waypoints)
+    if(cb::length(waypoint.target-waypoint.position)<.5f||std::abs(waypoint.position.y-3)>.01f)
+      return "square district promenade has an invalid ground camera or zero-length view direction";
+  return {};
+}
 std::uint64_t geometry_hash(const cb::Scene &scene) {
   std::uint64_t hash = 1469598103934665603ull;
   auto word = [&](std::uint32_t v) {
@@ -45,11 +160,19 @@ int main(int argc, char **argv) {
   cb::SceneParams params;
   if (argc > 1)
     params.asset_kit = argv[1];
+  if(!params.asset_kit.empty()) {
+    const auto route_error=arrival_route_metadata();
+    if(!route_error.empty())return fail(route_error.c_str());
+  }
   std::uint64_t canonical_hash = 0;
   {
     const cb::Scene sc = cb::generate_scene(params);
     if (sc.opaque.vertices.empty())
       return fail("empty city");
+    if(!params.asset_kit.empty()) {
+      const auto street_error=arrival_street_geometry(sc);
+      if(!street_error.empty())return fail(street_error.c_str());
+    }
     std::set<int> companion_floors;
     float companion_u_min = 10000, companion_u_max = -10000;
     for (const auto *mesh : {&sc.opaque, &sc.foliage}) {
@@ -163,8 +286,8 @@ int main(int argc, char **argv) {
   }
   if (positions.size() != 6)
     return fail("capture cameras must be distinct");
-  // The approved terrace composition uses a narrower lens; the interactive
-  // alias and the physical access route must arrive at that same camera.
+  // The terrace alias now selects the district's ground court while retaining
+  // its established narrower lens. Retired stair routes are checked above.
   cb::Vec3 landing_p, landing_t, terrace_p, terrace_t;
   cb::shot_camera("landing", landing_p, landing_t);
   cb::shot_camera("terrace", terrace_p, terrace_t);
@@ -173,12 +296,6 @@ int main(int argc, char **argv) {
       cb::length(landing_p - terrace_p) > .001f ||
       cb::length(landing_t - terrace_t) > .001f)
     return fail("landing camera and terrace alias disagree");
-  for (const auto& route : cb::scene_routes())
-    if (route.id == "landing_access" &&
-        (route.waypoints.empty() ||
-         cb::length(route.waypoints.back().position - landing_p) > .001f ||
-         cb::length(route.waypoints.back().target - landing_t) > .001f))
-      return fail("landing route no longer reaches its canonical camera");
   cb::Vec3 p, t;
   if (cb::shot_camera("missing", p, t))
     return fail("unknown camera accepted");

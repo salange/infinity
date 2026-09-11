@@ -141,3 +141,19 @@ if(EXISTS "${_human_tech_kit}" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/ge
   add_test(NAME human_tech_arrival_towers COMMAND human_tech_arrival_towers_test "${_human_tech_kit}")
   set_tests_properties(human_tech_arrival_towers PROPERTIES LABELS "authored-assets" RUN_SERIAL TRUE)
 endif()
+
+# Exact native geometry used by the illustrated tower inventory.
+get_target_property(_human_tech_inventory_sources human_tech_scene_test SOURCES)
+list(REMOVE_ITEM _human_tech_inventory_sources tests/scene_test.cpp)
+add_executable(human_tech_tower_inventory tools/export-tower-inventory.cpp ${_human_tech_inventory_sources})
+target_include_directories(human_tech_tower_inventory PRIVATE src)
+target_link_libraries(human_tech_tower_inventory PRIVATE game::city)
+
+add_executable(human_tech_arrival_block_test tests/arrival_block_test.cpp
+  src/arrival_tower_lots.cpp src/arrival_towers.cpp src/asset_pipeline.cpp)
+target_include_directories(human_tech_arrival_block_test PRIVATE src)
+target_link_libraries(human_tech_arrival_block_test PRIVATE game::city)
+if(EXISTS "${_human_tech_kit}" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/generated/arrival_towers.htkit")
+  add_test(NAME human_tech_arrival_block COMMAND human_tech_arrival_block_test "${_human_tech_kit}")
+  set_tests_properties(human_tech_arrival_block PROPERTIES LABELS "authored-assets" RUN_SERIAL TRUE)
+endif()

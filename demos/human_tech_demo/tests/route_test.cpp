@@ -11,13 +11,32 @@
 #include <vector>
 using namespace cb;
 struct Triangle {Vec3 a,b,c;};
-constexpr float loX=-430,loZ=-480,cell=4;
-// Include both complete Arrival promenades and the landing stair treads.
-constexpr int nx=180,nz=250;
-std::array<std::vector<unsigned>,nx*nz> grid;
+constexpr float cell=4,support_offset=.25f;
+float loX=0,loZ=0;
+int nx=0,nz=0;
+std::vector<std::vector<unsigned>> grid;
 std::vector<Triangle> triangles;
 int ix(float x) {return int(std::floor((x-loX)/cell));}
 int iz(float z) {return int(std::floor((z-loZ)/cell));}
+bool in_grid(float x,float z) {return ix(x)>=0&&ix(x)<nx&&iz(z)>=0&&iz(z)<nz;}
+bool configure_grid(const std::vector<SceneRoute>& routes) {
+ float minX=1e30f,minZ=1e30f,maxX=-1e30f,maxZ=-1e30f;
+ std::size_t points=0;
+ for(const auto& route:routes)for(const auto& waypoint:route.waypoints) {
+  const auto p=waypoint.position;if(!std::isfinite(p.x)||!std::isfinite(p.z))return false;
+  minX=std::min(minX,p.x);maxX=std::max(maxX,p.x);
+  minZ=std::min(minZ,p.z);maxZ=std::max(maxZ,p.z);++points;
+ }
+ if(!points)return false;
+ // Cover every route and its lateral probes, with two extra cells for the
+ // neighbouring-cell wall-crossing search and boundary roundoff.
+ constexpr float margin=2*cell+support_offset;
+ loX=std::floor((minX-margin)/cell)*cell;loZ=std::floor((minZ-margin)/cell)*cell;
+ nx=int(std::ceil((maxX+margin-loX)/cell))+1;nz=int(std::ceil((maxZ+margin-loZ)/cell))+1;
+ grid.resize(std::size_t(nx)*nz);
+ std::printf("Route grid covers x[%.2f,%.2f), z[%.2f,%.2f), %d by %d cells\n",loX,loX+nx*cell,loZ,loZ+nz*cell,nx,nz);
+ return true;
+}
 void triangle(Vec3 a,Vec3 b,Vec3 c) {
  if(std::max({a.y,b.y,c.y})<0||std::min({a.y,b.y,c.y})>291)return;
  int x0=ix(std::min({a.x,b.x,c.x})),x1=ix(std::max({a.x,b.x,c.x}));
@@ -55,6 +74,8 @@ bool crossing(Vec3 a,Vec3 b) {
 }
 int main(int argc,char** argv) {
  SceneParams params;if(argc>1)params.asset_kit=argv[1];
+ const auto routes=scene_routes(!params.asset_kit.empty());
+ if(!configure_grid(routes)){std::fprintf(stderr,"Cannot derive route grid from empty or invalid waypoint bounds\n");return 2;}
  const cb::Scene sc=generate_scene(params);
  // Optional read-only proof output shares this generated scene; no second
  // generation is needed for renderer light-list saturation analysis.
@@ -109,26 +130,30 @@ int main(int argc,char** argv) {
   if(!contact)++failures;
  }
  bool bridge_route=false,hex_route=false,loggia_route=false,west_promenade=false,east_promenade=false;
- for(const auto& route:scene_routes(!params.asset_kit.empty())) {
+ for(const auto& route:routes) {
   bridge_route|=route.id=="arrival_bridge_to_market";hex_route|=route.id=="canal_hex_podium_access";
   loggia_route|=route.id=="garden_floor_loggia";
   west_promenade|=route.id=="arrival_west_promenade";east_promenade|=route.id=="arrival_east_promenade";
   if(route.id=="garden_access") {std::printf("Retired east ground access must not remain in route metadata\n");++failures;}
   if(route.id=="garden_floor_loggia")for(const auto& p:route.waypoints)
    if(p.position.y<278.9f){std::printf("Garden loggia incorrectly claims ground access\n");++failures;}
-  int points=0,unsupported=0,blocked=0,crossed=0;float minClear=1e9,maxClear=0;
+  int points=0,unsupported=0,blocked=0,crossed=0,outside_grid=0;float minClear=1e9,maxClear=0;
   for(std::size_t segment=0;segment+1<route.waypoints.size();++segment) {
    Vec3 a=route.waypoints[segment].position,b=route.waypoints[segment+1].position;
    int count=std::max(1,int(std::ceil(length(b-a)/.25f)));
    for(int sample=0;sample<=count;++sample) {
     Vec3 p=lerp(a,b,float(sample)/count);++points;
+    if(!in_grid(p.x-support_offset,p.z-support_offset)||!in_grid(p.x+support_offset,p.z+support_offset)) {
+      if(outside_grid++<12)std::printf("OUTSIDE ROUTE GRID %s segment%zu xyz %.3f %.3f %.3f; structural support was not evaluated\n",route.id.c_str(),segment,p.x,p.y,p.z);
+      continue;
+    }
     if(sample)for(float height:{-.9f,0.f}) {
       Vec3 previous=lerp(a,b,float(sample-1)/count)+Vec3{0,height,0},current=p+Vec3{0,height,0};
       if(crossing(previous,current)) {
         if(crossed++<16)std::printf("CROSSING %s segment%zu xyz %.3f %.3f %.3f height%.2f\n",route.id.c_str(),segment,p.x,p.y,p.z,height);
       }
     }
-    for(Vec2 offset:std::array<Vec2,5>{{{0,0},{.25f,0},{-.25f,0},{0,.25f},{0,-.25f}}}) {
+    for(Vec2 offset:std::array<Vec2,5>{{{0,0},{support_offset,0},{-support_offset,0},{0,support_offset},{0,-support_offset}}}) {
      auto ys=hits(p.x+offset.x,p.z+offset.y);float floor=-1e9;
      bool obstacle=false;
      for(float y:ys) {
@@ -145,8 +170,8 @@ int main(int argc,char** argv) {
     }
    }
   }
-  std::printf("%s: %d samples, clearance[%.4f,%.4f], support_failures%d, clearance_obstructions%d, wall_crossings%d\n",route.id.c_str(),points,minClear,maxClear,unsupported,blocked,crossed);
-  failures+=unsupported+blocked+crossed;
+  std::printf("%s: %d samples, clearance[%.4f,%.4f], support_failures%d, clearance_obstructions%d, wall_crossings%d, outside_grid%d\n",route.id.c_str(),points,minClear,maxClear,unsupported,blocked,crossed,outside_grid);
+  failures+=unsupported+blocked+crossed+outside_grid;
  }
  if(!bridge_route||!hex_route||!loggia_route||!west_promenade||!east_promenade){std::printf("Missing current Arrival access contract\n");++failures;}
  return failures?1:0;

@@ -198,7 +198,7 @@ void frame_asset(Scene& sc, float y_ground, float elevation_deg, float azimuth_d
 
 }  // namespace
 
-bool generate_asset(Scene& sc, const std::string& text, Rng root, int detail, std::string* error) {
+bool generate_asset(Scene& sc, const std::string& text, Rng root, int detail, std::string* error, bool studio_frame) {
   const Spec sp = parse_spec(text);
   Rng rng = root.child(1);
   const float y = 0.0f;
@@ -246,11 +246,11 @@ bool generate_asset(Scene& sc, const std::string& text, Rng root, int detail, st
     build_government(sc, o, radians(sp.f("rot_deg", 0.0f)), half, y, rng, sp.i("detail", detail), stage);
     // frame the building, not the square under it
     const Vec3 lo = vmin(sc.opaque.bounds_min, sc.foliage.bounds_min), hi = vmax(sc.opaque.bounds_max, sc.foliage.bounds_max);
-    if (stage >= 2) {
+    if (studio_frame && stage >= 2) {
       Emit f(&sc.opaque, M_MARBLE_WHITE);
       f.polygon(plan_rect(half * 1.9f, half * 1.9f, o), y + 0.01f, true);
     }
-    frame_asset(sc, y, sp.f("elevation", 18.0f), sp.f("azimuth", 30.0f), margin, &lo, &hi);  // the stairs face +z
+    if(studio_frame)frame_asset(sc, y, sp.f("elevation", 18.0f), sp.f("azimuth", 30.0f), margin, &lo, &hi);  // the stairs face +z
     if (sc.lights.size() > 64) sc.lights.resize(64);
     sc.finalize_draws();
     sc.city_size = "asset " + text;
@@ -364,7 +364,7 @@ bool generate_asset(Scene& sc, const std::string& text, Rng root, int detail, st
     *error = "unknown asset kind '" + sp.kind + "' (try --asset list)";
     return false;
   }
-  frame_asset(sc, y, elevation, azimuth, margin);
+  if(studio_frame)frame_asset(sc, y, elevation, azimuth, margin);
   if (sc.lights.size() > 64) sc.lights.resize(64);
   sc.finalize_draws();
   sc.city_size = "asset " + text;

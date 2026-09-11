@@ -232,8 +232,26 @@ do not establish the complete city's performance or visual parity. The new
 `human_tech_arrival_towers` check measures actual imported shaft and socket
 bearings, foundation/plant contacts, tangent frames and window-floor coordinates.
 
+The six accepted shafts occupy one 320 m square district aligned to the canal
+survey. A 10 m cross street separates the two groups of three; a 6 m alley behind
+the graphite ellipse runs parallel to the station avenue. All six occupied bases
+use that street alignment independently of the retained shaft rotations.
+The earlier landing pavilion, elevated access stairs/bridges and overlapping
+civic arcade are retired in the authored First Arrival scene. The `landing` and
+`terrace` camera aliases now inspect the ground court. The native
+`human_tech_arrival_block` and full-scene tests inspect actual road and foundation
+geometry, setbacks, paving support and the replacement public circuit.
+
+The illustrated inventory tools export exact assembled native geometry without
+the diagnostic studio plate. `human_tech_tower_inventory` takes an asset name,
+base-kit path and output directory; `render-tower-inventory.py` renders that export
+in Blender. Studio material/light interpretation is diagnostic; the full-city
+native capture remains the appearance evidence. Historical Blender authoring
+centres remain in the resource manifest; current world placements and base
+rotations are recorded by the native scene manifest.
+
 The canonical manifest also includes camera waypoints along the market bridge
-approach, cylinder podium access, landing stairs and retained garden connections.
+approach, cylinder podium access, square-block circuit and retained garden connections.
 The garden loggia route starts on its occupied elevated floor; the former east
 ground-access staircase and high connector have been retired with their tower.
 Capture continuous camera updates and representative images separately:

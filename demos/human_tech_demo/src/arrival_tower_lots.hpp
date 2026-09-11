@@ -17,6 +17,12 @@ struct ArrivalTowerPlacement {
   float base_y{13.2f};
 };
 const std::array<ArrivalTowerPlacement,6>& arrival_tower_placements();
+struct ArrivalBlockRoad { Vec2 a,b;float width; };
+std::vector<Vec2> arrival_tower_block_footprint();
+const std::array<ArrivalBlockRoad,6>& arrival_tower_block_roads();
+float arrival_tower_base_yaw();
+void build_arrival_block_roads(Scene& scene);
+void build_arrival_tower_base(Scene& scene,Rng rng,ArrivalLotId id,bool detailed=true);
 // Occupied podium outlines. Positive setback moves every edge inward.
 std::vector<Vec2> arrival_tower_lot_footprint(ArrivalLotId id,float setback=0);
 // The district replaces the old fragmented infill within these ground areas.

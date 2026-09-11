@@ -1,6 +1,7 @@
 #include "arrival_tower_lots.hpp"
 #include "city/flora.hpp"
 #include "city/towers.hpp"
+#include "riverfront_layout.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -9,17 +10,17 @@ namespace cb {
 namespace {
 constexpr float ground=1.2f,roof=13.2f,lot_yaw=-.153776f;
 const std::array<ArrivalTowerPlacement,6> placements{{
-  {ArrivalLotId::Hex,"arrival_hex",{73.69f,82.40f},{19.71f,18.60f},{-3.07f,-1.43f},134.03f,-.27f},
-  {ArrivalLotId::Blade,"arrival_blade",{52.32f,184.89f},{13.78f,4.92f},{-3.90f,-1.82f},127.21f,1.30f},
-  {ArrivalLotId::Ribbon,"arrival_ribbon",{95.51f,207.87f},{20.34f,14.74f},{-1.64f,-.77f},153.83f,-.27f},
+  {ArrivalLotId::Hex,"arrival_hex",riverfront::point(318,60),{19.71f,18.60f},{-3.07f,-1.43f},134.03f,-.27f},
+  {ArrivalLotId::Blade,"arrival_blade",riverfront::point(272,120),{13.78f,4.92f},{-3.90f,-1.82f},127.21f,1.30f},
+  {ArrivalLotId::Ribbon,"arrival_ribbon",riverfront::point(342,135),{20.34f,14.74f},{-1.64f,-.77f},153.83f,-.27f},
   {ArrivalLotId::Hero,"arrival_hero",{72.82f,301.39f},{28.80f,16.74f},{-2.50f,-1.17f},195.0f,-.27f},
-  {ArrivalLotId::Bronze,"arrival_bronze",{145.65f,314.38f},{21.18f,16.94f},{-1.89f,-.88f},86.70f,-.27f},
-  {ArrivalLotId::Diamond,"arrival_diamond",{271.17f,253.20f},{22.46f,20.05f},{-7.90f,-3.69f},150.35f,-.27f}
+  {ArrivalLotId::Bronze,"arrival_bronze",riverfront::point(358.31f,230.29f),{21.18f,16.94f},{-1.89f,-.88f},86.70f,-.27f},
+  {ArrivalLotId::Diamond,"arrival_diamond",riverfront::point(450,216),{22.46f,20.05f},{-7.90f,-3.69f},150.35f,-.27f}
 }};
 struct Lot {Vec2 half;float corner,yaw;};
 const std::array<Lot,6> lots{{
   {{33,28},6,lot_yaw},{{21,24},5,lot_yaw},{{30,29},6,lot_yaw},
-  {{36.5f,26},8.2f,-.27f},{{27,29},6,lot_yaw},{{35,33},7,lot_yaw}
+  {{36.5f,26},8.2f,lot_yaw},{{27,29},6,lot_yaw},{{35,33},7,lot_yaw}
 }};
 std::size_t index(ArrivalLotId id) {return static_cast<std::size_t>(id);}
 Vec2 rotate(Vec2 p,float a) {return {p.x*std::cos(a)-p.y*std::sin(a),p.x*std::sin(a)+p.y*std::cos(a)};}
@@ -64,13 +65,13 @@ std::vector<Vec2> intersect(std::vector<Vec2> p,const std::vector<Vec2>& clip) {
   }
   return p.size()>=3?inset(std::move(p),0):std::vector<Vec2>{};
 }
-std::vector<std::vector<Vec2>> subtract(std::vector<Vec2> p,const std::vector<Vec2>& obstacle) {
+std::vector<std::vector<Vec2>> subtract(std::vector<Vec2> p,const std::vector<Vec2>& obstacle,float minimum_area=.30f) {
   if(!overlap(p,obstacle))return {std::move(p)};
   std::vector<std::vector<Vec2>> result;const float sign=plan_area(obstacle)>0?1.f:-1.f;
   for(std::size_t i=0;i<obstacle.size()&&p.size()>=3;++i) {
     const Vec2 d=obstacle[(i+1)%obstacle.size()]-obstacle[i],n=Vec2{-d.y,d.x}*sign;
     auto outside=inset(clip_halfplane(p,obstacle[i],n*-1.f),0);
-    if(outside.size()>=3&&std::abs(plan_area(outside))>.30f)result.push_back(std::move(outside));
+    if(outside.size()>=3&&std::abs(plan_area(outside))>minimum_area)result.push_back(std::move(outside));
     p=clip_halfplane(p,obstacle[i],n);
   }
   return result;
@@ -222,37 +223,27 @@ void roof_gardens(Scene& s,const ArrivalTowerPlacement& t,const Palette& p,Rng r
   }
   for(std::size_t i=0;i<beds.size();++i)garden_bed(s,rng.child(i),beds[i],roof+.04f,p,detailed);
   // Sparse real paving joints remain on the open roof and stop at bed edges.
-  Vec2 lo,hi;plan_bounds(upper,&lo,&hi);
-  for(float z=lo.y+2;z<hi.y;z+=4)for(float x=lo.x+2;x<hi.x;x+=4) {
-    const Vec2 q{x,z};if(!point_in_polygon(upper,q)||!shaft_clear(q,.6f))continue;
+  for(float z=-half.y+2;z<half.y;z+=4)for(float x=-half.x+2;x<half.x;x+=4) {
+    const Vec2 q=t.centre+rotate({x,z},cfg.yaw);if(!point_in_polygon(upper,q)||!shaft_clear(q,.6f))continue;
     bool planted=false;for(const auto& bed:beds)if(point_in_polygon(bed,q)){planted=true;break;}
     if(planted)continue;
-    const auto line=intersect(plan_rect(.013f,1.4f,q),upper);
+    const auto line=intersect(plan_transform(plan_rect(.013f,1.4f),q,cfg.yaw),upper);
     if(line.size()>=3)slab(s.opaque,line,roof+.044f,.009f,p.joint);
   }
 }
 std::vector<std::vector<Vec2>> ground_domains() {
-  // These are complete public forecourts around the occupied buildings. Their
-  // corners follow the street survey; roads and retained entrances cut them
-  // back to the actual available ground at integration time.
-  std::vector<std::vector<Vec2>> domains;
-  domains.push_back(plan_rounded_rect(58,47,8,12,{74,196}));
-  constexpr std::array<float,6> extension{{18,17,20,22,23,23}};
-  for(const auto& t:placements) {
-    const auto& cfg=lots[index(t.id)];const float e=extension[index(t.id)];
-    domains.push_back(plan_transform(plan_rounded_rect(cfg.half.x+e,cfg.half.y+e,9,10),
-                                    t.centre,cfg.yaw));
-  }
-  return domains;
+  // One cadastral square, with a continuous public sidewalk up to the four
+  // inner curbs. No overlapping per-tower forecourt islands remain.
+  return {riverfront::rectangle(209,544,10,344)};
 }
 std::vector<Vec2> corridor(Vec2 a,Vec2 b,float half) {
   const auto d=b-a;const Vec2 n=normalize(Vec2{-d.y,d.x})*half;
   return {a-n,b-n,b+n,a+n};
 }
-void cut_out(std::vector<std::vector<Vec2>>& pieces,const std::vector<Vec2>& obstacle) {
+void cut_out(std::vector<std::vector<Vec2>>& pieces,const std::vector<Vec2>& obstacle,float minimum_area=.30f) {
   if(obstacle.size()<3)return;
   std::vector<std::vector<Vec2>> remaining;
-  for(auto& piece:pieces)for(auto part:subtract(std::move(piece),obstacle))
+  for(auto& piece:pieces)for(auto part:subtract(std::move(piece),obstacle,minimum_area))
     remaining.push_back(std::move(part));
   pieces=std::move(remaining);
 }
@@ -274,6 +265,7 @@ void ground_courts(Scene& s,const Palette& p,Rng rng,bool detailed,
     }
     if(!contained)boundaries.push_back(inset(obstruction.polygon,-.45f));
   }
+  for(const auto& road:arrival_tower_block_roads())boundaries.push_back(corridor(road.a,road.b,road.width*.5f));
   std::vector<std::vector<Vec2>> paving_exclusions=boundaries;
   std::vector<std::vector<Vec2>> garden_exclusions;
   for(const auto& shape:boundaries)garden_exclusions.push_back(inset(shape,-3.5f));
@@ -285,43 +277,39 @@ void ground_courts(Scene& s,const Palette& p,Rng rng,bool detailed,
   }
   const auto& walk=arrival_tower_public_walk();
   for(std::size_t i=0;i+1<walk.size();++i) {
-    paving_exclusions.push_back(corridor(walk[i],walk[i+1],2));
     garden_exclusions.push_back(corridor(walk[i],walk[i+1],5));
   }
   for(auto q:walk) {
-    paving_exclusions.push_back(plan_circle(2,24,q));
     garden_exclusions.push_back(plan_circle(5,24,q));
   }
   std::vector<std::vector<Vec2>> paved;
   const auto first=static_cast<std::uint32_t>(s.opaque.indices.size());
   for(std::size_t domain=0;domain<domains.size();++domain) {
     std::vector<std::vector<Vec2>> pieces{domains[domain]};
-    for(const auto& obstacle:paving_exclusions)cut_out(pieces,obstacle);
-    // A union of the seven courts: shared ground is emitted only once.
-    for(std::size_t previous=0;previous<domain;++previous)cut_out(pieces,domains[previous]);
+    // Small fragments at curved path joins are still required walking surface.
+    // The larger planting threshold must not create holes in public paving.
+    for(const auto& obstacle:paving_exclusions)cut_out(pieces,obstacle,.00001f);
+    for(std::size_t previous=0;previous<domain;++previous)cut_out(pieces,domains[previous],.00001f);
     for(auto& piece:pieces) {
-      if(piece.size()<3||std::abs(plan_area(piece))<.35f)continue;
+      if(piece.size()<3||std::abs(plan_area(piece))<.00001f)continue;
       slab(s.opaque,piece,ground,ground-.60f,p.paving);
       paved.push_back(std::move(piece));
     }
   }
-  // Long planted bands and broad corner islands make outdoor rooms around
-  // the quiet pale courts. Keep compact sockets and their roof aprons legible.
+  // Composed garden rooms share the street axes. Broad beds occupy the
+  // southern court; narrow borders frame the clear perimeter promenade.
   struct GroundBed {std::vector<Vec2> shape;std::size_t domain;};
   std::vector<GroundBed> bed_candidates;
-  for(const auto& t:placements) {
-    const auto& cfg=lots[index(t.id)];
-    auto bed=[&](Vec2 centre,Vec2 half,float radius) {
-      bed_candidates.push_back({plan_transform(plan_rounded_rect(half.x,half.y,radius,8),
-          t.centre+rotate(centre,cfg.yaw),cfg.yaw),index(t.id)+1});
-    };
-    for(float sign:{-1.f,1.f}) {
-      bed({sign*(cfg.half.x+10),0},{3.6f,std::max(8.f,cfg.half.y-5)},2.1f);
-      bed({0,sign*(cfg.half.y+10)},{std::max(8.f,cfg.half.x-6),3.6f},2.1f);
-      for(float end:{-1.f,1.f})
-        bed({sign*(cfg.half.x+9),end*(cfg.half.y+9)},{4.4f,4.4f},3);
-    }
-  }
+  auto bed=[&](float s0,float s1,float t0,float t1,float radius=2.f) {
+    const Vec2 centre=riverfront::point((s0+s1)*.5f,(t0+t1)*.5f);
+    bed_candidates.push_back({plan_transform(plan_rounded_rect((s1-s0)*.5f,(t1-t0)*.5f,radius,8),centre,lot_yaw),0});
+  };
+  for(const auto& span:std::array<Vec2,3>{{{34,116},{146,245},{269,308}}})bed(231,237,span.x,span.y,1);
+  bed(528,533,37,133,1);bed(528,533,239,307,1);
+  bed(368,435,29,43);bed(451,515,29,43);
+  bed(390,414,63,146,3);bed(425,441,69,140,2);
+  bed(392,407,195,243,3);
+  bed(248,308,281,308,3);bed(335,398,280,308,3);bed(429,513,281,308,3);
   std::vector<std::vector<Vec2>> planted;
   for(std::size_t bed=0;bed<bed_candidates.size();++bed) {
     auto within=intersect(bed_candidates[bed].shape,domains[bed_candidates[bed].domain]);
@@ -359,76 +347,97 @@ void ground_courts(Scene& s,const Palette& p,Rng rng,bool detailed,
       planted.push_back(std::move(shape));
     }
   }
-  // Sparse recessed joints articulate open paving at human scale. Their
-  // geometry is cut to the actual paved pieces and never runs across roads.
-  for(std::size_t site=0;site<placements.size();++site) {
-    const auto& t=placements[site];const auto& cfg=lots[site];
-    for(float offset=-cfg.half.x-17;offset<cfg.half.x+17;offset+=7) {
-      auto joint=plan_transform(plan_rect(.014f,cfg.half.y+18,{offset,0}),t.centre,cfg.yaw);
-      for(const auto& surface:paved) {
-        auto part=intersect(joint,surface);if(part.size()<3)continue;
-        std::vector<std::vector<Vec2>> pieces{std::move(part)};
-        for(const auto& bed:planted)cut_out(pieces,bed);
-        for(const auto& line:pieces)if(std::abs(plan_area(line))>.03f)
-          slab(s.opaque,line,ground+.008f,.009f,p.joint);
-      }
+  // One paving grid follows the same survey throughout the block.
+  for(float coordinate=218;coordinate<538;coordinate+=8) {
+    const auto joint=riverfront::rectangle(coordinate-.014f,coordinate+.014f,18,338);
+    for(const auto& surface:paved) {
+      auto part=intersect(joint,surface);if(part.size()<3)continue;
+      std::vector<std::vector<Vec2>> pieces{std::move(part)};
+      for(const auto& bed:planted)cut_out(pieces,bed);
+      for(const auto& line:pieces)if(std::abs(plan_area(line))>.03f)
+        slab(s.opaque,line,ground+.008f,.009f,p.joint);
     }
   }
-  s.register_range(first,static_cast<std::uint32_t>(s.opaque.indices.size()),{155,4,210},245);
+  const auto end=static_cast<std::uint32_t>(s.opaque.indices.size());
+  if(first<end) {
+    Vec3 lo=s.opaque.vertices[s.opaque.indices[first]].position,hi=lo;
+    for(auto i=first;i<end;++i) {
+      const auto v=s.opaque.vertices[s.opaque.indices[i]].position;
+      lo=vmin(lo,v);hi=vmax(hi,v);
+    }
+    const auto centre=(lo+hi)*.5f;float radius=0;
+    for(auto i=first;i<end;++i)radius=std::max(radius,length(s.opaque.vertices[s.opaque.indices[i]].position-centre));
+    s.register_range(first,end,centre,radius+.1f);
+  }
 }
 } // namespace
 
 const std::array<ArrivalTowerPlacement,6>& arrival_tower_placements() {return placements;}
 std::vector<Vec2> arrival_tower_lot_footprint(ArrivalLotId id,float setback) {
   const auto& t=placements[index(id)];const auto& cfg=lots[index(id)];
-  auto p=plan_transform(plan_rounded_rect(cfg.half.x,cfg.half.y,cfg.corner,12),t.centre,cfg.yaw);
-  // A shared clear pedestrian cut separates the neighboring small sockets.
-  const Vec2 direction=normalize(placements[2].centre-placements[1].centre);
-  const Vec2 middle=placements[1].centre+(placements[2].centre-placements[1].centre)*.44f;
-  if(id==ArrivalLotId::Blade)p=clip_halfplane(p,middle-direction*2,direction*-1.f);
-  if(id==ArrivalLotId::Ribbon) {
-    p=clip_halfplane(p,middle+direction*2,direction);
-    p=clip_halfplane(p,{123,0},{-1,0});
-  }
-  if(id==ArrivalLotId::Bronze) {
-    // Leave a real lane beyond the hero's complete rounded corner envelope.
-    const Vec2 normal=normalize(t.centre-placements[3].centre);
-    const auto hero=arrival_tower_lot_footprint(ArrivalLotId::Hero);
-    float lo,hi;plan_extent(hero,normal,&lo,&hi);
-    p=clip_halfplane(p,normal*(hi+3.0f),normal);
-  }
-  return inset(std::move(p),setback);
+  return inset(plan_transform(plan_rounded_rect(cfg.half.x,cfg.half.y,cfg.corner,12),t.centre,cfg.yaw),setback);
 }
 std::vector<std::vector<Vec2>> arrival_tower_cleanup_footprints() {
-  return ground_domains();
+  // Reserve the complete redevelopment and its new perimeter road beds.
+  return {riverfront::rectangle(179,560,-10,360)};
 }
 bool arrival_tower_lot_overlap(const std::vector<Vec2>& polygon,float margin) {
   for(const auto& t:placements)if(overlap(polygon,arrival_tower_lot_footprint(t.id,-margin)))return true;
   return false;
 }
 const std::vector<Vec2>& arrival_tower_public_walk() {
-  static const std::vector<Vec2> path{{24,106.5f},{24,119},{24,194},{24,252},{124,252},{124,213},{128,213}};
+  static const std::vector<Vec2> path{riverfront::point(224,130),riverfront::point(224,322),
+    riverfront::point(532,322),riverfront::point(532,24),riverfront::point(224,24),riverfront::point(224,130)};
   return path;
+}
+float arrival_tower_base_yaw() {return lot_yaw;}
+std::vector<Vec2> arrival_tower_block_footprint() {return riverfront::rectangle(218,538,18,338);}
+const std::array<ArrivalBlockRoad,6>& arrival_tower_block_roads() {
+  static const std::array<ArrivalBlockRoad,6> roads{{
+    {riverfront::point(179,0),riverfront::point(560,0),20},
+    {riverfront::point(194,-10),riverfront::point(194,360),30},
+    {riverfront::point(552,-10),riverfront::point(552,360),16},
+    {riverfront::point(179,352),riverfront::point(560,352),16},
+    {riverfront::point(209,172),riverfront::point(544,172),10},
+    {riverfront::point(325,172),riverfront::point(325,352),6}
+  }};return roads;
+}
+void build_arrival_block_roads(Scene& s) {
+  std::vector<std::vector<Vec2>> emitted;
+  for(const auto& road:arrival_tower_block_roads()) {
+    const auto shape=corridor(road.a,road.b,road.width*.5f);
+    std::vector<std::vector<Vec2>> parts{shape};
+    for(const auto& old:emitted)cut_out(parts,old);
+    for(const auto& part:parts)slab(s.opaque,part,ground-.11f,ground-.11f-.60f,M_ASPHALT);
+    emitted.push_back(shape);
+    if(road.width<10)continue;
+    const auto along=normalize(road.b-road.a);const float distance=length(road.b-road.a);
+    for(float run=24;run<distance-22;run+=10) {
+      const auto a=road.a+along*run,b=road.a+along*(run+3);
+      if(road.width==10&&std::abs(riverfront::coordinates(a).x-325)<8)continue;
+      slab(s.opaque,corridor(a,b,.055f),ground-.095f,.016f,M_LANE_WHITE);
+    }
+  }
+}
+void build_arrival_tower_base(Scene& s,Rng rng,ArrivalLotId id,bool detailed) {
+  const Palette p(s);const auto& t=placements[index(id)];
+  const auto begin=static_cast<std::uint32_t>(s.opaque.indices.size());
+  const auto outer=arrival_tower_lot_footprint(t.id,-2.3f);
+  slab(s.opaque,outer,ground,ground-.60f,p.paving);
+  if(t.id!=ArrivalLotId::Hero)occupied_socket(s,t,p,rng.child(1));
+  roof_gardens(s,t,p,rng.child(2),detailed);
+  s.register_range(begin,static_cast<std::uint32_t>(s.opaque.indices.size()),P3(t.centre,8),65);
 }
 void build_arrival_tower_lots(Scene& s,Rng rng,bool detailed,
                              const std::vector<std::vector<Vec2>>& ground_exclusions) {
   const Palette p(s);
+  build_arrival_block_roads(s);
   ground_courts(s,p,rng.child(300),detailed,ground_exclusions);
-  for(const auto& t:placements) {
-    const auto begin=static_cast<std::uint32_t>(s.opaque.indices.size());
-    const auto outer=arrival_tower_lot_footprint(t.id,-2.3f);
-    slab(s.opaque,outer,ground,ground-.60f,p.paving);
-    if(t.id!=ArrivalLotId::Hero)occupied_socket(s,t,p,rng.child(100+index(t.id)));
-    roof_gardens(s,t,p,rng.child(200+index(t.id)),detailed);
-    s.register_range(begin,static_cast<std::uint32_t>(s.opaque.indices.size()),P3(t.centre,8),65);
-  }
-  const auto& walk=arrival_tower_public_walk();
-  const auto begin=static_cast<std::uint32_t>(s.opaque.indices.size());
-  for(std::size_t i=0;i+1<walk.size();++i) {
-    const Vec2 a=walk[i],b=walk[i+1],n=normalize(Vec2{-(b-a).y,(b-a).x})*2;
-    slab(s.opaque,{a-n,b-n,b+n,a+n},ground,ground-.60f,p.paving);
-  }
-  for(auto q:walk)slab(s.opaque,plan_circle(2,24,q),ground,ground-.60f,p.paving);
-  s.register_range(begin,static_cast<std::uint32_t>(s.opaque.indices.size()),{70,2,184},100);
+  // Raised pedestrian tables carry the perimeter promenade across its two
+  // designed internal streets; the road bed remains founded beneath them.
+  for(const auto& crossing:std::array<std::array<float,4>,3>{{
+      {{222,226,166.5f,177.5f}},{{530,534,166.5f,177.5f}},{{321.5f,328.5f,320,324}}
+    }})slab(s.opaque,riverfront::rectangle(crossing[0],crossing[1],crossing[2],crossing[3]),ground,ground-.60f,p.paving);
+  for(const auto& t:placements)build_arrival_tower_base(s,rng.child(static_cast<unsigned>(t.id)),t.id,detailed);
 }
 } // namespace cb

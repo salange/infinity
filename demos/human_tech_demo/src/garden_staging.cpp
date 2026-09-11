@@ -437,7 +437,7 @@ void add_dry_fern_variant(Scene& sc) {
   sc.asset_library.resources.push_back(std::move(fern));
 }
 
-void stage_cinematic_gardens(Scene& sc, Rng rng) {
+void stage_cinematic_gardens(Scene& sc, Rng rng,bool include_landing) {
   if (sc.asset_library.resources.empty()) return;
   add_dry_fern_variant(sc);
   add_garden_hero_plants(sc);
@@ -446,6 +446,7 @@ void stage_cinematic_gardens(Scene& sc, Rng rng) {
   garden(sc, mats, rng.child(1));
   sc.register_range(first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
                     {-402.5f, kGardenFloor + 1, 395}, 36.f);
+  if(!include_landing)return;
   const auto landing_first = static_cast<std::uint32_t>(sc.opaque.indices.size());
   landing(sc, mats, rng.child(2));
   sc.register_range(landing_first, static_cast<std::uint32_t>(sc.opaque.indices.size()),
